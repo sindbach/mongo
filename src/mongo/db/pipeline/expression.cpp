@@ -600,6 +600,29 @@ const char* ExpressionArrayElemAt::getOpName() const {
     return "$arrayElemAt";
 }
 
+
+/* ------------------------- ExpressionObjectToArray -------------------------- */
+
+
+Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
+    const Value targetVal = vpOperand[0]->evaluateInternal(vars);
+    vector<Value> output; 
+
+    if (targetVal.getType() == Object) {
+        FieldIterator ir = targetVal.getDocument().fieldIterator();
+        while(ir.more()){
+            Document::FieldPair fp = ir.next();
+            output.push_back(Value(vector<Value> {Value(fp.first), fp.second}));
+        }
+    }
+    return Value(output);
+}
+
+REGISTER_EXPRESSION(objectToArray, ExpressionObjectToArray::parse);
+const char* ExpressionObjectToArray::getOpName() const {
+    return "$objectToArray";
+}
+
 /* ------------------------- ExpressionCeil -------------------------- */
 
 Value ExpressionCeil::evaluateNumericArg(const Value& numericArg) const {
