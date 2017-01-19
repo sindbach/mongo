@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2017 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,54 +26,28 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
-
 #include "mongo/platform/basic.h"
 
-#include "mongo/s/query/router_stage_merge.h"
-
-#include "mongo/util/scopeguard.h"
+#include "mongo/db/repl/data_replicator_external_state_initial_sync.h"
 
 namespace mongo {
+namespace repl {
 
-RouterStageMerge::RouterStageMerge(executor::TaskExecutor* executor,
-                                   ClusterClientCursorParams&& params)
-    : _executor(executor), _arm(executor, std::move(params)) {}
-
-StatusWith<ClusterQueryResult> RouterStageMerge::next() {
-    while (!_arm.ready()) {
-        auto nextEventStatus = _arm.nextEvent();
-        if (!nextEventStatus.isOK()) {
-            return nextEventStatus.getStatus();
-        }
-        auto event = nextEventStatus.getValue();
-
-        // Block until there are further results to return.
-        _executor->waitForEvent(event);
-    }
-
-    return _arm.nextReady();
+DataReplicatorExternalStateInitialSync::DataReplicatorExternalStateInitialSync(
+    ReplicationCoordinator* replicationCoordinator,
+    ReplicationCoordinatorExternalState* replicationCoordinatorExternalState)
+    : DataReplicatorExternalStateImpl(replicationCoordinator, replicationCoordinatorExternalState) {
 }
 
-void RouterStageMerge::kill() {
-    auto killEvent = _arm.kill();
-    if (!killEvent) {
-        // Mongos is shutting down.
-        return;
-    }
-    _executor->waitForEvent(killEvent);
+bool DataReplicatorExternalStateInitialSync::shouldStopFetching(const HostAndPort&,
+                                                                const rpc::ReplSetMetadata&) {
+
+    // Since initial sync does not allow for sync source changes, it should not check if there are
+    // better sync sources. If there is a problem on the sync source, it will manifest itself in the
+    // cloning phase as well, and cause a failure there.
+
+    return false;
 }
 
-bool RouterStageMerge::remotesExhausted() {
-    return _arm.remotesExhausted();
-}
-
-Status RouterStageMerge::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
-    return _arm.setAwaitDataTimeout(awaitDataTimeout);
-}
-
-void RouterStageMerge::setOperationContext(OperationContext* txn) {
-    return _arm.setOperationContext(txn);
-}
-
+}  // namespace repl
 }  // namespace mongo

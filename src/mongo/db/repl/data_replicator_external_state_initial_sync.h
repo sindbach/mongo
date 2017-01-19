@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2017 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,54 +26,26 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+#pragma once
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/s/query/router_stage_merge.h"
-
-#include "mongo/util/scopeguard.h"
+#include "mongo/db/repl/data_replicator_external_state_impl.h"
 
 namespace mongo {
+namespace repl {
 
-RouterStageMerge::RouterStageMerge(executor::TaskExecutor* executor,
-                                   ClusterClientCursorParams&& params)
-    : _executor(executor), _arm(executor, std::move(params)) {}
+/**
+ * Data replicator external state implementation for initial sync.
+ */
 
-StatusWith<ClusterQueryResult> RouterStageMerge::next() {
-    while (!_arm.ready()) {
-        auto nextEventStatus = _arm.nextEvent();
-        if (!nextEventStatus.isOK()) {
-            return nextEventStatus.getStatus();
-        }
-        auto event = nextEventStatus.getValue();
+class DataReplicatorExternalStateInitialSync : public DataReplicatorExternalStateImpl {
+public:
+    DataReplicatorExternalStateInitialSync(
+        ReplicationCoordinator* replicationCoordinator,
+        ReplicationCoordinatorExternalState* replicationCoordinatorExternalState);
 
-        // Block until there are further results to return.
-        _executor->waitForEvent(event);
-    }
+    bool shouldStopFetching(const HostAndPort& source,
+                            const rpc::ReplSetMetadata& metadata) override;
+};
 
-    return _arm.nextReady();
-}
-
-void RouterStageMerge::kill() {
-    auto killEvent = _arm.kill();
-    if (!killEvent) {
-        // Mongos is shutting down.
-        return;
-    }
-    _executor->waitForEvent(killEvent);
-}
-
-bool RouterStageMerge::remotesExhausted() {
-    return _arm.remotesExhausted();
-}
-
-Status RouterStageMerge::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
-    return _arm.setAwaitDataTimeout(awaitDataTimeout);
-}
-
-void RouterStageMerge::setOperationContext(OperationContext* txn) {
-    return _arm.setOperationContext(txn);
-}
-
+}  // namespace repl
 }  // namespace mongo
