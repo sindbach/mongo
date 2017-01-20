@@ -47,4 +47,21 @@
     ];
 
     assert.eq(results, expectedResults);
+
+    coll.drop(); 
+
+    // Turns to array from the root of the document
+    assert.writeOK(coll.insert({_id: 0, a: 1, b: 2, c: 3}))
+    results = coll.aggregate([{$sort: {_id: 1}},
+                                  {
+                                      $project: {
+                                          document: {$objectToArray: '$$ROOT'}
+                                      }
+                                  },
+                                 ]).toArray();
+    expectedResults = [
+        {_id:0, document: [["_id", 0], ["a", 1], ["b", 2], ["c", 3]]}
+    ];
+    assert.eq(results, expectedResults);
+
 }());

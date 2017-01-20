@@ -607,12 +607,11 @@ const char* ExpressionArrayElemAt::getOpName() const {
 Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
     const Value targetVal = vpOperand[0]->evaluateInternal(vars);
     vector<Value> output; 
-
     if (targetVal.getType() == Object) {
-        FieldIterator ir = targetVal.getDocument().fieldIterator();
-        while(ir.more()){
-            Document::FieldPair fp = ir.next();
-            output.push_back(Value(vector<Value> {Value(fp.first), fp.second}));
+        FieldIterator iter = targetVal.getDocument().fieldIterator();
+        while(iter.more()){
+            Document::FieldPair pair = iter.next();
+            output.push_back(Value(vector<Value> {Value(pair.first), pair.second}));
         }
     }
     return Value(output);
