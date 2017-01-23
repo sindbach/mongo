@@ -600,6 +600,57 @@ const char* ExpressionArrayElemAt::getOpName() const {
     return "$arrayElemAt";
 }
 
+
+
+/* ------------------------- ExpressionArrayToObject -------------------------- */
+
+
+Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
+    const Value input = vpOperand[0]->evaluateInternal(vars);
+
+    if (input.nullish()){
+        return Value(BSONNULL);
+    }
+
+    uassert(40372, 
+            str::stream() << "$arrayToObject requires an array input, found: "
+                          << typeName(input.getType()), 
+            input.isArray());
+
+    MutableDocument output; 
+
+    const vector<Value>& array = input.getArray(); 
+    const size_t n = array.size(); 
+    for (size_t i = 0; i < n; ++i) {
+
+        uassert(40373, 
+                str::stream() << "$arrayToObject requires an array of array input, found: "
+                              << typeName(array[i].getType()), 
+                array[i].isArray());
+
+        const vector<Value>& valArray = array[i].getArray();
+
+        uassert(40374, 
+                str::stream() << "$arrayToObject requires an array of two-elements-size array input, found: "
+                              << valArray.size(), 
+                (valArray.size() == 2));
+
+        uassert(40375, 
+                str::stream() << "$arrayToObject first value of array is expected to be string, found: "
+                              << typeName(valArray[0].getType()), 
+                (valArray[0].getType()==String));
+
+        output.addField(valArray[0].getString(), valArray[1]);
+    }
+
+    return output.freezeToValue();
+}
+
+REGISTER_EXPRESSION(arrayToObject, ExpressionArrayToObject::parse);
+const char* ExpressionArrayToObject::getOpName() const {
+    return "$arrayToObject";
+}
+
 /* ------------------------- ExpressionCeil -------------------------- */
 
 Value ExpressionCeil::evaluateNumericArg(const Value& numericArg) const {
