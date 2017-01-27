@@ -254,12 +254,29 @@ functions:
         if [ "Windows_NT" = "$OS" ]; then
             typeperf -qx PhysicalDisk | grep Disk | grep -v _Total > disk_counters.txt
             typeperf -cf disk_counters.txt -si 5 -o mongo-diskstats
-        # See if iostat is available.
-        elif which iostat 2>&1 > /dev/null; then
-            iostat -d 5 > mongo-diskstats
-        # Fall back to vmstat if iostat is not available.
+        # Solaris: iostat -T d option for timestamp.
+        elif iostat -T d -Mx > /dev/null 2>&1; then
+            iostat -T d -Mx 5 > mongo-diskstats
+        # Linux: iostat -t option for timestamp.
+        elif iostat -tdmx > /dev/null 2>&1; then
+            iostat -tdmx 5 > mongo-diskstats
+        # OSX: Simulate the iostat timestamp.
+        elif iostat -d > /dev/null 2>&1; then
+            while [ 1 ]
+            do
+                date +'%m/%d/%Y %I:%M:%S %p' >> mongo-diskstats
+                iostat -d >> mongo-diskstats
+                printf "\n" >> mongo-diskstats
+                sleep 5
+            done
+        # Check if vmstat -t is available.
+        elif vmstat -td  > /dev/null 2>&1; then
+            vmstat -td 5 > mongo-diskstats
+        # Check if vmstat -T d is available.
+        elif vmstat -T d > /dev/null 2>&1; then
+            vmstat -T d 5 > mongo-diskstats
         else
-            vmstat -d 5 > mongo-diskstats
+            printf "Cannot collect mongo-diskstats on this platform\n"
         fi
 
   # Run a monitor process as a background, system task to periodically
@@ -508,9 +525,6 @@ functions:
         fi
         set -o errexit
 
-        # Combine the exclusion tags from both the variant and the task.
-        extra_args="$extra_args --excludeWithAnyTags=${task_excluded_tags},${variant_excluded_flags}"
-
         path_value="$PATH"
         if [ ${variant_path_suffix} ]; then
           path_value="$path_value:${variant_path_suffix}"
@@ -727,13 +741,13 @@ functions:
         cp -f src/mongo/db/modules/enterprise/docs/mongod.conf.master snmpconf/mongod.conf
 
   "cleanup environment" :
-    - command: shell.exec
-      params:
-        script: |
-          set -o errexit
-          set -o verbose
+    command: shell.exec
+    params:
+      script: |
+        set -o errexit
+        set -o verbose
 
-          rm -rf src /data/db/* mongo-coredumps.tgz ~/.aws
+        rm -rf src /data/db/* mongo-diskstats* mongo-coredumps.tgz ~/.aws
 
   "kill processes" :
     command: shell.exec
@@ -831,40 +845,25 @@ functions:
         export KITCHEN_SSH_KEY_ID="${kitchen_ssh_key_id}"
         export KITCHEN_SUBNET="${kitchen_subnet}"
 
-        kitchen_variant=${packager_distro}
-
-        # `kitchen test` will test all variants if $kitchen_variant is empty, so exit early if $kitchen_variant is empty
-        if [ -z "$kitchen_variant" ]; then
-          echo "could not find a variant name, exiting"
-          exit 1
-        fi
-
-        kitchen create $kitchen_variant
-
-        # retry converge in case the instance isn't fully ready
-        converged="false"
         for i in {1..3}
         do
-          kitchen converge "$kitchen_variant"
-          if [ $? -eq 0 ]; then
-            converged="true"
-            break
+          if ! kitchen converge "${packager_distro}"; then
+            converged="false"
+            kitchen destroy "${packager_distro}" || true
+            sleep 30
           else
-            sleep 10
+            break
           fi
         done
 
-        if [ "$converged" = "true" ]; then
-          kitchen verify "$kitchen_variant"
-          ret=$?
-          kitchen destroy "$kitchen_variant"
-          exit $ret
-        else
-          echo "converge failed, running kitchen destroy and then exiting"
-          kitchen destroy "$kitchen_variant"
-          exit 1
+        test "$converged" != "false"
+
+        if ! kitchen verify "${packager_distro}"; then
+          verified="false"
         fi
 
+        kitchen destroy "${packager_distro}" || true
+        test "$verified" != "false"
 
 pre:
   - func: "kill processes"
@@ -1382,6 +1381,19 @@ tasks:
       <<: *jstestfuzz_config_vars
       resmoke_args: --suites=jstestfuzz --storageEngine=wiredTiger
 
+## jstestfuzz concurrent mmapv1 ##
+- <<: *jstestfuzz_template
+  name: jstestfuzz_concurrent
+  commands:
+  - func: "do setup"
+  - func: "run jstestfuzz"
+    vars:
+      jstestfuzz_vars: --numGeneratedFiles 75
+  - <<: *run_jstestfuzz_tests
+    vars:
+      <<: *jstestfuzz_config_vars
+      resmoke_args: --suites=jstestfuzz --storageEngine=mmapv1 --numClientsPerFixture=10
+
 ## jstestfuzz concurrent WT ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_WT
@@ -1395,6 +1407,19 @@ tasks:
       <<: *jstestfuzz_config_vars
       resmoke_args: --suites=jstestfuzz --storageEngine=wiredTiger --numClientsPerFixture=10
 
+## jstestfuzz concurrent replica set mmapv1 ##
+- <<: *jstestfuzz_template
+  name: jstestfuzz_concurrent_replication
+  commands:
+  - func: "do setup"
+  - func: "run jstestfuzz"
+    vars:
+      jstestfuzz_vars: --numGeneratedFiles 75
+  - <<: *run_jstestfuzz_tests
+    vars:
+      <<: *jstestfuzz_config_vars
+      resmoke_args: --suites=jstestfuzz_replication --storageEngine=mmapv1 --numClientsPerFixture=10
+
 ## jstestfuzz concurrent replica set WT ##
 - <<: *jstestfuzz_template
   name: jstestfuzz_concurrent_replication_WT
@@ -1407,6 +1432,19 @@ tasks:
     vars:
       <<: *jstestfuzz_config_vars
       resmoke_args: --suites=jstestfuzz_replication --storageEngine=wiredTiger --numClientsPerFixture=10
+
+## jstestfuzz concurrent sharded cluster mmapv1 ##
+- <<: *jstestfuzz_template
+  name: jstestfuzz_concurrent_sharded
+  commands:
+  - func: "do setup"
+  - func: "run jstestfuzz"
+    vars:
+      jstestfuzz_vars: --numGeneratedFiles 75
+  - <<: *run_jstestfuzz_tests
+    vars:
+      <<: *jstestfuzz_config_vars
+      resmoke_args: --suites=jstestfuzz_sharded --storageEngine=mmapv1 --numClientsPerFixture=10
 
 ## jstestfuzz concurrent sharded cluster WT ##
 - <<: *jstestfuzz_template
@@ -1569,7 +1607,6 @@ tasks:
     vars:
       resmoke_args: --suites=aggregation_facet_unwind_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
-      task_excluded_tags: do_not_wrap_aggregations_in_facets
 
 - <<: *task_template
   name: aggregation_read_concern_majority_passthrough_WT
@@ -1743,9 +1780,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=gle_auth --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=mmapv1
+      resmoke_args: --suites=gle_auth --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=mmapv1 --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: gle_auth_WT
@@ -1753,9 +1789,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=gle_auth --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger
+      resmoke_args: --suites=gle_auth --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: gle_auth_write_cmd
@@ -1781,9 +1816,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=mmapv1
+      resmoke_args: --suites=gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=mmapv1 --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: gle_auth_basics_passthrough_WT
@@ -1791,9 +1825,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger
+      resmoke_args: --suites=gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: gle_auth_basics_passthrough_write_cmd
@@ -1856,9 +1889,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=sharding_gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=mmapv1
+      resmoke_args: --suites=sharding_gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=mmapv1 --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: sharding_gle_auth_basics_passthrough_WT
@@ -1868,9 +1900,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=sharding_gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger
+      resmoke_args: --suites=sharding_gle_auth_basics_passthrough --shellWriteMode=legacy --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: sharding_gle_auth_basics_passthrough_write_cmd
@@ -1940,9 +1971,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=mmapv1
+      resmoke_args: --suites=core --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=mmapv1 --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: jsCore_compatibility_WT
@@ -1952,9 +1982,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=wiredTiger
+      resmoke_args: --suites=core --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: jsCore_compression
@@ -2169,9 +2198,8 @@ tasks:
   - func: "run tests"
     vars:
       task_path_suffix: /data/multiversion
-      resmoke_args: --suites=multiversion --storageEngine=mmapv1
+      resmoke_args: --suites=multiversion --storageEngine=mmapv1 --excludeWithAnyTags=requires_wiredtiger
       run_multiple_jobs: true
-      task_excluded_tags: requires_wiredtiger
 
 - <<: *task_template
   name: multiversion_WT
@@ -2181,9 +2209,8 @@ tasks:
   - func: "run tests"
     vars:
       task_path_suffix: /data/multiversion
-      resmoke_args: --suites=multiversion --storageEngine=wiredTiger
+      resmoke_args: --suites=multiversion --storageEngine=wiredTiger --excludeWithAnyTags=requires_mmapv1
       run_multiple_jobs: true
-      task_excluded_tags: requires_mmapv1
 
 - <<: *task_template
   name: multiversion_multistorage_engine
@@ -2338,9 +2365,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=sharding_jscore_passthrough --storageEngine=wiredTiger --shellReadMode=legacy --shellWriteMode=compatibility
+      resmoke_args: --suites=sharding_jscore_passthrough --storageEngine=wiredTiger --shellReadMode=legacy --shellWriteMode=compatibility --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: parallel
@@ -2370,8 +2396,7 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=parallel --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=mmapv1
-      task_excluded_tags: requires_find_command
+      resmoke_args: --suites=parallel --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=mmapv1 --excludeWithAnyTags=requires_find_command
 
 - <<: *task_template
   name: parallel_compatibility_WT
@@ -2381,8 +2406,7 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=parallel --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=wiredTiger
-      task_excluded_tags: requires_find_command
+      resmoke_args: --suites=parallel --shellReadMode=legacy --shellWriteMode=compatibility --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
 
 - <<: *task_template
   name: concurrency
@@ -2643,9 +2667,8 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=sharding --shellReadMode=legacy --storageEngine=wiredTiger
+      resmoke_args: --suites=sharding --shellReadMode=legacy --storageEngine=wiredTiger --excludeWithAnyTags=requires_find_command
       run_multiple_jobs: true
-      task_excluded_tags: requires_find_command
 
 - <<: *task_template
   name: sharding_auth
@@ -3363,8 +3386,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -3576,8 +3602,7 @@ buildvariants:
     push_arch: x86_64
     compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    test_flags: --nojournal
-    variant_excluded_flags: requires_journaling
+    test_flags: --nojournal --excludeWithAnyTags=requires_journaling
     use_scons_cache: true
     build_mongoreplay: true
   tasks:
@@ -3604,8 +3629,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -3757,8 +3785,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -3886,8 +3917,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -4006,8 +4040,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -4076,8 +4113,7 @@ buildvariants:
     push_name: linux
     push_arch: arm64-enterprise-ubuntu1604
     compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=armv8-a+crc -mtune=generic" --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
-    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_mmapv1
+    num_jobs_available: $(grep -c ^processor /proc/cpuinfo) --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: arm64
@@ -4154,8 +4190,7 @@ buildvariants:
     push_name: linux
     push_arch: arm64-ubuntu1604
     compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --release CCFLAGS="-march=armv8-a+crc -mtune=generic" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
-    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_mmapv1
+    num_jobs_available: $(grep -c ^processor /proc/cpuinfo) --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager.py
     packager_arch: arm64
@@ -4235,7 +4270,7 @@ buildvariants:
     push_arch: ppc64le-enterprise-ubuntu1604
     compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) --release CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: 2
-    variant_excluded_flags: requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: ppc64le
@@ -4316,7 +4351,7 @@ buildvariants:
     push_arch: s390x-enterprise-ubuntu1604
     compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: 2
-    variant_excluded_flags: requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: s390x
@@ -4447,8 +4482,11 @@ buildvariants:
   - name: jsCore_decimal_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -4553,8 +4591,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -4672,8 +4713,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -4782,8 +4826,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -5026,8 +5073,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -5067,8 +5117,7 @@ buildvariants:
     content_type: application/zip
     compile_flags: --release --ssl MONGO_DISTMOD=windows-64 CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    test_flags: --storageEngine=inMemory
-    variant_excluded_flags: requires_persistence,requires_journaling
+    test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_journaling
     ext: zip
     use_scons_cache: true
   tasks:
@@ -5093,8 +5142,11 @@ buildvariants:
   - name: jsCore_small_oplog
   - name: jsCore_small_oplog_rs
   - name: jstestfuzz
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication_WT
   - name: jstestfuzz_sharded_WT
@@ -5155,8 +5207,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -5287,8 +5342,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -5386,8 +5444,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -5501,8 +5562,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -5642,8 +5706,11 @@ buildvariants:
     - rhel62-large
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6013,8 +6080,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6102,8 +6172,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6223,8 +6296,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6308,7 +6384,7 @@ buildvariants:
     # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
     compile_flags: --ssl MONGO_DISTMOD=rhel71 --release -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: $(echo "$(grep -c processor /proc/cpuinfo)/4" | bc)
-    variant_excluded_flags: requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: ppc64le
@@ -6447,7 +6523,7 @@ buildvariants:
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
     compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: 2
-    variant_excluded_flags: requires_mmapv1
+    test_flags: -excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: s390x
@@ -6615,8 +6691,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6684,8 +6763,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6744,8 +6826,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6828,8 +6913,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -6866,7 +6954,7 @@ buildvariants:
     push_arch: s390x-enterprise-suse12
     compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: s390x
@@ -7011,8 +7099,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7104,8 +7195,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7140,7 +7234,7 @@ buildvariants:
     push_arch: s390x-enterprise-suse11
     compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: s390x
@@ -7279,8 +7373,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7387,8 +7484,11 @@ buildvariants:
   - name: jsCore_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7468,8 +7568,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7528,8 +7631,11 @@ buildvariants:
   - name: jsCore_auth
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7614,8 +7720,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7737,8 +7846,11 @@ buildvariants:
   - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT
@@ -7810,10 +7922,9 @@ buildvariants:
     gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
     tooltags: "-tags 'ssl sasl'"
     rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
-    test_flags: --storageEngine=inMemory
+    test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_journaling
     compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_persistence,requires_journaling
     use_scons_cache: true
     build_mongoreplay: true
   tasks:
@@ -7895,10 +8006,9 @@ buildvariants:
   - rhel62-small
   batchtime: 1440 # 1 day
   expansions:
-    test_flags: --storageEngine=ephemeralForTest
+    test_flags: --storageEngine=ephemeralForTest --excludeWithAnyTags=requires_persistence,requires_fsync,SERVER-21420,SERVER-21658,requires_journaling
     compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_persistence,requires_fsync,SERVER-21420,SERVER-21658,requires_journaling
     use_scons_cache: true
     build_mongoreplay: true
   tasks:
@@ -7983,8 +8093,7 @@ buildvariants:
     # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
     compile_flags: --dbg=on --opt=on --ssl MONGO_DISTMOD=rhel71 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: $(echo "$(grep -c processor /proc/cpuinfo)/4" | bc)
-    test_flags: --storageEngine=inMemory
-    variant_excluded_flags: requires_persistence,requires_mmapv1,requires_journaling
+    test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling
     build_mongoreplay: true
   tasks:
   - name: compile
@@ -8064,8 +8173,7 @@ buildvariants:
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
     compile_flags: --dbg=on --opt=on --ssl --link-model=static MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: 2
-    test_flags: --storageEngine=inMemory
-    variant_excluded_flags: requires_persistence,requires_mmapv1,requires_journaling
+    test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling
     build_mongoreplay: true
   tasks:
   - name: compile
@@ -8378,8 +8486,11 @@ buildvariants:
   - name: compile_all
   - name: jstestfuzz
   - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication
   - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded
   - name: jstestfuzz_concurrent_sharded_WT
   - name: jstestfuzz_replication
   - name: jstestfuzz_replication_WT

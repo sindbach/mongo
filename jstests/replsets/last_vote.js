@@ -61,9 +61,13 @@
         var term = getLatestOp(primary).t;
         jsTestLog("Last vote should have term: " + term + " and candidate: " + primary.host +
                   ", index: " + rst.getNodeId(primary));
-        rst.nodes.forEach(function(node) {
-            assertNodeHasLastVote(node, term, primary);
-        });
+        // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the
+        // correct size, so secondaries didn't vote in the first election.
+        if (i > 0) {
+            rst.nodes.forEach(function(node) {
+                assertNodeHasLastVote(node, term, primary);
+            });
+        }
         assert.throws(function() {
             primary.adminCommand({replSetStepDown: 5, force: true});
         });
@@ -87,6 +91,7 @@
     conf.version++;
     conf.members[0].priority = 0;
     reconfig(rst, conf);
+    rst.awaitNodesAgreeOnConfigVersion();
 
     jsTestLog("Restarting node 0 as a standalone");
     var node0 = rst.restart(0, {noReplSet: true});  // Restart as a standalone node.
@@ -108,7 +113,7 @@
         dryRun: true,
         term: term - 1,
         candidateIndex: 1,
-        configVersion: 2,
+        configVersion: conf.version,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -130,7 +135,7 @@
         dryRun: true,
         term: term,
         candidateIndex: 1,
-        configVersion: 2,
+        configVersion: conf.version,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -152,7 +157,7 @@
         dryRun: false,
         term: term,
         candidateIndex: 1,
-        configVersion: 2,
+        configVersion: conf.version,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -174,7 +179,7 @@
         dryRun: false,
         term: term + 1,
         candidateIndex: 1,
-        configVersion: 2,
+        configVersion: conf.version,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -196,7 +201,7 @@
         dryRun: true,
         term: term + 2,
         candidateIndex: 1,
-        configVersion: 2,
+        configVersion: conf.version,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,

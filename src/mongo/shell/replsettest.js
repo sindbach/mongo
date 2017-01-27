@@ -360,6 +360,13 @@ var ReplSetTest = function(opts) {
         return ts1.getTime() < ts2.getTime();
     }
 
+    /*
+     * Returns true if the node can be elected primary of a replica set.
+     */
+    function _isElectable(node) {
+        return !node.arbiterOnly && (node.priority === undefined || node.priority != 0);
+    }
+
     /**
      * Returns list of nodes as host:port strings.
      */
@@ -532,15 +539,15 @@ var ReplSetTest = function(opts) {
     /**
      * Blocks until all nodes agree on who the primary is.
      */
-    this.awaitNodesAgreeOnPrimary = function(timeout) {
+    this.awaitNodesAgreeOnPrimary = function(timeout, nodes) {
         timeout = timeout || self.kDefaultTimeoutMS;
+        nodes = nodes || self.nodes;
 
         assert.soonNoExcept(function() {
             var primary = -1;
 
-            for (var i = 0; i < self.nodes.length; i++) {
-                var replSetGetStatus =
-                    self.nodes[i].getDB("admin").runCommand({replSetGetStatus: 1});
+            for (var i = 0; i < nodes.length; i++) {
+                var replSetGetStatus = nodes[i].getDB("admin").runCommand({replSetGetStatus: 1});
                 var nodesPrimary = -1;
                 for (var j = 0; j < replSetGetStatus.members.length; j++) {
                     if (replSetGetStatus.members[j].state === ReplSetTest.State.PRIMARY) {
@@ -697,13 +704,62 @@ var ReplSetTest = function(opts) {
         var cmdKey = initCmd || 'replSetInitiate';
         timeout = timeout || self.kDefaultTimeoutMS;
 
+        // Throw an exception if nodes[0] is unelectable in the given config.
+        if (!_isElectable(config.members[0])) {
+            throw Error("The node at index 0 must be electable");
+        }
+
+        // Start up a single node replica set then reconfigure to the correct size (if the config
+        // contains more than 1 node), so the primary is elected more quickly.
+        var originalMembers, originalSettings;
+        if (config.members && config.members.length > 1) {
+            originalMembers = config.members.slice();
+            config.members = config.members.slice(0, 1);
+            originalSettings = config.settings;
+            delete config.settings;  // Clear settings to avoid tags referencing sliced nodes.
+        }
         this._setDefaultConfigOptions(config);
 
         cmd[cmdKey] = config;
         printjson(cmd);
 
         assert.commandWorked(master.runCommand(cmd), tojson(cmd));
-        this.awaitSecondaryNodes(timeout);
+        this.getPrimary();  // Blocks until there is a primary.
+
+        // Reconfigure the set to contain the correct number of nodes (if necessary).
+        if (originalMembers) {
+            config.members = originalMembers;
+            if (originalSettings) {
+                config.settings = originalSettings;
+            }
+            config.version = 2;
+
+            // Nodes started with the --configsvr flag must have configsvr = true in their config.
+            if (this.nodes[0].hasOwnProperty("fullOptions") &&
+                this.nodes[0].fullOptions.hasOwnProperty("configsvr")) {
+                config.configsvr = true;
+            }
+
+            cmd = {replSetReconfig: config};
+            print("Reconfiguring replica set to add in other nodes");
+            printjson(cmd);
+
+            // replSetInitiate and replSetReconfig commands can fail with a NodeNotFound error
+            // if a heartbeat times out during the quorum check. We retry three times to reduce
+            // the chance of failing this way.
+            assert.retry(() => {
+                const res = master.runCommand(cmd);
+                if (res.ok === 1) {
+                    return true;
+                }
+
+                assert.commandFailedWithCode(
+                    res, ErrorCodes.NodeNotFound, "replSetReconfig during initiate failed");
+                return false;
+            }, "replSetReconfig during initiate failed", 3, 5 * 1000);
+
+            this.awaitSecondaryNodes(timeout);
+        }
 
         // Setup authentication if running test with authentication
         if ((jsTestOptions().keyFile) && cmdKey == 'replSetInitiate') {
@@ -743,6 +799,28 @@ var ReplSetTest = function(opts) {
                 throw e;
             }
         }
+    };
+
+    /**
+     * Blocks until all nodes in the replica set have the same config version as the primary.
+     **/
+    this.awaitNodesAgreeOnConfigVersion = function(timeout) {
+        timeout = timeout || this.kDefaultTimeoutMS;
+
+        assert.soonNoExcept(function() {
+            var primaryVersion = self.getPrimary().adminCommand({ismaster: 1}).setVersion;
+
+            for (var i = 0; i < self.nodes.length; i++) {
+                var version = self.nodes[i].adminCommand({ismaster: 1}).setVersion;
+                assert.eq(version,
+                          primaryVersion,
+                          "waiting for secondary node " + self.nodes[i].host +
+                              " with config version of " + version +
+                              " to match the version of the primary " + primaryVersion);
+            }
+
+            return true;
+        }, "Awaiting nodes to agree on config version", timeout);
     };
 
     /**
@@ -840,7 +918,7 @@ var ReplSetTest = function(opts) {
                               ", but expected config version #" + masterConfigVersion);
 
                         if (slaveConfigVersion > masterConfigVersion) {
-                            master = this.getPrimary();
+                            master = self.getPrimary();
                             masterConfigVersion =
                                 master.getDB("local")['system.replset'].findOne().version;
                             masterName = master.toString().substr(14);  // strip "connection to "
@@ -1633,7 +1711,7 @@ var ReplSetTest = function(opts) {
      * Constructor, which initializes the ReplSetTest object by starting new instances.
      */
     function _constructStartNewInstances(opts) {
-        self.name = opts.name || "testReplSet";
+        self.name = opts.name || jsTest.name();
         print('Starting new replica set ' + self.name);
 
         self.useHostName = opts.useHostName == undefined ? true : opts.useHostName;

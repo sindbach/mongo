@@ -115,25 +115,6 @@ CollectionCloner::CollectionCloner(executor::TaskExecutor* executor,
                               numInitialSyncListIndexesAttempts.load(),
                               executor::RemoteCommandRequest::kNoTimeout,
                               RemoteCommandRetryScheduler::kAllRetriableErrors)),
-      _findFetcher(
-          _executor,
-          _source,
-          _sourceNss.db().toString(),
-          // noCursorTimeout true, large batchSize (for older server versions to get larger batch)
-          BSON("find" << _sourceNss.coll() << "noCursorTimeout" << true << "batchSize"
-                      << batchSize),
-          stdx::bind(&CollectionCloner::_findCallback,
-                     this,
-                     stdx::placeholders::_1,
-                     stdx::placeholders::_2,
-                     stdx::placeholders::_3),
-          rpc::ServerSelectionMetadata(true, boost::none).toBSON(),
-          RemoteCommandRequest::kNoTimeout,
-          RemoteCommandRetryScheduler::makeRetryPolicy(
-              numInitialSyncCollectionFindAttempts.load(),
-              executor::RemoteCommandRequest::kNoTimeout,
-              RemoteCommandRetryScheduler::kAllRetriableErrors)),
-
       _indexSpecs(),
       _documents(),
       _dbWorkTaskRunner(_dbWorkThreadPool),
@@ -181,7 +162,7 @@ std::string CollectionCloner::getDiagnosticString() const {
     output << " collection options: " << _options.toBSON();
     output << " active: " << _isActive_inlock();
     output << " listIndexes fetcher: " << _listIndexesFetcher.getDiagnosticString();
-    output << " find fetcher: " << _findFetcher.getDiagnosticString();
+    output << " find fetcher: " << (_findFetcher ? _findFetcher->getDiagnosticString() : "");
     return output;
 }
 
@@ -192,6 +173,11 @@ bool CollectionCloner::isActive() const {
 
 bool CollectionCloner::_isActive_inlock() const {
     return State::kRunning == _state || State::kShuttingDown == _state;
+}
+
+bool CollectionCloner::_isShuttingDown() const {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return State::kShuttingDown == _state;
 }
 
 Status CollectionCloner::startup() noexcept {
@@ -236,9 +222,15 @@ void CollectionCloner::shutdown() {
             return;
     }
 
+    _cancelRemainingWork_inlock();
+}
+
+void CollectionCloner::_cancelRemainingWork_inlock() {
     _countScheduler.shutdown();
     _listIndexesFetcher.shutdown();
-    _findFetcher.shutdown();
+    if (_findFetcher) {
+        _findFetcher->shutdown();
+    }
     _dbWorkTaskRunner.cancel();
 }
 
@@ -406,7 +398,8 @@ void CollectionCloner::_listIndexesCallback(const Fetcher::QueryResponseStatus& 
 
 void CollectionCloner::_findCallback(const StatusWith<Fetcher::QueryResponse>& fetchResult,
                                      Fetcher::NextAction* nextAction,
-                                     BSONObjBuilder* getMoreBob) {
+                                     BSONObjBuilder* getMoreBob,
+                                     std::shared_ptr<OnCompletionGuard> onCompletionGuard) {
     if (!fetchResult.isOK()) {
         // Wait for active inserts to complete.
         waitForDbWorker();
@@ -416,7 +409,9 @@ void CollectionCloner::_findCallback(const StatusWith<Fetcher::QueryResponse>& f
                                        << "' there was an error '"
                                        << fetchResult.getStatus().reason()
                                        << "'"};
-        _finishCallback(newStatus);
+
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, newStatus);
         return;
     }
 
@@ -430,15 +425,21 @@ void CollectionCloner::_findCallback(const StatusWith<Fetcher::QueryResponse>& f
                   << ", cursorId:" << batchData.cursorId << ", isLastBatch:" << lastBatch;
     }
 
-    auto&& scheduleResult = _scheduleDbWorkFn(stdx::bind(
-        &CollectionCloner::_insertDocumentsCallback, this, stdx::placeholders::_1, lastBatch));
+    auto&& scheduleResult =
+        _scheduleDbWorkFn(stdx::bind(&CollectionCloner::_insertDocumentsCallback,
+                                     this,
+                                     stdx::placeholders::_1,
+                                     lastBatch,
+                                     onCompletionGuard));
     if (!scheduleResult.isOK()) {
         Status newStatus{scheduleResult.getStatus().code(),
                          str::stream() << "While cloning collection '" << _sourceNss.ns()
                                        << "' there was an error '"
                                        << scheduleResult.getStatus().reason()
                                        << "'"};
-        _finishCallback(newStatus);
+
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, newStatus);
         return;
     }
 
@@ -455,7 +456,16 @@ void CollectionCloner::_beginCollectionCallback(const executor::TaskExecutor::Ca
         return;
     }
 
-    UniqueLock lk(_mutex);
+    // This completion guard invokes _finishCallback on destruction.
+    auto cancelRemainingWorkInLock = [this]() { _cancelRemainingWork_inlock(); };
+    auto finishCallbackFn = [this](const Status& status) { _finishCallback(status); };
+    auto onCompletionGuard =
+        std::make_shared<OnCompletionGuard>(cancelRemainingWorkInLock, finishCallbackFn);
+
+    // Lock guard must be declared after completion guard. If there is an error in this function
+    // that will cause the destructor of the completion guard to run, the destructor must be run
+    // outside the mutex. This is a necessary condition to invoke _finishCallback.
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     if (!_idIndexSpec.isEmpty() && _options.autoIndexId == CollectionOptions::NO) {
         warning()
             << "Found the _id_ index spec but the collection specified autoIndexId of false on ns:"
@@ -466,8 +476,7 @@ void CollectionCloner::_beginCollectionCallback(const executor::TaskExecutor::Ca
         _destNss, _options, _idIndexSpec, _indexSpecs);
 
     if (!status.isOK()) {
-        lk.unlock();
-        _finishCallback(status.getStatus());
+        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, status.getStatus());
         return;
     }
 
@@ -478,18 +487,40 @@ void CollectionCloner::_beginCollectionCallback(const executor::TaskExecutor::Ca
 
     _collLoader = std::move(status.getValue());
 
-    Status scheduleStatus = _findFetcher.schedule();
+    _findFetcher = stdx::make_unique<Fetcher>(
+        _executor,
+        _source,
+        _sourceNss.db().toString(),
+        // noCursorTimeout true, large batchSize (for older server versions to get larger batch)
+        BSON("find" << _sourceNss.coll() << "noCursorTimeout" << true << "batchSize" << batchSize),
+        stdx::bind(&CollectionCloner::_findCallback,
+                   this,
+                   stdx::placeholders::_1,
+                   stdx::placeholders::_2,
+                   stdx::placeholders::_3,
+                   onCompletionGuard),
+        rpc::ServerSelectionMetadata(true, boost::none).toBSON(),
+        RemoteCommandRequest::kNoTimeout,
+        RemoteCommandRetryScheduler::makeRetryPolicy(
+            numInitialSyncCollectionFindAttempts.load(),
+            executor::RemoteCommandRequest::kNoTimeout,
+            RemoteCommandRetryScheduler::kAllRetriableErrors));
+
+    Status scheduleStatus = _findFetcher->schedule();
     if (!scheduleStatus.isOK()) {
-        lk.unlock();
-        _finishCallback(scheduleStatus);
+        _findFetcher.reset();
+        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, scheduleStatus);
         return;
     }
 }
 
-void CollectionCloner::_insertDocumentsCallback(const executor::TaskExecutor::CallbackArgs& cbd,
-                                                bool lastBatch) {
+void CollectionCloner::_insertDocumentsCallback(
+    const executor::TaskExecutor::CallbackArgs& cbd,
+    bool lastBatch,
+    std::shared_ptr<OnCompletionGuard> onCompletionGuard) {
     if (!cbd.status.isOK()) {
-        _finishCallback(cbd.status);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, cbd.status);
         return;
     }
 
@@ -499,8 +530,7 @@ void CollectionCloner::_insertDocumentsCallback(const executor::TaskExecutor::Ca
         warning() << "_insertDocumentsCallback, but no documents to insert for ns:" << _destNss;
 
         if (lastBatch) {
-            lk.unlock();
-            _finishCallback(Status::OK());
+            onCompletionGuard->setResultAndCancelRemainingWork_inlock(lk, Status::OK());
         }
         return;
     }
@@ -511,10 +541,9 @@ void CollectionCloner::_insertDocumentsCallback(const executor::TaskExecutor::Ca
     _progressMeter.hit(int(docs.size()));
     invariant(_collLoader);
     const auto status = _collLoader->insertDocuments(docs.cbegin(), docs.cend());
-    lk.unlock();
 
     if (!status.isOK()) {
-        _finishCallback(status);
+        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lk, status);
         return;
     }
 
@@ -522,11 +551,13 @@ void CollectionCloner::_insertDocumentsCallback(const executor::TaskExecutor::Ca
         const BSONObj& data = options.getData();
         if (data["namespace"].String() == _destNss.ns() &&
             static_cast<int>(_stats.documentsCopied) >= data["numDocsToClone"].numberInt()) {
+            lk.unlock();
             log() << "initial sync - initialSyncHangDuringCollectionClone fail point "
                      "enabled. Blocking until fail point is disabled.";
-            while (MONGO_FAIL_POINT(initialSyncHangDuringCollectionClone)) {
+            while (MONGO_FAIL_POINT(initialSyncHangDuringCollectionClone) && !_isShuttingDown()) {
                 mongo::sleepsecs(1);
             }
+            lk.lock();
         }
     }
 
@@ -534,8 +565,8 @@ void CollectionCloner::_insertDocumentsCallback(const executor::TaskExecutor::Ca
         return;
     }
 
-    // Done with last batch and time to call _finshCallback with Status::OK().
-    _finishCallback(Status::OK());
+    // Done with last batch and time to set result in completion guard to Status::OK().
+    onCompletionGuard->setResultAndCancelRemainingWork_inlock(lk, Status::OK());
 }
 
 void CollectionCloner::_finishCallback(const Status& status) {

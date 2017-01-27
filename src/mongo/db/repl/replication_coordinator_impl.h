@@ -65,6 +65,7 @@ struct ConnectionPoolStats;
 }  // namespace executor
 
 namespace rpc {
+class OplogQueryMetadata;
 class ReplSetMetadata;
 }  // namespace rpc
 
@@ -88,11 +89,10 @@ class ReplicationCoordinatorImpl : public ReplicationCoordinator {
     MONGO_DISALLOW_COPYING(ReplicationCoordinatorImpl);
 
 public:
-    // Takes ownership of the "externalState", "topCoord" and "network" objects.
     ReplicationCoordinatorImpl(const ReplSettings& settings,
-                               ReplicationCoordinatorExternalState* externalState,
-                               executor::NetworkInterface* network,
-                               TopologyCoordinator* topoCoord,
+                               std::unique_ptr<ReplicationCoordinatorExternalState> externalState,
+                               std::unique_ptr<executor::NetworkInterface> network,
+                               std::unique_ptr<TopologyCoordinator> topoCoord,
                                StorageInterface* storage,
                                int64_t prngSeed);
 
@@ -270,7 +270,8 @@ public:
                                               const ReplSetRequestVotesArgs& args,
                                               ReplSetRequestVotesResponse* response) override;
 
-    virtual void prepareReplMetadata(const OpTime& lastOpTimeFromClient,
+    virtual void prepareReplMetadata(const BSONObj& metadataRequestObj,
+                                     const OpTime& lastOpTimeFromClient,
                                      BSONObjBuilder* builder) const override;
 
     virtual Status processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
@@ -294,7 +295,9 @@ public:
 
     virtual void forceSnapshotCreation() override;
 
-    virtual void onSnapshotCreate(OpTime timeOfSnapshot, SnapshotName name) override;
+    virtual void createSnapshot(OperationContext* txn,
+                                OpTime timeOfSnapshot,
+                                SnapshotName name) override;
 
     virtual OpTime getCurrentCommittedSnapshotOpTime() const override;
 
@@ -552,6 +555,11 @@ private:
      * Returns the _writeConcernMajorityJournalDefault of our current _rsConfig.
      */
     bool getWriteConcernMajorityShouldJournal_inlock() const;
+
+    /**
+     * Returns the OpTime of the current committed snapshot, if one exists.
+     */
+    OpTime _getCurrentCommittedSnapshotOpTime_inlock() const;
 
     /**
      * Helper method that removes entries from _slaveInfo if they correspond to a node
@@ -976,6 +984,17 @@ private:
      */
     EventHandle _processReplSetMetadata_incallback(const rpc::ReplSetMetadata& replMetadata,
                                                    bool advanceCommitPoint);
+
+    /**
+     * Prepares a metadata object for ReplSetMetadata.
+     */
+    void _prepareReplSetMetadata_inlock(const OpTime& lastOpTimeFromClient,
+                                        BSONObjBuilder* builder) const;
+
+    /**
+     * Prepares a metadata object for OplogQueryMetadata.
+     */
+    void _prepareOplogQueryMetadata_inlock(BSONObjBuilder* builder) const;
 
     /**
      * Blesses a snapshot to be used for new committed reads.

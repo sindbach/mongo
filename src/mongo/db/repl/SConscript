@@ -375,6 +375,7 @@ env.Library('topology_coordinator_impl',
                 'repl_settings',
                 'rslog',
                 'topology_coordinator',
+                '$BUILD_DIR/mongo/util/fail_point',
             ])
 
 env.CppUnitTest('repl_set_heartbeat_response_test',
@@ -868,6 +869,7 @@ env.CppUnitTest(
         'base_cloner_test_fixture',
         '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
         '$BUILD_DIR/mongo/db/service_context_noop_init',
+        '$BUILD_DIR/mongo/unittest/task_executor_proxy',
     ],
 )
 

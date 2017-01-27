@@ -223,9 +223,11 @@ public:
                           const OpTime& lastOpCommitted);
     virtual bool stepDownIfPending();
     virtual Date_t getStepDownTime() const;
-    virtual void prepareReplMetadata(rpc::ReplSetMetadata* metadata,
-                                     const OpTime& lastVisibleOpTime,
-                                     const OpTime& lastCommitttedOpTime) const;
+    virtual rpc::ReplSetMetadata prepareReplSetMetadata(const OpTime& lastVisibleOpTime,
+                                                        const OpTime& lastCommitttedOpTime) const;
+    virtual rpc::OplogQueryMetadata prepareOplogQueryMetadata(const OpTime& lastCommittedOpTime,
+                                                              const OpTime& lastAppliedOpTime,
+                                                              int rbid) const;
     virtual void processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
                                             ReplSetRequestVotesResponse* response,
                                             const OpTime& lastAppliedOpTime);
@@ -305,6 +307,10 @@ private:
 
     // Sees if a majority number of votes are held by members who are currently "up"
     bool _aMajoritySeemsToBeUp() const;
+
+    // Returns true if the node can see a healthy primary of equal or greater priority to the
+    // candidate.
+    bool _canSeeHealthyPrimaryOfEqualOrGreaterPriority(const int candidateIndex) const;
 
     // Is otherOpTime close enough (within 10 seconds) to the latest known optime to qualify
     // for an election

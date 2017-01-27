@@ -57,9 +57,9 @@ struct ConnectionPoolStats;
 
 namespace rpc {
 
+class OplogQueryMetadata;
 class ReplSetMetadata;
 class RequestInterface;
-class ReplSetMetadata;
 
 }  // namespace rpc
 
@@ -689,9 +689,11 @@ public:
                                               ReplSetRequestVotesResponse* response) = 0;
 
     /**
-     * Prepares a metadata object describing the current term, primary, and lastOp information.
+     * Prepares a metadata object with the ReplSetMetadata and the OplogQueryMetadata depending
+     * on what has been requested.
      */
-    virtual void prepareReplMetadata(const OpTime& lastOpTimeFromClient,
+    virtual void prepareReplMetadata(const BSONObj& metadataRequestObj,
+                                     const OpTime& lastOpTimeFromClient,
                                      BSONObjBuilder* builder) const = 0;
 
     /**
@@ -750,9 +752,12 @@ public:
     virtual void forceSnapshotCreation() = 0;
 
     /**
-     * Called when a new snapshot is created.
+     * Creates a new snapshot in the storage engine and registers it for use in the replication
+     * coordinator.
      */
-    virtual void onSnapshotCreate(OpTime timeOfSnapshot, SnapshotName name) = 0;
+    virtual void createSnapshot(OperationContext* txn,
+                                OpTime timeOfSnapshot,
+                                SnapshotName name) = 0;
 
     /**
      * Blocks until either the current committed snapshot is at least as high as 'untilSnapshot',

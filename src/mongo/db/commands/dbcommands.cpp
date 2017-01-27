@@ -38,6 +38,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
@@ -95,6 +96,7 @@
 #include "mongo/db/write_concern.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/config_server_metadata.h"
+#include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/rpc/metadata/sharding_metadata.h"
@@ -348,7 +350,8 @@ public:
                                        const BSONObj& cmdObj) {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
 
-        if (cmdObj.firstElement().numberInt() == -1 && !cmdObj.hasField("slowms")) {
+        if (cmdObj.firstElement().numberInt() == -1 && !cmdObj.hasField("slowms") &&
+            !cmdObj.hasField("sampleRate")) {
             // If you just want to get the current profiling level you can do so with just
             // read access to system.profile, even if you can't change the profiling level.
             if (authzSession->isAuthorizedForActionsOnResource(
@@ -392,6 +395,7 @@ public:
 
         result.append("was", db ? db->getProfilingLevel() : serverGlobalParams.defaultProfile);
         result.append("slowms", serverGlobalParams.slowMS);
+        result.append("sampleRate", serverGlobalParams.sampleRate);
 
         if (!readOnly) {
             if (!db) {
@@ -406,6 +410,14 @@ public:
         if (slow.isNumber()) {
             serverGlobalParams.slowMS = slow.numberInt();
         }
+
+        double newSampleRate;
+        uassertStatusOK(bsonExtractDoubleFieldWithDefault(
+            cmdObj, "sampleRate"_sd, serverGlobalParams.sampleRate, &newSampleRate));
+        uassert(ErrorCodes::BadValue,
+                "sampleRate must be between 0.0 and 1.0 inclusive",
+                newSampleRate >= 0.0 && newSampleRate <= 1.0);
+        serverGlobalParams.sampleRate = newSampleRate;
 
         if (!status.isOK()) {
             errmsg = status.reason();
@@ -1285,9 +1297,7 @@ void appendOpTimeMetadata(OperationContext* txn,
         // Attach our own last opTime.
         repl::OpTime lastOpTimeFromClient =
             repl::ReplClientInfo::forClient(txn->getClient()).getLastOp();
-        if (request.getMetadata().hasField(rpc::kReplSetMetadataFieldName)) {
-            replCoord->prepareReplMetadata(lastOpTimeFromClient, metadataBob);
-        }
+        replCoord->prepareReplMetadata(request.getMetadata(), lastOpTimeFromClient, metadataBob);
         // For commands from mongos, append some info to help getLastError(w) work.
         // TODO: refactor out of here as part of SERVER-18236
         if (isShardingAware || isConfig) {
@@ -1533,7 +1543,6 @@ void mongo::execCommandDatabase(OperationContext* txn,
             }
         }
 
-
         if (command->adminOnly()) {
             LOG(2) << "command: " << request.getCommandName();
         }
@@ -1565,39 +1574,17 @@ void mongo::execCommandDatabase(OperationContext* txn,
         // Operations are only versioned against the primary. We also make sure not to redo shard
         // version handling if this command was issued via the direct client.
         if (iAmPrimary && !txn->getClient()->isInDirectClient()) {
-            // Handle shard version and config optime information that may have been sent along with
-            // the command.
-            auto& oss = OperationShardingState::get(txn);
-
+            // Handle a shard version that may have been sent along with the command.
             auto commandNS = NamespaceString(command->parseNs(dbname, request.getCommandArgs()));
+            auto& oss = OperationShardingState::get(txn);
             oss.initializeShardVersion(commandNS, extractedFields[kShardVersionFieldIdx]);
-
             auto shardingState = ShardingState::get(txn);
-
             if (oss.hasShardVersion()) {
-                if (serverGlobalParams.clusterRole != ClusterRole::ShardServer) {
-                    uassertStatusOK(
-                        {ErrorCodes::NoShardingEnabled,
-                         "Cannot accept sharding commands if not started with --shardsvr"});
-                } else if (!shardingState->enabled()) {
-                    // TODO(esha): Once 3.4 ships, we no longer need to support initializing
-                    // sharding awareness through commands, so just reject all sharding commands.
-                    if (!shardingState->commandInitializesShardingAwareness(
-                            request.getCommandName().toString())) {
-                        uassertStatusOK({ErrorCodes::NoShardingEnabled,
-                                         str::stream()
-                                             << "Received a command with sharding chunk version "
-                                                "information but this node is not sharding aware: "
-                                             << request.getCommandArgs().jsonString()});
-                    }
-                }
+                uassertStatusOK(shardingState->canAcceptShardedCommands());
             }
 
-            if (shardingState->enabled()) {
-                // TODO(spencer): Do this unconditionally once all nodes are sharding aware
-                // by default.
-                uassertStatusOK(shardingState->updateConfigServerOpTimeFromMetadata(txn));
-            }
+            // Handle config optime information that may have been sent along with the command.
+            uassertStatusOK(shardingState->updateConfigServerOpTimeFromMetadata(txn));
         }
 
         // Can throw
