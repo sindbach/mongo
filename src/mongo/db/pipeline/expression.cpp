@@ -606,14 +606,24 @@ const char* ExpressionArrayElemAt::getOpName() const {
 
 Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
     const Value targetVal = vpOperand[0]->evaluateInternal(vars);
-    vector<Value> output; 
-    if (targetVal.getType() == Object) {
-        FieldIterator iter = targetVal.getDocument().fieldIterator();
-        while(iter.more()){
-            Document::FieldPair pair = iter.next();
-            output.push_back(Value(vector<Value> {Value(pair.first), pair.second}));
-        }
+
+    if (targetVal.nullish()){
+         return Value(BSONNULL);
     }
+
+    uassert(40379, 
+             str::stream() << "$objectToArray requires a document input, found: "
+                           << typeName(targetVal.getType()), 
+             (targetVal.getType() == Object)) ;
+
+    vector<Value> output; 
+
+    FieldIterator iter = targetVal.getDocument().fieldIterator();
+    while(iter.more()){
+        Document::FieldPair pair = iter.next();
+        output.push_back(Value(vector<Value> {Value(pair.first), pair.second}));
+    }
+
     return Value(output);
 }
 
