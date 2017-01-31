@@ -624,19 +624,19 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
     for (size_t i = 0; i < n; ++i) {
 
         uassert(40373, 
-                str::stream() << "$arrayToObject requires an array of array input, found: "
+                str::stream() << "$arrayToObject requires an array of key-value pairs, found: "
                               << typeName(array[i].getType()), 
                 array[i].isArray());
 
         const vector<Value>& valArray = array[i].getArray();
 
         uassert(40374, 
-                str::stream() << "$arrayToObject requires an array of two-elements-size array input, found: "
+                str::stream() << "$arrayToObject requires an array of two-elements size array input, found array size of: "
                               << valArray.size(), 
                 (valArray.size() == 2));
 
         uassert(40375, 
-                str::stream() << "$arrayToObject first value of array is expected to be string, found: "
+                str::stream() << "$arrayToObject requires an array of key-value pairs, where the key must be type string, found type: "
                               << typeName(valArray[0].getType()), 
                 (valArray[0].getType()==String));
 
