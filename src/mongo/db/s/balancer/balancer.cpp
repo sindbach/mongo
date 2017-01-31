@@ -313,22 +313,6 @@ void Balancer::_mainThread() {
 
     const Seconds kInitBackoffInterval(10);
 
-    // Take the balancer distributed lock and hold it permanently. Do the attempts with single
-    // attempts in order to not block the thread and be able to check for interrupt more frequently.
-    while (!_stopRequested()) {
-        auto status = _migrationManager.tryTakeBalancerLock(txn.get(), "CSRS Balancer");
-        if (!status.isOK()) {
-            log() << "Balancer distributed lock could not be acquired and will be retried in "
-                  << durationCount<Seconds>(kInitBackoffInterval) << " seconds"
-                  << causedBy(redact(status));
-
-            _sleepFor(txn.get(), kInitBackoffInterval);
-            continue;
-        }
-
-        break;
-    }
-
     auto balancerConfig = shardingContext->getBalancerConfiguration();
     while (!_stopRequested()) {
         Status refreshStatus = balancerConfig->refreshAndCheck(txn.get());
@@ -557,14 +541,14 @@ Status Balancer::_enforceTagRanges(OperationContext* txn) {
         auto scopedCM = std::move(scopedCMStatus.getValue());
         ChunkManager* const cm = scopedCM.cm();
 
-        auto splitStatus = shardutil::splitChunkAtMultiplePoints(txn,
-                                                                 splitInfo.shardId,
-                                                                 splitInfo.nss,
-                                                                 cm->getShardKeyPattern(),
-                                                                 splitInfo.collectionVersion,
-                                                                 splitInfo.minKey,
-                                                                 splitInfo.maxKey,
-                                                                 splitInfo.splitKeys);
+        auto splitStatus =
+            shardutil::splitChunkAtMultiplePoints(txn,
+                                                  splitInfo.shardId,
+                                                  splitInfo.nss,
+                                                  cm->getShardKeyPattern(),
+                                                  splitInfo.collectionVersion,
+                                                  ChunkRange(splitInfo.minKey, splitInfo.maxKey),
+                                                  splitInfo.splitKeys);
         if (!splitStatus.isOK()) {
             warning() << "Failed to enforce tag range for chunk " << redact(splitInfo.toString())
                       << causedBy(redact(splitStatus.getStatus()));
@@ -634,9 +618,27 @@ void Balancer::_splitOrMarkJumbo(OperationContext* txn,
 
     auto chunk = chunkManager->findIntersectingChunkWithSimpleCollation(txn, minKey);
 
-    auto splitStatus = chunk->split(txn, Chunk::normal, nullptr);
-    if (!splitStatus.isOK()) {
-        log() << "Marking chunk " << chunk->toString() << " as jumbo.";
+    try {
+        const auto splitPoints = uassertStatusOK(shardutil::selectChunkSplitPoints(
+            txn,
+            chunk->getShardId(),
+            nss,
+            chunkManager->getShardKeyPattern(),
+            ChunkRange(chunk->getMin(), chunk->getMax()),
+            Grid::get(txn)->getBalancerConfiguration()->getMaxChunkSizeBytes(),
+            boost::none));
+
+        uassert(ErrorCodes::CannotSplit, "No split points found", !splitPoints.empty());
+
+        uassertStatusOK(
+            shardutil::splitChunkAtMultiplePoints(txn,
+                                                  chunk->getShardId(),
+                                                  nss,
+                                                  chunkManager->getShardKeyPattern(),
+                                                  chunkManager->getVersion(),
+                                                  ChunkRange(chunk->getMin(), chunk->getMax()),
+                                                  splitPoints));
+    } catch (const DBException& ex) {
         chunk->markAsJumbo(txn);
     }
 }

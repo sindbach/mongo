@@ -252,93 +252,6 @@ TEST_F(ShardingStateTest, InitializeAgainWithSameReplSetNameSucceeds) {
     ASSERT_EQ("config/a:1,b:2", shardingState()->getConfigServer(operationContext()).toString());
 }
 
-TEST_F(ShardingStateTest, InitializeAgainWithDifferentReplSetNameFails) {
-    auto clusterID = OID::gen();
-    ShardIdentityType shardIdentity;
-    shardIdentity.setConfigsvrConnString(
-        ConnectionString(ConnectionString::SET, "a:1,b:2", "config"));
-    shardIdentity.setShardName(shardName());
-    shardIdentity.setClusterId(clusterID);
-
-    ASSERT_OK(shardingState()->initializeFromShardIdentity(operationContext(), shardIdentity));
-
-    ShardIdentityType shardIdentity2;
-    shardIdentity2.setConfigsvrConnString(
-        ConnectionString(ConnectionString::SET, "a:1,b:2", "configRS"));
-    shardIdentity2.setShardName(shardName());
-    shardIdentity2.setClusterId(clusterID);
-
-    shardingState()->setGlobalInitMethodForTest(
-        [](OperationContext* txn, const ConnectionString& connStr, StringData distLockProcessId) {
-            return Status{ErrorCodes::InternalError, "should not reach here"};
-        });
-
-    auto status = shardingState()->initializeFromShardIdentity(operationContext(), shardIdentity2);
-    ASSERT_EQ(ErrorCodes::InconsistentShardIdentity, status);
-
-    ASSERT_TRUE(shardingState()->enabled());
-    ASSERT_EQ(shardName(), shardingState()->getShardName());
-    ASSERT_EQ("config/a:1,b:2", shardingState()->getConfigServer(operationContext()).toString());
-}
-
-TEST_F(ShardingStateTest, InitializeAgainWithDifferentShardNameFails) {
-    auto clusterID = OID::gen();
-    ShardIdentityType shardIdentity;
-    shardIdentity.setConfigsvrConnString(
-        ConnectionString(ConnectionString::SET, "a:1,b:2", "config"));
-    shardIdentity.setShardName(shardName());
-    shardIdentity.setClusterId(clusterID);
-
-    ASSERT_OK(shardingState()->initializeFromShardIdentity(operationContext(), shardIdentity));
-
-    ShardIdentityType shardIdentity2;
-    shardIdentity2.setConfigsvrConnString(
-        ConnectionString(ConnectionString::SET, "a:1,b:2", "config"));
-    shardIdentity2.setShardName("b");
-    shardIdentity2.setClusterId(clusterID);
-
-    shardingState()->setGlobalInitMethodForTest(
-        [](OperationContext* txn, const ConnectionString& connStr, StringData distLockProcessId) {
-            return Status{ErrorCodes::InternalError, "should not reach here"};
-        });
-
-    auto status = shardingState()->initializeFromShardIdentity(operationContext(), shardIdentity2);
-    ASSERT_EQ(ErrorCodes::InconsistentShardIdentity, status);
-
-    ASSERT_TRUE(shardingState()->enabled());
-    ASSERT_EQ(shardName(), shardingState()->getShardName());
-    ASSERT_EQ("config/a:1,b:2", shardingState()->getConfigServer(operationContext()).toString());
-}
-
-TEST_F(ShardingStateTest, InitializeAgainWithDifferentClusterIdFails) {
-    ShardIdentityType shardIdentity;
-    shardIdentity.setConfigsvrConnString(
-        ConnectionString(ConnectionString::SET, "a:1,b:2", "config"));
-    shardIdentity.setShardName(shardName());
-    shardIdentity.setClusterId(OID::gen());
-
-    ASSERT_OK(shardingState()->initializeFromShardIdentity(operationContext(), shardIdentity));
-
-    ShardIdentityType shardIdentity2;
-    shardIdentity2.setConfigsvrConnString(
-        ConnectionString(ConnectionString::SET, "a:1,b:2", "config"));
-    shardIdentity2.setShardName(shardName());
-    shardIdentity2.setClusterId(OID::gen());
-
-    shardingState()->setGlobalInitMethodForTest(
-        [](OperationContext* txn, const ConnectionString& connStr, StringData distLockProcessId) {
-            return Status{ErrorCodes::InternalError, "should not reach here"};
-        });
-
-    auto status = shardingState()->initializeFromShardIdentity(operationContext(), shardIdentity2);
-    ASSERT_EQ(ErrorCodes::InconsistentShardIdentity, status);
-
-    ASSERT_TRUE(shardingState()->enabled());
-    ASSERT_EQ(shardName(), shardingState()->getShardName());
-    ASSERT_EQ("config/a:1,b:2", shardingState()->getConfigServer(operationContext()).toString());
-}
-
-
 // The below tests check for compatible startup parameters for --shardsvr, --overrideShardIdentity,
 // and queryableBackup (readOnly) mode.
 
@@ -628,7 +541,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldUseDiffQuery) {
         chunk.setMax(BSON("x" << 10));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(2, 0, initEpoch));
-        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toBSON()});
+        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toConfigBSON()});
     }
 
     const ChunkVersion newVersion(3, 0, initEpoch);
@@ -660,7 +573,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldUseDiffQuery) {
         chunk.setMax(BSON("x" << 20));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(3, 10, initEpoch));
-        return std::vector<BSONObj>{chunk.toBSON()};
+        return std::vector<BSONObj>{chunk.toConfigBSON()};
     });
 
     future.timed_get(kFutureTimeout);
@@ -688,7 +601,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldUseFullQueryOnEpochMismatch) {
         chunk.setMax(BSON("x" << 10));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(2, 0, initEpoch));
-        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toBSON()});
+        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toConfigBSON()});
     }
 
 
@@ -723,7 +636,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldUseFullQueryOnEpochMismatch) {
         chunk.setMax(BSON("x" << 20));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(3, 10, newVersion.epoch()));
-        return std::vector<BSONObj>{chunk.toBSON()};
+        return std::vector<BSONObj>{chunk.toConfigBSON()};
     });
 
     // Retry the refresh again. Now doing a full reload.
@@ -751,7 +664,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldUseFullQueryOnEpochMismatch) {
         chunk.setMax(BSON("x" << 20));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(3, 10, newVersion.epoch()));
-        return std::vector<BSONObj>{chunk.toBSON()};
+        return std::vector<BSONObj>{chunk.toConfigBSON()};
     });
 
     future.timed_get(kFutureTimeout);
@@ -776,7 +689,7 @@ TEST_F(ShardingStateTest, FullMetadataOnEpochMismatchShouldStopAfterMaxRetries) 
         chunk.setMax(BSON("x" << 10));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(2, 0, initEpoch));
-        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toBSON()});
+        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toConfigBSON()});
     }
 
 
@@ -815,7 +728,7 @@ TEST_F(ShardingStateTest, FullMetadataOnEpochMismatchShouldStopAfterMaxRetries) 
             chunk.setMax(BSON("x" << 20));
             chunk.setShard(ShardId(shardName()));
             chunk.setVersion(ChunkVersion(3, 10, nextEpoch));
-            return std::vector<BSONObj>{chunk.toBSON()};
+            return std::vector<BSONObj>{chunk.toConfigBSON()};
         });
 
         lastEpoch = nextEpoch;
@@ -844,7 +757,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldBeOkWhenCollectionWasDropped) {
         chunk.setMax(BSON("x" << 10));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(2, 0, initEpoch));
-        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toBSON()});
+        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toConfigBSON()});
     }
 
     const ChunkVersion newVersion(3, 0, initEpoch);
@@ -885,7 +798,7 @@ TEST_F(ShardingStateTest, MetadataRefreshShouldNotRetryOtherTypesOfError) {
         chunk.setMax(BSON("x" << 10));
         chunk.setShard(ShardId(shardName()));
         chunk.setVersion(ChunkVersion(2, 0, initEpoch));
-        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toBSON()});
+        setupCollectionMetadata(nss, initEpoch, std::vector<BSONObj>{chunk.toConfigBSON()});
     }
 
     auto configTargeter =

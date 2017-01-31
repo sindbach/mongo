@@ -91,26 +91,11 @@ public:
              int,
              string& errmsg,
              BSONObjBuilder& result) {
-        ShardingState* const shardingState = ShardingState::get(txn);
+        auto shardingState = ShardingState::get(txn);
+        uassertStatusOK(shardingState->canAcceptShardedCommands());
 
         const ShardId toShard(cmdObj["toShardName"].String());
         const ShardId fromShard(cmdObj["fromShardName"].String());
-
-        if (!shardingState->enabled()) {
-            if (!cmdObj["configServer"].eoo()) {
-                dassert(cmdObj["configServer"].type() == String);
-                shardingState->initializeFromConfigConnString(
-                    txn, cmdObj["configServer"].String(), toShard.toString());
-            } else {
-                errmsg = str::stream()
-                    << "cannot start recv'ing chunk, "
-                    << "sharding is not enabled and no config server was provided";
-
-                warning() << errmsg;
-                return false;
-            }
-        }
-
 
         const NamespaceString nss(cmdObj.firstElement().String());
 
@@ -261,13 +246,15 @@ public:
              int,
              string& errmsg,
              BSONObjBuilder& result) {
-        const MigrationSessionId migrationSessionid(
-            uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj)));
-        const bool ok =
-            ShardingState::get(txn)->migrationDestinationManager()->startCommit(migrationSessionid);
-
-        ShardingState::get(txn)->migrationDestinationManager()->report(result);
-        return ok;
+        auto const sessionId = uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj));
+        auto mdm = ShardingState::get(txn)->migrationDestinationManager();
+        Status const status = mdm->startCommit(sessionId);
+        mdm->report(result);
+        if (!status.isOK()) {
+            log() << status.reason();
+            return appendCommandStatus(result, status);
+        }
+        return true;
     }
 
 } recvChunkCommitCommand;
@@ -312,17 +299,18 @@ public:
         auto migrationSessionIdStatus(MigrationSessionId::extractFromBSON(cmdObj));
 
         if (migrationSessionIdStatus.isOK()) {
-            const bool ok = mdm->abort(migrationSessionIdStatus.getValue());
+            Status const status = mdm->abort(migrationSessionIdStatus.getValue());
             mdm->report(result);
-            return ok;
+            if (!status.isOK()) {
+                log() << status.reason();
+                return appendCommandStatus(result, status);
+            }
         } else if (migrationSessionIdStatus == ErrorCodes::NoSuchKey) {
             mdm->abortWithoutSessionIdCheck();
             mdm->report(result);
-            return true;
         }
-
         uassertStatusOK(migrationSessionIdStatus.getStatus());
-        MONGO_UNREACHABLE;
+        return true;
     }
 
 } recvChunkAbortCommand;

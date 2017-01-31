@@ -89,11 +89,10 @@ class ReplicationCoordinatorImpl : public ReplicationCoordinator {
     MONGO_DISALLOW_COPYING(ReplicationCoordinatorImpl);
 
 public:
-    // Takes ownership of the "externalState", "topCoord" and "network" objects.
     ReplicationCoordinatorImpl(const ReplSettings& settings,
-                               ReplicationCoordinatorExternalState* externalState,
-                               executor::NetworkInterface* network,
-                               TopologyCoordinator* topoCoord,
+                               std::unique_ptr<ReplicationCoordinatorExternalState> externalState,
+                               std::unique_ptr<executor::NetworkInterface> network,
+                               std::unique_ptr<TopologyCoordinator> topoCoord,
                                StorageInterface* storage,
                                int64_t prngSeed);
 
@@ -296,7 +295,9 @@ public:
 
     virtual void forceSnapshotCreation() override;
 
-    virtual void onSnapshotCreate(OpTime timeOfSnapshot, SnapshotName name) override;
+    virtual void createSnapshot(OperationContext* txn,
+                                OpTime timeOfSnapshot,
+                                SnapshotName name) override;
 
     virtual OpTime getCurrentCommittedSnapshotOpTime() const override;
 
