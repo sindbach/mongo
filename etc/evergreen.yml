@@ -1176,11 +1176,6 @@ tasks:
             burn_in_args="--checkEvergreen"
           fi
 
-          # Create a branch in the git repository that tracks the remote branch configured for this
-          # Evergreen project so that the `git merge-base <branchname>@{upstream} HEAD` command run
-          # by the burn_in_tests.py script works.
-          git branch --force ${branch_name} origin/${branch_name}
-
           # Capture a list of new and modified tests.
           ${python|python} buildscripts/burn_in_tests.py --branch=${branch_name} --buildVariant=${build_variant} --testListOutfile=jstests/new_tests.json --noExec $burn_in_args
 
@@ -2170,6 +2165,17 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=core_small_oplog_rs_resync_static --storageEngine=wiredTiger
+      run_multiple_jobs: true
+
+- <<: *task_template
+  name: jsCore_small_oplog_rs_kill_secondaries_WT
+  depends_on:
+  - name: jsCore_WT
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=core_small_oplog_rs_kill_secondaries --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
@@ -4113,7 +4119,8 @@ buildvariants:
     push_name: linux
     push_arch: arm64-enterprise-ubuntu1604
     compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=armv8-a+crc -mtune=generic" --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
-    num_jobs_available: $(grep -c ^processor /proc/cpuinfo) --excludeWithAnyTags=requires_mmapv1
+    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: arm64
@@ -4190,7 +4197,8 @@ buildvariants:
     push_name: linux
     push_arch: arm64-ubuntu1604
     compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --release CCFLAGS="-march=armv8-a+crc -mtune=generic" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
-    num_jobs_available: $(grep -c ^processor /proc/cpuinfo) --excludeWithAnyTags=requires_mmapv1
+    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager.py
     packager_arch: arm64
@@ -4960,6 +4968,9 @@ buildvariants:
   - name: jsCore_small_oplog_rs_resync_static_WT
     distros:
     - windows-64-vs2015-large
+  - name: jsCore_small_oplog_rs_kill_secondaries_WT
+    distros:
+    - windows-64-vs2015-large
   - name: mmap
   - name: mongosTest
   - name: noPassthrough
@@ -5442,6 +5453,7 @@ buildvariants:
   - name: jsCore_small_oplog_WT
   - name: jsCore_small_oplog_rs
   - name: jsCore_small_oplog_rs_WT
+  - name: jsCore_small_oplog_rs_kill_secondaries_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -5704,6 +5716,9 @@ buildvariants:
   - name: jsCore_small_oplog_rs_resync_static_WT
     distros:
     - rhel62-large
+  - name: jsCore_small_oplog_rs_kill_secondaries_WT
+    distros:
+    - rhel62-large
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -5944,6 +5959,9 @@ buildvariants:
     distros:
     - rhel62-large
   - name: jsCore_small_oplog_rs_resync_static_WT
+    distros:
+    - rhel62-large
+  - name: jsCore_small_oplog_rs_kill_secondaries_WT
     distros:
     - rhel62-large
   - name: mmap
@@ -6523,7 +6541,7 @@ buildvariants:
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
     compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: 2
-    test_flags: -excludeWithAnyTags=requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
     packager_script: packager-enterprise.py
     packager_arch: s390x
@@ -8021,13 +8039,12 @@ buildvariants:
   - name: aggregation_WT
   - name: aggregation_auth
   - name: auth
-  # Disabled due to SERVER-21965
-  # - name: concurrency
-  #   distros:
-  #   - rhel62-large  # Some workloads require a lot of memory, use a bigger machine for this suite.
-  # - name: concurrency_replication
-  # - name: concurrency_sharded
-  # - name: concurrency_simultaneous
+  - name: concurrency
+    distros:
+    - rhel62-large  # Some workloads require a lot of memory, use a bigger machine for this suite.
+  - name: concurrency_replication
+  - name: concurrency_sharded
+  - name: concurrency_simultaneous
   - name: dbtest
   - name: failpoints
   - name: failpoints_auth
@@ -8047,13 +8064,12 @@ buildvariants:
   - name: jsCore_compatibility
   - name: jsCore_small_oplog
   - name: jsCore_small_oplog_rs
-  # Disabled due to SERVER-21965
-  # - name: jstestfuzz_WT
-  # - name: jstestfuzz_concurrent_WT
-  # - name: jstestfuzz_concurrent_replication_WT
-  # - name: jstestfuzz_concurrent_sharded_WT
-  # - name: jstestfuzz_replication_WT
-  # - name: jstestfuzz_sharded_WT
+  - name: jstestfuzz_WT
+  - name: jstestfuzz_concurrent_WT
+  - name: jstestfuzz_concurrent_replication_WT
+  - name: jstestfuzz_concurrent_sharded_WT
+  - name: jstestfuzz_replication_WT
+  - name: jstestfuzz_sharded_WT
   - name: mongosTest
   - name: noPassthrough
   - name: noPassthroughWithMongod
@@ -8409,6 +8425,7 @@ buildvariants:
   - name: jsCore_small_oplog_rs_initsync_static_WT
   - name: jsCore_small_oplog_rs_resync_static
   - name: jsCore_small_oplog_rs_resync_static_WT
+  - name: jsCore_small_oplog_rs_kill_secondaries_WT
   - name: mmap
   - name: mongosTest
   - name: multiversion
@@ -8588,6 +8605,7 @@ buildvariants:
   - name: jsCore_small_oplog_rs_initsync_static_WT
   - name: jsCore_small_oplog_rs_resync_static
   - name: jsCore_small_oplog_rs_resync_static_WT
+  - name: jsCore_small_oplog_rs_kill_secondaries_WT
   - name: mmap
   - name: mongosTest
   - name: multiversion
