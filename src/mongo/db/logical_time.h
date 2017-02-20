@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2014 MongoDB, Inc.
+ *    Copyright (C) 2017 MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -31,16 +31,64 @@
 #include "mongo/bson/timestamp.h"
 
 namespace mongo {
-void setGlobalTimestamp(const Timestamp& newTime);
 
 /**
- * Returns the value of the global Timestamp generated last time or set.
+ *  The LogicalTime class holds the cluster time of the cluster. It provides conversions to
+ *  a Timestamp to allow integration with opLog.
  */
-Timestamp getLastSetTimestamp();
+class LogicalTime {
+public:
+    LogicalTime() = default;
+    explicit LogicalTime(Timestamp);
 
-/**
- * Generates a new and unique Timestamp.
- * If count > 1 that many unique Timestamps are reserved starting with the returned value.
- */
-Timestamp getNextGlobalTimestamp(unsigned count = 1);
+    Timestamp asTimestamp() const {
+        return Timestamp(_time);
+    }
+
+    /**
+     * Increases the _time by ticks.
+     */
+    void addTicks(uint64_t ticks);
+
+
+    /**
+     * Const version, returns the LogicalTime with increased _time by ticks.
+     */
+    LogicalTime addTicks(uint64_t ticks) const;
+
+    std::string toString() const;
+
+    /**
+     * An uninitialized value of LogicalTime. Default constructed.
+     */
+    static const LogicalTime kUninitialized;
+
+private:
+    uint64_t _time{0};
+};
+
+inline bool operator==(const LogicalTime& l, const LogicalTime& r) {
+    return l.asTimestamp() == r.asTimestamp();
 }
+
+inline bool operator!=(const LogicalTime& l, const LogicalTime& r) {
+    return !(l == r);
+}
+
+inline bool operator<(const LogicalTime& l, const LogicalTime& r) {
+    return l.asTimestamp() < r.asTimestamp();
+}
+
+inline bool operator<=(const LogicalTime& l, const LogicalTime& r) {
+    return (l < r || l == r);
+}
+
+inline bool operator>(const LogicalTime& l, const LogicalTime& r) {
+    return (r < l);
+}
+
+inline bool operator>=(const LogicalTime& l, const LogicalTime& r) {
+    return (l > r || l == r);
+}
+
+}  // namespace mongo

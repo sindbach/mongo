@@ -43,7 +43,7 @@ ClusterClientCursorMock::~ClusterClientCursorMock() {
     invariant(_exhausted || _killed);
 }
 
-StatusWith<ClusterQueryResult> ClusterClientCursorMock::next() {
+StatusWith<ClusterQueryResult> ClusterClientCursorMock::next(OperationContext* txn) {
     invariant(!_killed);
 
     if (_resultsQueue.empty()) {
@@ -66,7 +66,7 @@ long long ClusterClientCursorMock::getNumReturnedSoFar() const {
     return _numReturnedSoFar;
 }
 
-void ClusterClientCursorMock::kill() {
+void ClusterClientCursorMock::kill(OperationContext* txn) {
     _killed = true;
     if (_killCallback) {
         _killCallback();
@@ -75,6 +75,10 @@ void ClusterClientCursorMock::kill() {
 
 bool ClusterClientCursorMock::isTailable() const {
     return false;
+}
+
+boost::optional<BSONObj> ClusterClientCursorMock::viewDefinition() const {
+    return boost::none;
 }
 
 void ClusterClientCursorMock::queueResult(const ClusterQueryResult& result) {
@@ -95,11 +99,6 @@ void ClusterClientCursorMock::queueError(Status status) {
 
 Status ClusterClientCursorMock::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     MONGO_UNREACHABLE;
-}
-
-
-void ClusterClientCursorMock::setOperationContext(OperationContext* txn) {
-    // Do nothing
 }
 
 }  // namespace mongo

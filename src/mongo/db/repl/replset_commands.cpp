@@ -640,7 +640,7 @@ public:
             // New style update position command has metadata, which may inform the
             // upstream of a higher term.
             auto metadata = metadataResult.getValue();
-            replCoord->processReplSetMetadata(metadata, false /*don't advance the commit point*/);
+            replCoord->processReplSetMetadata(metadata);
         }
 
         // In the case of an update from a member with an invalid replica set config,
@@ -872,7 +872,13 @@ public:
         if (!status.isOK())
             return appendCommandStatus(result, status);
 
+        log() << "Received replSetStepUp request";
+
         status = getGlobalReplicationCoordinator()->stepUpIfEligible();
+
+        if (!status.isOK()) {
+            log() << "replSetStepUp request failed " << causedBy(status);
+        }
 
         return appendCommandStatus(result, status);
     }

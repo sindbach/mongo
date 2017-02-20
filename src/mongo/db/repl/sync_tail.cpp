@@ -52,7 +52,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/global_timestamp.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/prefetch.h"
 #include "mongo/db/query/query_knobs.h"
@@ -822,9 +821,9 @@ void SyncTail::oplogApplication(ReplicationCoordinator* replCoord) {
 
         // Update various things that care about our last applied optime. Tests rely on 2 happening
         // before 3 even though it isn't strictly necessary. The order of 1 doesn't matter.
-        setNewTimestamp(lastOpTimeInBatch.getTimestamp());                        // 1
-        StorageInterface::get(&txn)->setAppliedThrough(&txn, lastOpTimeInBatch);  // 2
-        finalizer->record(lastOpTimeInBatch);                                     // 3
+        setNewTimestamp(txn.getServiceContext(), lastOpTimeInBatch.getTimestamp());  // 1
+        StorageInterface::get(&txn)->setAppliedThrough(&txn, lastOpTimeInBatch);     // 2
+        finalizer->record(lastOpTimeInBatch);                                        // 3
     }
 }
 

@@ -41,11 +41,10 @@
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/query/query_request.h"
-#include "mongo/s/catalog/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_raii.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/socket_exception.h"
@@ -332,11 +331,13 @@ void ParallelSortClusteredCursor::fullInit(OperationContext* txn) {
     finishInit(txn);
 }
 
-void ParallelSortClusteredCursor::_markStaleNS(const NamespaceString& staleNS,
+void ParallelSortClusteredCursor::_markStaleNS(OperationContext* txn,
+                                               const NamespaceString& staleNS,
                                                const StaleConfigException& e,
-                                               bool& forceReload,
-                                               bool& fullReload) {
-    fullReload = e.requiresFullReload();
+                                               bool& forceReload) {
+    if (e.requiresFullReload()) {
+        Grid::get(txn)->catalogCache()->invalidate(staleNS.db());
+    }
 
     if (_staleNSMap.find(staleNS.ns()) == _staleNSMap.end())
         _staleNSMap[staleNS.ns()] = 1;
@@ -355,28 +356,17 @@ void ParallelSortClusteredCursor::_markStaleNS(const NamespaceString& staleNS,
 
 void ParallelSortClusteredCursor::_handleStaleNS(OperationContext* txn,
                                                  const NamespaceString& staleNS,
-                                                 bool forceReload,
-                                                 bool fullReload) {
-    auto status = grid.catalogCache()->getDatabase(txn, staleNS.db().toString());
-    if (!status.isOK()) {
-        warning() << "cannot reload database info for stale namespace " << staleNS.ns();
+                                                 bool forceReload) {
+    auto scopedCMStatus = ScopedChunkManager::get(txn, staleNS);
+    if (!scopedCMStatus.isOK()) {
+        log() << "cannot reload database info for stale namespace " << staleNS.ns();
         return;
     }
 
-    shared_ptr<DBConfig> config = status.getValue();
+    const auto& scopedCM = scopedCMStatus.getValue();
 
-    // Reload db if needed, make sure it works
-    if (fullReload && !config->reload(txn)) {
-        // We didn't find the db after reload, the db may have been dropped, reset this ptr
-        config.reset();
-    }
-
-    if (!config) {
-        warning() << "cannot reload database info for stale namespace " << staleNS.ns();
-    } else {
-        // Reload chunk manager, potentially forcing the namespace
-        config->getChunkManagerIfExists(txn, staleNS.ns(), true, forceReload);
-    }
+    // Reload chunk manager, potentially forcing the namespace
+    scopedCM.db()->getChunkManagerIfExists(txn, staleNS.ns(), true, forceReload);
 }
 
 void ParallelSortClusteredCursor::setupVersionAndHandleSlaveOk(
@@ -397,7 +387,7 @@ void ParallelSortClusteredCursor::setupVersionAndHandleSlaveOk(
 
     // Setup conn
     if (!state->conn) {
-        const auto shard = uassertStatusOK(grid.shardRegistry()->getShard(txn, shardId));
+        const auto shard = uassertStatusOK(Grid::get(txn)->shardRegistry()->getShard(txn, shardId));
         state->conn.reset(new ShardConnection(shard->getConnString(), ns.ns(), manager));
     }
 
@@ -464,9 +454,6 @@ void ParallelSortClusteredCursor::startInit(OperationContext* txn) {
     const bool returnPartial = (_qSpec.options() & QueryOption_PartialResults);
     const NamespaceString nss(!_cInfo.isEmpty() ? _cInfo.versionedNS : _qSpec.ns());
 
-    shared_ptr<ChunkManager> manager;
-    shared_ptr<Shard> primary;
-
     string prefix;
     if (MONGO_unlikely(shouldLog(pc))) {
         if (_totalTries > 0) {
@@ -477,18 +464,21 @@ void ParallelSortClusteredCursor::startInit(OperationContext* txn) {
     }
     LOG(pc) << prefix << " pcursor over " << _qSpec << " and " << _cInfo;
 
-    set<ShardId> shardIds;
-    string vinfo;
+    shared_ptr<ChunkManager> manager;
+    shared_ptr<Shard> primary;
 
     {
-        shared_ptr<DBConfig> config;
-
-        auto status = grid.catalogCache()->getDatabase(txn, nss.db().toString());
-        if (status.getStatus().code() != ErrorCodes::NamespaceNotFound) {
-            config = uassertStatusOK(status);
-            config->getChunkManagerOrPrimary(txn, nss.ns(), manager, primary);
+        auto scopedCMStatus = ScopedChunkManager::get(txn, nss);
+        if (scopedCMStatus != ErrorCodes::NamespaceNotFound) {
+            uassertStatusOK(scopedCMStatus.getStatus());
+            const auto& scopedCM = scopedCMStatus.getValue();
+            manager = scopedCM.cm();
+            primary = scopedCM.primary();
         }
     }
+
+    set<ShardId> shardIds;
+    string vinfo;
 
     if (manager) {
         if (MONGO_unlikely(shouldLog(pc))) {
@@ -661,20 +651,19 @@ void ParallelSortClusteredCursor::startInit(OperationContext* txn) {
                 staleNS = nss;  // ns is the *versioned* namespace, be careful of this
 
             // Probably need to retry fully
-            bool forceReload, fullReload;
-            _markStaleNS(staleNS, e, forceReload, fullReload);
+            bool forceReload;
+            _markStaleNS(txn, staleNS, e, forceReload);
 
-            int logLevel = fullReload ? 0 : 1;
-            LOG(pc + logLevel) << "stale config of ns " << staleNS
-                               << " during initialization, will retry with forced : " << forceReload
-                               << ", full : " << fullReload << causedBy(redact(e));
+            LOG(1) << "stale config of ns " << staleNS
+                   << " during initialization, will retry with forced : " << forceReload
+                   << causedBy(redact(e));
 
             // This is somewhat strange
             if (staleNS != nss)
                 warning() << "versioned ns " << nss.ns() << " doesn't match stale config namespace "
                           << staleNS;
 
-            _handleStaleNS(txn, staleNS, forceReload, fullReload);
+            _handleStaleNS(txn, staleNS, forceReload);
 
             // Restart with new chunk manager
             startInit(txn);
@@ -888,21 +877,19 @@ void ParallelSortClusteredCursor::finishInit(OperationContext* txn) {
                 NamespaceString staleNS(i->first);
                 const StaleConfigException& exception = i->second;
 
-                bool forceReload, fullReload;
-                _markStaleNS(staleNS, exception, forceReload, fullReload);
+                bool forceReload;
+                _markStaleNS(txn, staleNS, exception, forceReload);
 
-                int logLevel = fullReload ? 0 : 1;
-                LOG(pc + logLevel)
-                    << "stale config of ns " << staleNS
-                    << " on finishing query, will retry with forced : " << forceReload
-                    << ", full : " << fullReload << causedBy(redact(exception));
+                LOG(1) << "stale config of ns " << staleNS
+                       << " on finishing query, will retry with forced : " << forceReload
+                       << causedBy(redact(exception));
 
                 // This is somewhat strange
                 if (staleNS != ns)
                     warning() << "versioned ns " << ns << " doesn't match stale config namespace "
                               << staleNS;
 
-                _handleStaleNS(txn, staleNS, forceReload, fullReload);
+                _handleStaleNS(txn, staleNS, forceReload);
             }
         }
 
@@ -949,7 +936,8 @@ void ParallelSortClusteredCursor::finishInit(OperationContext* txn) {
         _cursors[index].reset(mdata.pcState->cursor.get(), &mdata);
 
         {
-            const auto shard = uassertStatusOK(grid.shardRegistry()->getShard(txn, i->first));
+            const auto shard =
+                uassertStatusOK(Grid::get(txn)->shardRegistry()->getShard(txn, i->first));
             _servers.insert(shard->getConnString().toString());
         }
 

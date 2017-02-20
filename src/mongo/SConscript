@@ -226,7 +226,8 @@ generatedVersionFile = env.Substfile(
 env.Alias('generated-sources', generatedVersionFile)
 
 if env.TargetOSIs('windows'):
-    generatedResourceConstantFile = env.Substfile(
+    enterpriseEnv = env.Clone().InjectModule("enterprise")
+    generatedResourceConstantFile = enterpriseEnv.Substfile(
         'util/resource_constants.h.in',
         SUBST_DICT=[
             ('@mongo_version@', env['MONGO_VERSION']),
@@ -296,6 +297,7 @@ mongodLibDeps = [
     'db/startup_warnings_mongod',
     'db/ttl_d',
     'executor/network_interface_factory',
+    'rpc/rpc',
     's/commands/shared_cluster_commands',
     'transport/service_entry_point_utils',
     'transport/transport_layer_legacy',
@@ -457,7 +459,7 @@ def installBinary( e, name ):
         else:
             debug_sym_cmd = '${OBJCOPY} --only-keep-debug ${SOURCE} ${TARGET}'
         debug_sym_name += '.debug'
-    elif e.TargetOSIs('osx'):
+    elif e.TargetOSIs('darwin'):
         debug_sym_name += '.dSYM'
         debug_sym_cmd = 'dsymutil -o ${TARGET} ${SOURCE}'
     elif e.ToolchainIs('msvc'):
@@ -548,7 +550,7 @@ if not len(module_banner_filenames) == len(env['MODULE_BANNERS']):
 module_banner_dirs = set([Dir('#').rel_path(f.get_dir()) for f in env['MODULE_BANNERS']])
 module_banner_transforms = ["--transform %s=$SERVER_DIST_BASENAME" % d for d in module_banner_dirs]
 
-# Allow modules to map original file name directories to subdirectories 
+# Allow modules to map original file name directories to subdirectories
 # within the archive (e.g. { "src/mongo/db/modules/enterprise/docs": "snmp"})
 archive_addition_transforms = []
 for full_dir, archive_dir in env["ARCHIVE_ADDITION_DIR_MAP"].items():

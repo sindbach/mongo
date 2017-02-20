@@ -429,7 +429,7 @@ public:
                 {
                     // Set the namespace of the curop back to the view namespace so ctx records
                     // stats on this view namespace on destruction.
-                    stdx::lock_guard<Client>(*txn->getClient());
+                    stdx::lock_guard<Client> lk(*txn->getClient());
                     curOp->setNS_inlock(nss.ns());
                 }
                 return status;
@@ -482,7 +482,7 @@ public:
 
             // This does mongod-specific stuff like creating the input PlanExecutor and adding
             // it to the front of the pipeline if needed.
-            PipelineD::prepareCursorSource(collection, pipeline);
+            PipelineD::prepareCursorSource(collection, &request, pipeline);
 
             // Create the PlanExecutor which returns results from the pipeline. The WorkingSet
             // ('ws') and the PipelineProxyStage ('proxy') will be owned by the created
@@ -500,7 +500,7 @@ public:
 
             {
                 auto planSummary = Explain::getPlanSummary(exec.get());
-                stdx::lock_guard<Client>(*txn->getClient());
+                stdx::lock_guard<Client> lk(*txn->getClient());
                 curOp->setPlanSummary_inlock(std::move(planSummary));
             }
 

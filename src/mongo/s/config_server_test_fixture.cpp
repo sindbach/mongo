@@ -53,7 +53,6 @@
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/catalog_cache.h"
 #include "mongo/s/catalog/dist_lock_catalog_impl.h"
 #include "mongo/s/catalog/replset_dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
@@ -62,6 +61,7 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_local.h"
 #include "mongo/s/client/shard_registry.h"
@@ -192,7 +192,7 @@ Status ConfigServerTestFixture::insertToConfigCollection(OperationContext* txn,
                                              kReadPref,
                                              ns.db().toString(),
                                              request.toBSON(),
-                                             Shard::kDefaultConfigCommandTimeout,
+                                             Shard::kDefaultCommandTimeout,
                                              Shard::RetryPolicy::kNoRetry);
 
     BatchedCommandResponse batchResponse;
@@ -206,7 +206,7 @@ StatusWith<BSONObj> ConfigServerTestFixture::findOneOnConfigCollection(Operation
     auto config = getConfigShard();
     invariant(config);
 
-    auto findStatus = config->exhaustiveFindOnConfig(
+    auto findStatus = config->exhaustiveFind(
         txn, kReadPref, repl::ReadConcernLevel::kMajorityReadConcern, ns, filter, BSONObj(), 1);
     if (!findStatus.isOK()) {
         return findStatus.getStatus();
@@ -278,7 +278,7 @@ StatusWith<std::vector<BSONObj>> ConfigServerTestFixture::getIndexes(OperationCo
                                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                             ns.db().toString(),
                                             BSON("listIndexes" << ns.coll().toString()),
-                                            Shard::kDefaultConfigCommandTimeout,
+                                            Shard::kDefaultCommandTimeout,
                                             Shard::RetryPolicy::kIdempotent);
     if (!response.isOK()) {
         return response.getStatus();

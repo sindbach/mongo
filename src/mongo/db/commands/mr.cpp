@@ -68,7 +68,7 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/s/catalog/catalog_cache.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/shard_registry.h"
@@ -759,7 +759,7 @@ void State::insert(const NamespaceString& nss, const BSONObj& o) {
         b.appendElements(o);
         BSONObj bo = b.obj();
 
-        StatusWith<BSONObj> res = fixDocumentForInsert(bo);
+        StatusWith<BSONObj> res = fixDocumentForInsert(_txn->getServiceContext(), bo);
         uassertStatusOK(res.getStatus());
         if (!res.getValue().isEmpty()) {
             bo = res.getValue();
@@ -1521,7 +1521,7 @@ public:
                 }
 
                 {
-                    stdx::lock_guard<Client>(*txn->getClient());
+                    stdx::lock_guard<Client> lk(*txn->getClient());
                     CurOp::get(txn)->setPlanSummary_inlock(Explain::getPlanSummary(exec.get()));
                 }
 

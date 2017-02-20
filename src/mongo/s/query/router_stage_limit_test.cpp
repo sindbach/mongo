@@ -40,6 +40,10 @@ namespace mongo {
 
 namespace {
 
+// Note: Though the next() method on RouterExecStage and its subclasses takes an OperationContext*,
+// these stages are mocked in this test using RouterStageMock. RouterStageMock does not actually use
+// the OperationContext, so we pass a nullptr OperationContext* to next() in these tests.
+
 TEST(RouterStageLimitTest, LimitIsOne) {
     auto mockStage = stdx::make_unique<RouterStageMock>();
     mockStage->queueResult({BSON("a" << 1)});
@@ -48,17 +52,17 @@ TEST(RouterStageLimitTest, LimitIsOne) {
 
     auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 1);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(nullptr);
     ASSERT_OK(firstResult.getStatus());
     ASSERT(firstResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(nullptr);
     ASSERT_OK(secondResult.getStatus());
     ASSERT(!secondResult.getValue().getResult());
 
     // Once end-of-stream is reached, the limit stage should keep returning no results.
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(nullptr);
     ASSERT_OK(thirdResult.getStatus());
     ASSERT(!thirdResult.getValue().getResult());
 }
@@ -71,17 +75,17 @@ TEST(RouterStageLimitTest, LimitIsTwo) {
 
     auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 2);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(nullptr);
     ASSERT_OK(firstResult.getStatus());
     ASSERT(firstResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(nullptr);
     ASSERT_OK(secondResult.getStatus());
     ASSERT(firstResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*secondResult.getValue().getResult(), BSON("a" << 2));
 
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(nullptr);
     ASSERT_OK(thirdResult.getStatus());
     ASSERT(!thirdResult.getValue().getResult());
 }
@@ -95,36 +99,15 @@ TEST(RouterStageLimitTest, LimitStagePropagatesError) {
 
     auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 3);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(nullptr);
     ASSERT_OK(firstResult.getStatus());
     ASSERT(firstResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(nullptr);
     ASSERT_NOT_OK(secondResult.getStatus());
     ASSERT_EQ(secondResult.getStatus(), ErrorCodes::BadValue);
     ASSERT_EQ(secondResult.getStatus().reason(), "bad thing happened");
-}
-
-TEST(RouterStageLimitTest, LimitStagePropagatesViewDefinition) {
-    auto mockStage = stdx::make_unique<RouterStageMock>();
-
-    auto viewDef = BSON("ns"
-                        << "view_ns"
-                        << "pipeline"
-                        << BSON_ARRAY(BSON("$match" << BSONNULL)));
-
-    ClusterQueryResult cqResult;
-    cqResult.setViewDefinition(viewDef);
-    mockStage->queueResult(cqResult);
-
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 3);
-
-    auto result = limitStage->next();
-    ASSERT_OK(result.getStatus());
-    ASSERT(!result.getValue().getResult());
-    ASSERT(result.getValue().getViewDefinition());
-    ASSERT_BSONOBJ_EQ(*result.getValue().getViewDefinition(), viewDef);
 }
 
 TEST(RouterStageLimitTest, LimitStageToleratesMidStreamEOF) {
@@ -139,21 +122,21 @@ TEST(RouterStageLimitTest, LimitStageToleratesMidStreamEOF) {
 
     auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 2);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(nullptr);
     ASSERT_OK(firstResult.getStatus());
     ASSERT(firstResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(nullptr);
     ASSERT_OK(secondResult.getStatus());
     ASSERT(secondResult.getValue().isEOF());
 
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(nullptr);
     ASSERT_OK(thirdResult.getStatus());
     ASSERT(thirdResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*thirdResult.getValue().getResult(), BSON("a" << 2));
 
-    auto fourthResult = limitStage->next();
+    auto fourthResult = limitStage->next(nullptr);
     ASSERT_OK(fourthResult.getStatus());
     ASSERT(fourthResult.getValue().isEOF());
 }
@@ -167,19 +150,19 @@ TEST(RouterStageLimitTest, LimitStageRemotesExhausted) {
     auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 100);
     ASSERT_TRUE(limitStage->remotesExhausted());
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(nullptr);
     ASSERT_OK(firstResult.getStatus());
     ASSERT(firstResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
     ASSERT_TRUE(limitStage->remotesExhausted());
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(nullptr);
     ASSERT_OK(secondResult.getStatus());
     ASSERT(secondResult.getValue().getResult());
     ASSERT_BSONOBJ_EQ(*secondResult.getValue().getResult(), BSON("a" << 2));
     ASSERT_TRUE(limitStage->remotesExhausted());
 
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(nullptr);
     ASSERT_OK(thirdResult.getStatus());
     ASSERT(thirdResult.getValue().isEOF());
     ASSERT_TRUE(limitStage->remotesExhausted());

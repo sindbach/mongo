@@ -38,9 +38,9 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/sharding_raii.h"
@@ -289,13 +289,14 @@ ChunkManagerTargeter::ChunkManagerTargeter(const NamespaceString& nss, TargeterS
 
 
 Status ChunkManagerTargeter::init(OperationContext* txn) {
-    auto dbStatus = ScopedShardDatabase::getOrCreate(txn, _nss.db());
-    if (!dbStatus.isOK()) {
-        return dbStatus.getStatus();
+    auto scopedCMStatus = ScopedChunkManager::getOrCreate(txn, _nss);
+    if (!scopedCMStatus.isOK()) {
+        return scopedCMStatus.getStatus();
     }
 
-    auto scopedDb = std::move(dbStatus.getValue());
-    scopedDb.db()->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
+    const auto& scopedCM = scopedCMStatus.getValue();
+    _manager = scopedCM.cm();
+    _primary = scopedCM.primary();
 
     return Status::OK();
 }
@@ -702,13 +703,14 @@ Status ChunkManagerTargeter::refreshIfNeeded(OperationContext* txn, bool* wasCha
     shared_ptr<ChunkManager> lastManager = _manager;
     shared_ptr<Shard> lastPrimary = _primary;
 
-    auto dbStatus = ScopedShardDatabase::getOrCreate(txn, _nss.db());
-    if (!dbStatus.isOK()) {
-        return dbStatus.getStatus();
+    auto scopedCMStatus = ScopedChunkManager::getOrCreate(txn, _nss);
+    if (!scopedCMStatus.isOK()) {
+        return scopedCMStatus.getStatus();
     }
 
-    auto scopedDb = std::move(dbStatus.getValue());
-    scopedDb.db()->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
+    const auto& scopedCM = scopedCMStatus.getValue();
+    _manager = scopedCM.cm();
+    _primary = scopedCM.primary();
 
     // We now have the latest metadata from the cache.
 
@@ -763,37 +765,24 @@ Status ChunkManagerTargeter::refreshIfNeeded(OperationContext* txn, bool* wasCha
 }
 
 Status ChunkManagerTargeter::refreshNow(OperationContext* txn, RefreshType refreshType) {
-    auto dbStatus = ScopedShardDatabase::getOrCreate(txn, _nss.db());
-    if (!dbStatus.isOK()) {
-        return dbStatus.getStatus();
+    if (refreshType == RefreshType_ReloadDatabase) {
+        Grid::get(txn)->catalogCache()->invalidate(_nss.db().toString());
     }
-
-    auto scopedDb = std::move(dbStatus.getValue());
 
     // Try not to spam the configs
     refreshBackoff();
 
-    // TODO: Improve synchronization and make more explicit
-    if (refreshType == RefreshType_RefreshChunkManager) {
-        try {
-            // Forces a remote check of the collection info, synchronization between threads happens
-            // internally
-            scopedDb.db()->getChunkManagerIfExists(txn, _nss.ns(), true);
-        } catch (const DBException& ex) {
-            return Status(ErrorCodes::UnknownError, ex.toString());
-        }
+    ScopedChunkManager::refreshAndGet(txn, _nss);
 
-        scopedDb.db()->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
-    } else if (refreshType == RefreshType_ReloadDatabase) {
-        try {
-            // Dumps the db info, reloads it all, synchronization between threads happens internally
-            scopedDb.db()->reload(txn);
-        } catch (const DBException& ex) {
-            return Status(ErrorCodes::UnknownError, ex.toString());
-        }
-
-        scopedDb.db()->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
+    auto scopedCMStatus = ScopedChunkManager::get(txn, _nss);
+    if (!scopedCMStatus.isOK()) {
+        return scopedCMStatus.getStatus();
     }
+
+    const auto& scopedCM = scopedCMStatus.getValue();
+
+    _manager = scopedCM.cm();
+    _primary = scopedCM.primary();
 
     return Status::OK();
 }
