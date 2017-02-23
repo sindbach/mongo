@@ -611,7 +611,7 @@ Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
          return Value(BSONNULL);
     }
 
-    uassert(40379, 
+    uassert(40383, 
              str::stream() << "$objectToArray requires a document input, found: "
                            << typeName(targetVal.getType()), 
              (targetVal.getType() == Object)) ;
@@ -621,7 +621,10 @@ Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
     FieldIterator iter = targetVal.getDocument().fieldIterator();
     while(iter.more()){
         Document::FieldPair pair = iter.next();
-        output.push_back(Value(vector<Value> {Value(pair.first), pair.second}));
+        MutableDocument keyvalue;
+        keyvalue.addField("k", Value(pair.first));
+        keyvalue.addField("v", pair.second); 
+        output.push_back(keyvalue.freezeToValue());
     }
 
     return Value(output);
