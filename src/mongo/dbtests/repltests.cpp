@@ -45,6 +45,7 @@
 #include "mongo/db/ops/update.h"
 #include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/sync_tail.h"
@@ -76,7 +77,13 @@ public:
         ReplSettings replSettings;
         replSettings.setOplogSizeBytes(10 * 1024 * 1024);
         replSettings.setMaster(true);
-        setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
+        setGlobalReplicationCoordinator(
+            new repl::ReplicationCoordinatorMock(_txn.getServiceContext(), replSettings));
+
+        // Since the Client object persists across tests, even though the global
+        // ReplicationCoordinator does not, we need to clear the last op associated with the client
+        // to avoid the invariant in ReplClientInfo::setLastOp that the optime only goes forward.
+        repl::ReplClientInfo::forClient(_txn.getClient()).clearLastOp_forTest();
 
         getGlobalServiceContext()->setOpObserver(stdx::make_unique<OpObserverImpl>());
 
@@ -100,7 +107,8 @@ public:
             deleteAll(cllNS());
             ReplSettings replSettings;
             replSettings.setOplogSizeBytes(10 * 1024 * 1024);
-            setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
+            setGlobalReplicationCoordinator(
+                new repl::ReplicationCoordinatorMock(_txn.getServiceContext(), replSettings));
         } catch (...) {
             FAIL("Exception while cleaning up test");
         }

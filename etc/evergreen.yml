@@ -211,7 +211,7 @@ functions:
       working_dir: src
       script: |
         set -o errexit
-        ${decompress|unzip} mongo-binaries.tgz
+        ${decompress} mongo-binaries.tgz
         cp mongodb*/bin/* .
 
   "check binary version" : &check_binary_version
@@ -350,7 +350,7 @@ functions:
         build_phase='${task_name}_${execution}'
         END_OF_CREDS
 
-  "upload debugsymbols" :
+  "upload debugsymbols" : &upload_debugsymbols
     command: s3.put
     params:
       aws_key: ${aws_key}
@@ -363,7 +363,7 @@ functions:
       build_variants:
         *debug_symbol_variants
 
-  "fetch debugsymbols archive" :
+  "fetch debugsymbols archive" : &fetch_debugsymbols_archive
     command: s3.get
     params:
       aws_key: ${aws_key}
@@ -373,6 +373,19 @@ functions:
       local_file: src/mongo-debugsymbols.tgz
       build_variants:
         *debug_symbol_variants
+
+  "extract debugsymbols" : &extract_debugsymbols
+    command: shell.exec
+    params:
+      working_dir: src
+      build_variants:
+        *debug_symbol_variants
+      script: |
+        set -o errexit
+        set -o verbose
+        ${decompress} mongo-debugsymbols.tgz
+        mv mongodb*/mongo.{debug,dSYM,pdb} mongodb*/mongod.{debug,dSYM,pdb} mongodb*/mongos.{debug,dSYM,pdb} . 2>/dev/null || true
+        rm -r mongodb*/*.{debug,dSYM,pdb} mongo-debugsymbols.tgz 2>/dev/null || true
 
   "build rocksdb" :
     command: shell.exec
@@ -543,7 +556,7 @@ functions:
         ${san_symbolizer}    \
         ${snmp_config_path}  \
         ${resmoke_wrapper}   \
-        ${python|python} buildscripts/resmoke.py ${resmoke_args} $extra_args ${test_flags} --log=buildlogger --reportFile=report.json
+        ${python|python} buildscripts/resmoke.py ${resmoke_args} $extra_args ${test_flags} --log=buildlogger --reportFile=report.json --taskId=${task_id}
 
 
   "do jepsen setup" :
@@ -847,23 +860,18 @@ functions:
 
         for i in {1..3}
         do
-          if ! kitchen converge "${packager_distro}"; then
-            converged="false"
+          if ! kitchen verify "${packager_distro}"; then
+            verified="false"
             kitchen destroy "${packager_distro}" || true
             sleep 30
           else
+            verified="true"
             break
           fi
         done
 
-        test "$converged" != "false"
-
-        if ! kitchen verify "${packager_distro}"; then
-          verified="false"
-        fi
-
         kitchen destroy "${packager_distro}" || true
-        test "$verified" != "false"
+        test "$verified" = "true"
 
 pre:
   - func: "kill processes"
@@ -920,7 +928,7 @@ post:
         ${set_sudo}
         # Use dmesg -T option, if supported, to display timestamps.
         dmesg=dmesg
-        dmesg -T > /dev/null 2>&1
+        $sudo dmesg -T > /dev/null 2>&1
         if [ $? -eq 0 ]; then
           dmesg="dmesg -T"
         fi
@@ -1118,12 +1126,15 @@ post:
   - func: "cleanup environment"
 
 timeout:
+  - func: "fetch debugsymbols archive"
+  - func: "extract debugsymbols"
   - command: shell.exec
     params:
       working_dir: src
       script: |
         set -o verbose
-        hang_analyzer_option="-p ${hang_analyzer_processes|dbtest,java,mongo,mongod,mongos,python,_test} -g bsondump,mongodump,mongoexport,mongofiles,mongoimport,mongooplog,mongoreplay,mongorestore,mongostat,mongotop"
+        ${set_sudo}
+        $sudo hang_analyzer_option="-p ${hang_analyzer_processes|dbtest,java,mongo,mongod,mongos,python,_test} -g bsondump,mongodump,mongoexport,mongofiles,mongoimport,mongooplog,mongoreplay,mongorestore,mongostat,mongotop"
         echo "Calling the hang analyzer: python buildscripts/hang_analyzer.py $hang_analyzer_option"
         PATH=/opt/mongodbtoolchain/gdb/bin:$PATH python buildscripts/hang_analyzer.py $hang_analyzer_option
 
@@ -1703,7 +1714,16 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=disk
+      resmoke_args: --suites=disk_mmapv1
+      run_multiple_jobs: false
+
+- <<: *task_template
+  name: disk_WT
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=disk_wiredtiger --excludeWithAnyTags=requires_mmapv1
       run_multiple_jobs: false
 
 - <<: *task_template
@@ -2208,6 +2228,17 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
+  name: multiversion_auth
+  commands:
+  - func: "do setup"
+  - func: "do multiversion setup"
+  - func: "run tests"
+    vars:
+      task_path_suffix: /data/multiversion
+      resmoke_args: --suites=multiversion_auth --storageEngine=mmapv1 --excludeWithAnyTags=requires_wiredtiger
+      run_multiple_jobs: true
+
+- <<: *task_template
   name: multiversion_WT
   commands:
   - func: "do setup"
@@ -2419,6 +2450,7 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout
     vars:
       resmoke_args: --suites=concurrency --storageEngine=mmapv1
 
@@ -2427,6 +2459,7 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout
     vars:
       resmoke_args: --suites=concurrency --storageEngine=wiredTiger
 
@@ -2435,6 +2468,7 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout
     vars:
       resmoke_args: --suites=concurrency_replication --storageEngine=mmapv1
 
@@ -2443,22 +2477,27 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout
     vars:
       resmoke_args: --suites=concurrency_replication --storageEngine=wiredTiger
 
 - <<: *task_template
   name: concurrency_sharded
+  exec_timeout_secs: 43200 # 12 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout for each test
     vars:
       resmoke_args: --suites=concurrency_sharded --storageEngine=mmapv1
 
 - <<: *task_template
   name: concurrency_sharded_WT
+  exec_timeout_secs: 43200 # 12 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout for each test
     vars:
       resmoke_args: --suites=concurrency_sharded --storageEngine=wiredTiger
 
@@ -2467,7 +2506,7 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
-    timeout_secs: 10800 # 3 hour timeout
+    timeout_secs: 21600 # 6 hour timeout
     vars:
       resmoke_args: --executor=concurrency jstests/concurrency/fsm_all_simultaneous.js --storageEngine=mmapv1
 
@@ -2476,6 +2515,7 @@ tasks:
   commands:
   - func: "do setup"
   - func: "run tests"
+    timeout_secs: 21600 # 6 hour timeout
     vars:
       resmoke_args: --executor=concurrency jstests/concurrency/fsm_all_simultaneous.js --storageEngine=wiredTiger
 
@@ -3358,6 +3398,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -3405,6 +3446,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: multiversion_WT
   - name: multiversion_multistorage_engine
   - name: noPassthrough
@@ -3519,6 +3561,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: failpoints_auth
@@ -3624,6 +3667,7 @@ buildvariants:
   - name: auth
   - name: dbtest
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -3762,6 +3806,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -3885,6 +3930,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -4017,6 +4063,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -4164,9 +4211,20 @@ buildvariants:
   - name: parallel_WT
   - name: parallel_compatibility_WT
   - name: concurrency_WT
+    distros:
+    # There is a known performance issue with the ubuntu1604-arm64-1.linaro.build.10gen.cc host
+    # that's part of the ubuntu1604-arm64-large pool. We run the concurrency tests only on the
+    # hosts from the ubuntu1604-arm64-small pool to work around this issue.
+    - ubuntu1604-arm64-small
   - name: concurrency_replication_WT
+    distros:
+    - ubuntu1604-arm64-small
   - name: concurrency_sharded_WT
+    distros:
+    - ubuntu1604-arm64-small
   - name: concurrency_simultaneous_WT
+    distros:
+    - ubuntu1604-arm64-small
   - name: replicasets_WT
   - name: replicasets_auth
   - name: replication_WT
@@ -4242,9 +4300,20 @@ buildvariants:
   - name: parallel_WT
   - name: parallel_compatibility_WT
   - name: concurrency_WT
+    distros:
+    # There is a known performance issue with the ubuntu1604-arm64-1.linaro.build.10gen.cc host
+    # that's part of the ubuntu1604-arm64-large pool. We run the concurrency tests only on the
+    # hosts from the ubuntu1604-arm64-small pool to work around this issue.
+    - ubuntu1604-arm64-small
   - name: concurrency_replication_WT
+    distros:
+    - ubuntu1604-arm64-small
   - name: concurrency_sharded_WT
+    distros:
+    - ubuntu1604-arm64-small
   - name: concurrency_simultaneous_WT
+    distros:
+    - ubuntu1604-arm64-small
   - name: replicasets_WT
   - name: replicasets_auth
   - name: replication_WT
@@ -4357,7 +4426,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: s390x-enterprise-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
     num_jobs_available: 2
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -4570,6 +4639,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -4695,6 +4765,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: gle_auth
@@ -4807,6 +4878,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: gle_auth
@@ -4847,6 +4919,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: multiversion_WT
   - name: multiversion_multistorage_engine
   - name: noPassthrough
@@ -4930,6 +5003,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: httpinterface
@@ -5204,6 +5278,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: jsCore
@@ -5312,7 +5387,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: osx
     push_arch: x86_64
-    compile_flags: --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++
+    compile_flags: --allocator=system -j$(sysctl -n hw.logicalcpu) --release --libc++ CCFLAGS="-mmacosx-version-min=10.10" LINKFLAGS="-mmacosx-version-min=10.10"
     num_jobs_available: 1
     build_mongoreplay: true
   tasks:
@@ -5325,6 +5400,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: gle_auth
@@ -5414,7 +5490,7 @@ buildvariants:
     push_name: osx-ssl
     push_arch: x86_64
     tooltags: "-tags ssl"
-    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++
+    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --libc++ CCFLAGS="-mmacosx-version-min=10.10" LINKFLAGS="-mmacosx-version-min=10.10"
     num_jobs_available: 1
     build_mongoreplay: true
   tasks:
@@ -5429,6 +5505,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: gle_auth
@@ -5515,7 +5592,7 @@ buildvariants:
     push_name: osx-debug
     push_arch: x86_64
     num_jobs_available: 1
-    compile_flags: --dbg=on --opt=on --allocator=system -j$(sysctl -n hw.logicalcpu) --osx-version-min=10.7 --libc++
+    compile_flags: --dbg=on --opt=on --allocator=system -j$(sysctl -n hw.logicalcpu) --libc++ CCFLAGS="-mmacosx-version-min=10.10" LINKFLAGS="-mmacosx-version-min=10.10"
     build_mongoreplay: true
   tasks:
   - name: compile
@@ -5527,6 +5604,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: jsCore
@@ -5557,7 +5635,7 @@ buildvariants:
     push_name: osx
     push_arch: x86_64-enterprise
     tooltags: "-tags 'ssl sasl'"
-    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++
+    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --libc++ CCFLAGS="-mmacosx-version-min=10.10" LINKFLAGS="-mmacosx-version-min=10.10"
     num_jobs_available: 1
     build_mongoreplay: true
   tasks:
@@ -5662,6 +5740,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: dur_jscore_passthrough
   - name: durability
   - name: ese_WT
@@ -5736,6 +5815,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: multiversion_WT
   - name: multiversion_multistorage_engine
   - name: noPassthrough
@@ -5907,6 +5987,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: dur_jscore_passthrough
   - name: durability
   - name: ese_WT
@@ -5967,6 +6048,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: multiversion_WT
   - name: multiversion_multistorage_engine
   - name: noPassthrough
@@ -6161,6 +6243,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -6285,6 +6368,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -6539,7 +6623,7 @@ buildvariants:
   expansions:
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
-    compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
     num_jobs_available: 2
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -6970,7 +7054,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: s390x-enterprise-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -7090,6 +7174,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -7250,7 +7335,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: s390x-enterprise-suse11
-    compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
+    compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z9-109 -mtune=z10" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -7364,6 +7449,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -7487,6 +7573,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: failpoints
   - name: httpinterface
@@ -7711,6 +7798,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -7837,6 +7925,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: durability
   - name: dur_jscore_passthrough
   - name: failpoints
@@ -8187,7 +8276,7 @@ buildvariants:
   expansions:
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
-    compile_flags: --dbg=on --opt=on --ssl --link-model=static MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --dbg=on --opt=on --ssl --link-model=static MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
     num_jobs_available: 2
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling
     build_mongoreplay: true
@@ -8386,6 +8475,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: dur_jscore_passthrough
   - name: durability
   - name: ese_WT
@@ -8429,6 +8519,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: multiversion_WT
   - name: multiversion_multistorage_engine
   - name: noPassthrough
@@ -8566,6 +8657,7 @@ buildvariants:
   - name: dbtest
   - name: dbtest_WT
   - name: disk
+  - name: disk_WT
   - name: dur_jscore_passthrough
   - name: durability
   - name: ese_WT
@@ -8609,6 +8701,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: multiversion_WT
   - name: multiversion_multistorage_engine
   - name: noPassthrough

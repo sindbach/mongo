@@ -138,9 +138,10 @@ struct ClusterClientCursorParams {
     // unreachable host.
     bool isAllowPartialResults = false;
 
-    // OperationContext of the calling thread. Used to append Client dependent metadata to remote
-    // requests.
-    OperationContext* txn;
+    // If the read is done against a view, an error is returned along with the view definition in
+    // the first response from the primary shard for the base collection. Calling code can re-run
+    // the read against the base collection by using this returned view definition.
+    boost::optional<BSONObj> viewDefinition;
 };
 
 }  // mongo

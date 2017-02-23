@@ -77,7 +77,7 @@ public:
      * Constructs a new AsyncResultsMerger. The TaskExecutor* must remain valid for the lifetime of
      * the ARM.
      */
-    AsyncResultsMerger(executor::TaskExecutor* executor, ClusterClientCursorParams&& params);
+    AsyncResultsMerger(executor::TaskExecutor* executor, ClusterClientCursorParams* params);
 
     /**
      * In order to be destroyed, either
@@ -100,13 +100,6 @@ public:
      * the cursor is not tailable + awaitData).
      */
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout);
-
-    /**
-     * Update the operation context for remote requests.
-     *
-     * Network requests depend on having a valid operation context for user initiated actions.
-     */
-    void setOperationContext(OperationContext* txn);
 
     /**
      * Returns true if there is no need to schedule remote work in order to take the next action.
@@ -161,7 +154,7 @@ public:
      *   the caller should call nextEvent() to retry the request on the hosts that errored. If
      *   ready() is true, then either the error was not retriable or it has exhausted max retries.
      */
-    StatusWith<executor::TaskExecutor::EventHandle> nextEvent();
+    StatusWith<executor::TaskExecutor::EventHandle> nextEvent(OperationContext* txn);
 
     /**
      * Starts shutting down this ARM. Returns a handle to an event which is signaled when this
@@ -176,7 +169,7 @@ public:
      *
      * May be called multiple times (idempotent).
      */
-    executor::TaskExecutor::EventHandle kill();
+    executor::TaskExecutor::EventHandle kill(OperationContext* txn);
 
 private:
     /**
@@ -298,7 +291,7 @@ private:
      *
      * Returns success if the command to retrieve the next batch was scheduled successfully.
      */
-    Status askForNextBatch_inlock(size_t remoteIndex);
+    Status askForNextBatch_inlock(OperationContext* txn, size_t remoteIndex);
 
     /**
      * Checks whether or not the remote cursors are all exhausted.
@@ -329,6 +322,7 @@ private:
      * buffered.
      */
     void handleBatchResponse(const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData,
+                             OperationContext* txn,
                              size_t remoteIndex);
 
     /**
@@ -348,12 +342,13 @@ private:
     /**
      * Schedules a killCursors command to be run on all remote hosts that have open cursors.
      */
-    void scheduleKillCursors_inlock();
+    void scheduleKillCursors_inlock(OperationContext* txn);
 
     // Not owned here.
     executor::TaskExecutor* _executor;
 
-    ClusterClientCursorParams _params;
+    // Not owned here.
+    ClusterClientCursorParams* _params;
 
     // The metadata obj to pass along with the command request. Used to indicate that the command is
     // ok to run on secondaries.

@@ -35,14 +35,15 @@
 #include <vector>
 
 #include "mongo/db/lasterror.h"
-#include "mongo/s/catalog/catalog_cache.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_database.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
@@ -77,36 +78,6 @@ void DBConfig::markNSNotSharded(const std::string& ns) {
     CollectionInfoMap::iterator it = _collections.find(ns);
     if (it != _collections.end()) {
         _collections.erase(it);
-    }
-}
-
-void DBConfig::getChunkManagerOrPrimary(OperationContext* txn,
-                                        const std::string& ns,
-                                        std::shared_ptr<ChunkManager>& manager,
-                                        std::shared_ptr<Shard>& primary) {
-    manager.reset();
-    primary.reset();
-
-    const auto shardRegistry = Grid::get(txn)->shardRegistry();
-
-    stdx::lock_guard<stdx::mutex> lk(_lock);
-
-    auto it = _collections.find(ns);
-
-    if (it == _collections.end()) {
-        // If we don't know about this namespace, it's unsharded by default
-        auto shardStatus = shardRegistry->getShard(txn, _primaryId);
-        if (!shardStatus.isOK()) {
-            uasserted(40371,
-                      str::stream() << "The primary shard for collection " << ns
-                                    << " could not be loaded due to error "
-                                    << shardStatus.getStatus().toString());
-        }
-
-        primary = std::move(shardStatus.getValue());
-    } else {
-        const auto& ci = it->second;
-        manager = ci.cm;
     }
 }
 
@@ -225,7 +196,8 @@ std::shared_ptr<ChunkManager> DBConfig::getChunkManager(OperationContext* txn,
         // Reload the chunk manager outside of the DBConfig's mutex so as to not block operations
         // for different collections on the same database
         tempChunkManager.reset(new ChunkManager(
-            oldManager->getns(),
+            NamespaceString(oldManager->getns()),
+            oldManager->getVersion().epoch(),
             oldManager->getShardKeyPattern(),
             oldManager->getDefaultCollator() ? oldManager->getDefaultCollator()->clone() : nullptr,
             oldManager->isUnique()));
@@ -233,9 +205,20 @@ std::shared_ptr<ChunkManager> DBConfig::getChunkManager(OperationContext* txn,
 
         if (!tempChunkManager->numChunks()) {
             // Maybe we're not sharded any more, so do a full reload
-            reload(txn);
+            const auto currentReloadIteration = _reloadCount.load();
 
-            return getChunkManager(txn, ns, false);
+            const bool successful = [&]() {
+                stdx::lock_guard<stdx::mutex> lk(_lock);
+                return _loadIfNeeded(txn, currentReloadIteration);
+            }();
+
+            // If we aren't successful loading the database entry, we don't want to keep the stale
+            // object around which has invalid data.
+            if (!successful) {
+                Grid::get(txn)->catalogCache()->invalidate(_name);
+            }
+
+            return getChunkManager(txn, ns);
         }
     }
 
@@ -341,8 +324,25 @@ bool DBConfig::_loadIfNeeded(OperationContext* txn, Counter reloadIteration) {
         _collections.erase(coll.getNs().ns());
 
         if (!coll.getDropped()) {
+            std::unique_ptr<CollatorInterface> defaultCollator;
+            if (!coll.getDefaultCollation().isEmpty()) {
+                auto statusWithCollator = CollatorFactoryInterface::get(txn->getServiceContext())
+                                              ->makeFromBSON(coll.getDefaultCollation());
+
+                // The collation was validated upon collection creation.
+                invariantOK(statusWithCollator.getStatus());
+
+                defaultCollator = std::move(statusWithCollator.getValue());
+            }
+
+            std::unique_ptr<ChunkManager> manager(
+                stdx::make_unique<ChunkManager>(coll.getNs(),
+                                                coll.getEpoch(),
+                                                ShardKeyPattern(coll.getKeyPattern()),
+                                                std::move(defaultCollator),
+                                                coll.getUnique()));
+
             // Do the blocking collection load
-            std::unique_ptr<ChunkManager> manager(stdx::make_unique<ChunkManager>(txn, coll));
             manager->loadExistingRanges(txn, nullptr);
 
             // Collections with no chunks are unsharded, no matter what the collections entry says
@@ -357,24 +357,6 @@ bool DBConfig::_loadIfNeeded(OperationContext* txn, Counter reloadIteration) {
     _reloadCount.fetchAndAdd(1);
 
     return true;
-}
-
-bool DBConfig::reload(OperationContext* txn) {
-    bool successful = false;
-    const auto currentReloadIteration = _reloadCount.load();
-
-    {
-        stdx::lock_guard<stdx::mutex> lk(_lock);
-        successful = _loadIfNeeded(txn, currentReloadIteration);
-    }
-
-    // If we aren't successful loading the database entry, we don't want to keep the stale
-    // object around which has invalid data.
-    if (!successful) {
-        Grid::get(txn)->catalogCache()->invalidate(_name);
-    }
-
-    return successful;
 }
 
 void DBConfig::getAllShardIds(std::set<ShardId>* shardIds) {

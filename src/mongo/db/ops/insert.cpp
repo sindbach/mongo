@@ -29,7 +29,8 @@
  */
 
 #include "mongo/db/ops/insert.h"
-#include "mongo/db/global_timestamp.h"
+#include "mongo/db/logical_clock.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/views/durable_view_catalog.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -39,7 +40,7 @@ using std::string;
 
 using namespace mongoutils;
 
-StatusWith<BSONObj> fixDocumentForInsert(const BSONObj& doc) {
+StatusWith<BSONObj> fixDocumentForInsert(ServiceContext* service, const BSONObj& doc) {
     if (doc.objsize() > BSONObjMaxUserSize)
         return StatusWith<BSONObj>(ErrorCodes::BadValue,
                                    str::stream() << "object to insert too large"
@@ -124,7 +125,8 @@ StatusWith<BSONObj> fixDocumentForInsert(const BSONObj& doc) {
         if (hadId && e.fieldNameStringData() == "_id") {
             // no-op
         } else if (e.type() == bsonTimestamp && e.timestampValue() == 0) {
-            b.append(e.fieldName(), getNextGlobalTimestamp());
+            auto nextTime = LogicalClock::get(service)->reserveTicks(1);
+            b.append(e.fieldName(), nextTime.asTimestamp());
         } else {
             b.append(e);
         }

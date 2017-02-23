@@ -54,6 +54,8 @@
 #include "mongo/db/initialize_server_global_state.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/log_process_details.h"
+#include "mongo/db/logical_clock.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_noop.h"
@@ -61,6 +63,7 @@
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/platform/process_id.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/sharding_catalog_manager.h"
@@ -199,7 +202,12 @@ static Status initializeSharding(OperationContext* txn) {
         mongosGlobalParams.configdbs,
         generateDistLockProcessId(txn),
         std::move(shardFactory),
-        []() { return stdx::make_unique<rpc::ShardingEgressMetadataHookForMongos>(); },
+        []() {
+            auto hookList = stdx::make_unique<rpc::EgressMetadataHookList>();
+            // TODO SERVER-27750: add LogicalTimeMetadataHook
+            hookList->addHook(stdx::make_unique<rpc::ShardingEgressMetadataHookForMongos>());
+            return hookList;
+        },
         [](ShardingCatalogClient* catalogClient, std::unique_ptr<executor::TaskExecutor> executor) {
             return nullptr;  // Only config servers get a real ShardingCatalogManager.
         });
@@ -265,6 +273,11 @@ static ExitCode runMongosServer() {
     }
 
     auto opCtx = cc().makeOperationContext();
+
+    auto timeProofService = stdx::make_unique<TimeProofService>();
+    auto logicalClock = stdx::make_unique<LogicalClock>(
+        opCtx->getServiceContext(), std::move(timeProofService), false);
+    LogicalClock::set(opCtx->getServiceContext(), std::move(logicalClock));
 
     {
         Status status = initializeSharding(opCtx.get());

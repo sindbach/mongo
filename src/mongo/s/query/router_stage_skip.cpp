@@ -39,9 +39,9 @@ RouterStageSkip::RouterStageSkip(std::unique_ptr<RouterExecStage> child, long lo
     invariant(skip > 0);
 }
 
-StatusWith<ClusterQueryResult> RouterStageSkip::next() {
+StatusWith<ClusterQueryResult> RouterStageSkip::next(OperationContext* txn) {
     while (_skippedSoFar < _skip) {
-        auto next = getChildStage()->next();
+        auto next = getChildStage()->next(txn);
         if (!next.isOK()) {
             return next;
         }
@@ -50,18 +50,14 @@ StatusWith<ClusterQueryResult> RouterStageSkip::next() {
             return next;
         }
 
-        if (next.getValue().getViewDefinition()) {
-            return next;
-        }
-
         ++_skippedSoFar;
     }
 
-    return getChildStage()->next();
+    return getChildStage()->next(txn);
 }
 
-void RouterStageSkip::kill() {
-    getChildStage()->kill();
+void RouterStageSkip::kill(OperationContext* txn) {
+    getChildStage()->kill(txn);
 }
 
 bool RouterStageSkip::remotesExhausted() {
@@ -70,10 +66,6 @@ bool RouterStageSkip::remotesExhausted() {
 
 Status RouterStageSkip::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     return getChildStage()->setAwaitDataTimeout(awaitDataTimeout);
-}
-
-void RouterStageSkip::setOperationContext(OperationContext* txn) {
-    return getChildStage()->setOperationContext(txn);
 }
 
 }  // namespace mongo

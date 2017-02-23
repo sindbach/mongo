@@ -42,9 +42,9 @@
 #include "mongo/db/commands/mr.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/catalog_cache.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_registry.h"
@@ -477,7 +477,7 @@ public:
                 // If the database has sharding already enabled, we can ignore the error
                 if (status.isOK()) {
                     // Invalidate the output database so it gets reloaded on the next fetch attempt
-                    Grid::get(txn)->catalogCache()->invalidate(outputCollNss.db().toString());
+                    Grid::get(txn)->catalogCache()->invalidate(outputCollNss.db());
                 } else if (status != ErrorCodes::AlreadyInitialized) {
                     uassertStatusOK(status);
                 }

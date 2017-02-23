@@ -43,19 +43,19 @@ public:
 
     ~ClusterClientCursorMock();
 
-    StatusWith<ClusterQueryResult> next() final;
+    StatusWith<ClusterQueryResult> next(OperationContext* txn) final;
 
-    void kill() final;
+    void kill(OperationContext* txn) final;
 
     bool isTailable() const final;
+
+    boost::optional<BSONObj> viewDefinition() const final;
 
     long long getNumReturnedSoFar() const final;
 
     void queueResult(const ClusterQueryResult& result) final;
 
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
-
-    void setOperationContext(OperationContext* txn) final;
 
     /**
      * Returns true unless marked as having non-exhausted remote cursors via

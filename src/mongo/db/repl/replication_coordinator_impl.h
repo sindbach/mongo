@@ -89,7 +89,8 @@ class ReplicationCoordinatorImpl : public ReplicationCoordinator {
     MONGO_DISALLOW_COPYING(ReplicationCoordinatorImpl);
 
 public:
-    ReplicationCoordinatorImpl(const ReplSettings& settings,
+    ReplicationCoordinatorImpl(ServiceContext* serviceContext,
+                               const ReplSettings& settings,
                                std::unique_ptr<ReplicationCoordinatorExternalState> externalState,
                                std::unique_ptr<executor::NetworkInterface> network,
                                std::unique_ptr<TopologyCoordinator> topoCoord,
@@ -199,8 +200,9 @@ public:
 
     virtual void processReplSetGetConfig(BSONObjBuilder* result) override;
 
-    virtual void processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata,
-                                        bool advanceCommitPoint) override;
+    virtual void processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) override;
+
+    virtual void advanceCommitPoint(const OpTime& committedOpTime) override;
 
     virtual void cancelAndRescheduleElectionTimeout() override;
 
@@ -261,8 +263,10 @@ public:
 
     virtual void resetLastOpTimesFromOplog(OperationContext* txn) override;
 
-    virtual bool shouldChangeSyncSource(const HostAndPort& currentSource,
-                                        const rpc::ReplSetMetadata& metadata) override;
+    virtual bool shouldChangeSyncSource(
+        const HostAndPort& currentSource,
+        const rpc::ReplSetMetadata& replMetadata,
+        boost::optional<rpc::OplogQueryMetadata> oqMetadata) override;
 
     virtual OpTime getLastCommittedOpTime() const override;
 
@@ -288,6 +292,11 @@ public:
      * Get current term from topology coordinator
      */
     virtual long long getTerm() override;
+
+    // Returns the ServiceContext where this instance runs.
+    virtual ServiceContext* getServiceContext() override {
+        return _service;
+    }
 
     virtual Status updateTerm(OperationContext* txn, long long term) override;
 
@@ -584,8 +593,7 @@ private:
      * Updates the last committed OpTime to be "committedOpTime" if it is more recent than the
      * current last committed OpTime.
      */
-    void _setLastCommittedOpTime(const OpTime& committedOpTime);
-    void _setLastCommittedOpTime_inlock(const OpTime& committedOpTime);
+    void _advanceCommitPoint_inlock(const OpTime& committedOpTime);
 
     /**
      * Helper to wake waiters in _replicationWaiterList that are doneWaitingForReplication.
@@ -978,12 +986,13 @@ private:
     /**
      * Callback that processes the ReplSetMetadata returned from a command run against another
      * replica set member and so long as the config version in the metadata matches the replica set
-     * config version this node currently has, updates the current term and optionally updates
-     * this node's notion of the commit point.
+     * config version this node currently has, updates the current term.
+     *
+     * This does NOT update this node's notion of the commit point.
+     *
      * Returns the finish event which is invalid if the process has already finished.
      */
-    EventHandle _processReplSetMetadata_incallback(const rpc::ReplSetMetadata& replMetadata,
-                                                   bool advanceCommitPoint);
+    EventHandle _processReplSetMetadata_incallback(const rpc::ReplSetMetadata& replMetadata);
 
     /**
      * Prepares a metadata object for ReplSetMetadata.
@@ -1171,6 +1180,9 @@ private:
     // sending heartbeat requests to that host.  This set is cleared whenever
     // a node discovers that it is a member of a config.
     unordered_set<HostAndPort> _seedList;  // (X)
+
+    // Back pointer to the ServiceContext that has started the instance.
+    ServiceContext* const _service;  // (S)
 
     // Parsed command line arguments related to replication.
     const ReplSettings _settings;  // (R)

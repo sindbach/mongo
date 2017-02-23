@@ -63,10 +63,12 @@ env.Library(
 
 env.Library(
     target='initialize_snmp',
-	source= [
-		'initialize_snmp.cpp',
-	],
-	LIBDEPS=[],
+    source= [
+        'initialize_snmp.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
 )
 
 env.CppUnitTest(
@@ -241,17 +243,6 @@ env.CppUnitTest(
 )
 
 env.Library(
-    target='global_timestamp',
-    source=[
-        'global_timestamp.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/service_context'
-    ]
-)
-
-env.Library(
     target='namespace_string',
     source=[
         'namespace_string.cpp',
@@ -349,7 +340,7 @@ env.Library(
     ],
 )
 
-env.Library(
+env.Clone().InjectModule("enterprise").Library(
     target="server_options",
     source=[
         "server_options_helpers.cpp",
@@ -523,7 +514,7 @@ env.Library(
     ],
 )
 
-env.Library(
+env.Clone().InjectModule("enterprise").Library(
     target="audit",
     source=[
         "audit.cpp",
@@ -879,7 +870,6 @@ env.Library(
         "exec/working_set",
         "fts/ftsmongod",
         "ftdc/ftdc_mongod",
-        "global_timestamp",
         "index/index_descriptor",
         "index/index_access_methods",
         "index_d",
@@ -932,6 +922,73 @@ env.Library(
         "ttl_d",
         "update_index_data",
         "views/views_mongod",
+    ],
+)
+
+env.Library(
+    target='logical_time',
+    source=[
+        'logical_time.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+)
+
+env.Library(
+    target='signed_logical_time',
+    source=[
+        'signed_logical_time.cpp',
+    ],
+    LIBDEPS=[
+        'logical_time',
+    ],
+)
+
+env.Library(
+    target='logical_clock',
+    source=[
+        'logical_clock.cpp',
+    ],
+    LIBDEPS=[
+        'service_context',
+        'signed_logical_time',
+    ],
+)
+
+env.CppUnitTest(
+    target='logical_time_test',
+    source=[
+        'logical_time_test.cpp',
+    ],
+    LIBDEPS=[
+        'logical_time',
+        'signed_logical_time',
+    ],
+)
+
+env.CppUnitTest(
+    target='logical_clock_test',
+    source=[
+        'logical_clock_test.cpp',
+    ],
+    LIBDEPS=[
+        'service_context',
+        'logical_clock',
+        'signed_logical_time',
+    ],
+)
+
+env.Library(
+    target= 'logical_clock_test_fixture',
+    source= [
+        'logical_clock_test_fixture.cpp',
+    ],
+    LIBDEPS= [
+        'service_context',
+        'logical_clock',
+        'signed_logical_time',
+        '$BUILD_DIR/mongo/unittest/unittest',
     ],
 )
 

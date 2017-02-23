@@ -31,7 +31,6 @@
 #include <map>
 #include <set>
 #include <string>
-#include <vector>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -46,8 +45,8 @@
 namespace mongo {
 
 class CanonicalQuery;
-class CollectionType;
 struct QuerySolutionNode;
+class NamespaceString;
 class OperationContext;
 
 // The key for the map is max for each Chunk or ChunkRange
@@ -57,60 +56,40 @@ class ChunkManager {
     MONGO_DISALLOW_COPYING(ChunkManager);
 
 public:
-    typedef std::map<ShardId, ChunkVersion> ShardVersionMap;
-
-    // Loads a new chunk manager from a collection document
-    ChunkManager(OperationContext* txn, const CollectionType& coll);
-
-    // Creates an empty chunk manager for the namespace
-    ChunkManager(const std::string& ns,
-                 const ShardKeyPattern& pattern,
+    ChunkManager(const NamespaceString& nss,
+                 const OID& epoch,
+                 const ShardKeyPattern& shardKeyPattern,
                  std::unique_ptr<CollatorInterface> defaultCollator,
                  bool unique);
+
+    ~ChunkManager();
 
     const std::string& getns() const {
         return _ns;
     }
+
     const ShardKeyPattern& getShardKeyPattern() const {
         return _keyPattern;
     }
+
     const CollatorInterface* getDefaultCollator() const {
         return _defaultCollator.get();
     }
+
     bool isUnique() const {
         return _unique;
     }
 
     /**
-     * this is just an increasing number of how many ChunkManagers we have so we know if something
-     * has been updated
+     * An increasing number of how many ChunkManagers we have so we know if something has been
+     * updated.
      */
     unsigned long long getSequenceNumber() const {
         return _sequenceNumber;
     }
 
-    //
-    // After constructor is invoked, we need to call loadExistingRanges.  If this is a new
-    // sharded collection, we can call createFirstChunks first.
-    //
-
-    // Creates new chunks based on info in chunk manager
-    Status createFirstChunks(OperationContext* txn,
-                             const ShardId& primaryShardId,
-                             const std::vector<BSONObj>* initPoints,
-                             const std::set<ShardId>* initShardIds);
-
     // Loads existing ranges based on info in chunk manager
     void loadExistingRanges(OperationContext* txn, const ChunkManager* oldManager);
-
-
-    // Helpers for load
-    void calcInitSplitsAndShards(OperationContext* txn,
-                                 const ShardId& primaryShardId,
-                                 const std::vector<BSONObj>* initPoints,
-                                 const std::set<ShardId>* initShardIds,
-                                 std::vector<BSONObj>* splitPoints,
-                                 std::vector<ShardId>* shardIds) const;
 
     //
     // Methods to use once loaded / created
@@ -231,6 +210,8 @@ private:
     // the complete space from [MinKey, MaxKey).
     using ChunkRangeMap = BSONObjIndexedMap<ShardAndChunkRange>;
 
+    using ShardVersionMap = std::map<ShardId, ChunkVersion>;
+
     /**
      * If load was successful, returns true and it is guaranteed that the _chunkMap and
      * _chunkRangeMap are consistent with each other. If false is returned, it is not safe to use
@@ -247,18 +228,21 @@ private:
      */
     static ChunkRangeMap _constructRanges(const ChunkMap& chunkMap);
 
-    // All members should be const for thread-safety
-    const std::string _ns;
-    const ShardKeyPattern _keyPattern;
-    std::unique_ptr<CollatorInterface> _defaultCollator;
-    const bool _unique;
-
     // The shard versioning mechanism hinges on keeping track of the number of times we reload
     // ChunkManagers. Increasing this number here will prompt checkShardVersion to refresh the
     // connection-level versions to the most up to date value.
     const unsigned long long _sequenceNumber;
 
+    std::string _ns;
+
+    ShardKeyPattern _keyPattern;
+
+    std::unique_ptr<CollatorInterface> _defaultCollator;
+
+    bool _unique;
+
     ChunkMap _chunkMap;
+
     ChunkRangeMap _chunkRangeMap;
 
     std::set<ShardId> _shardIds;

@@ -39,6 +39,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/logical_clock.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer_impl.h"
 #include "mongo/db/query/cursor_response.h"
@@ -49,13 +50,13 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_noop.h"
+#include "mongo/db/time_proof_service.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/catalog_cache.h"
 #include "mongo/s/catalog/dist_lock_catalog.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
@@ -63,6 +64,7 @@
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_local.h"
 #include "mongo/s/client/shard_registry.h"
@@ -102,10 +104,15 @@ const Seconds ShardingMongodTestFixture::kFutureTimeout{5};
 void ShardingMongodTestFixture::setUp() {
     ServiceContextMongoDTest::setUp();
 
-    auto serviceContext = getServiceContext();
+    auto service = getServiceContext();
     _opCtx = cc().makeOperationContext();
 
     // Set up this node as part of a replica set.
+
+    auto timeProofService = stdx::make_unique<TimeProofService>();
+    auto logicalClock =
+        stdx::make_unique<LogicalClock>(service, std::move(timeProofService), false);
+    LogicalClock::set(service, std::move(logicalClock));
 
     repl::ReplSettings replSettings;
     replSettings.setReplSetString(ConnectionString::forReplicaSet(_setName, _servers).toString());
@@ -122,16 +129,16 @@ void ShardingMongodTestFixture::setUp() {
                                         << serversBob.arr()));
     replCoordPtr->setGetConfigReturnValue(replSetConfig);
 
-    repl::ReplicationCoordinator::set(serviceContext, std::move(replCoordPtr));
+    repl::ReplicationCoordinator::set(service, std::move(replCoordPtr));
 
-    serviceContext->setOpObserver(stdx::make_unique<OpObserverImpl>());
+    service->setOpObserver(stdx::make_unique<OpObserverImpl>());
     repl::setOplogCollectionName();
     repl::createOplog(_opCtx.get());
 }
 
 std::unique_ptr<ReplicationCoordinatorMock> ShardingMongodTestFixture::makeReplicationCoordinator(
     ReplSettings replSettings) {
-    return stdx::make_unique<repl::ReplicationCoordinatorMock>(replSettings);
+    return stdx::make_unique<repl::ReplicationCoordinatorMock>(getServiceContext(), replSettings);
 }
 
 std::unique_ptr<executor::TaskExecutorPool> ShardingMongodTestFixture::makeTaskExecutorPool() {

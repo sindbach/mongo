@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2017 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,63 +28,42 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/s/catalog/catalog_cache.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 
-#include "mongo/base/status_with.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_database.h"
-#include "mongo/s/config.h"
-#include "mongo/s/grid.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonobjbuilder.h"
 
 namespace mongo {
+namespace rpc {
 
-using std::shared_ptr;
-using std::string;
-
-
-CatalogCache::CatalogCache() {}
-
-StatusWith<shared_ptr<DBConfig>> CatalogCache::getDatabase(OperationContext* txn,
-                                                           const string& dbName) {
-    stdx::lock_guard<stdx::mutex> guard(_mutex);
-
-    ShardedDatabasesMap::iterator it = _databases.find(dbName);
-    if (it != _databases.end()) {
-        return it->second;
-    }
-
-    // Need to load from the store
-    auto status = Grid::get(txn)->catalogClient(txn)->getDatabase(txn, dbName);
-    if (!status.isOK()) {
-        return status.getStatus();
-    }
-
-    const auto dbOpTimePair = status.getValue();
-    shared_ptr<DBConfig> db = std::make_shared<DBConfig>(dbOpTimePair.value, dbOpTimePair.opTime);
-    try {
-        db->load(txn);
-    } catch (const DBException& excep) {
-        return excep.toStatus();
-    }
-
-    invariant(_databases.insert(std::make_pair(dbName, db)).second);
-
-    return db;
+void EgressMetadataHookList::addHook(std::unique_ptr<EgressMetadataHook>&& newHook) {
+    _hooks.emplace_back(std::forward<std::unique_ptr<EgressMetadataHook>>(newHook));
 }
 
-void CatalogCache::invalidate(const string& dbName) {
-    stdx::lock_guard<stdx::mutex> guard(_mutex);
-
-    ShardedDatabasesMap::iterator it = _databases.find(dbName);
-    if (it != _databases.end()) {
-        _databases.erase(it);
+Status EgressMetadataHookList::writeRequestMetadata(OperationContext* txn,
+                                                    const HostAndPort& requestDestination,
+                                                    BSONObjBuilder* metadataBob) {
+    for (auto&& hook : _hooks) {
+        auto status = hook->writeRequestMetadata(txn, requestDestination, metadataBob);
+        if (!status.isOK()) {
+            return status;
+        }
     }
+
+    return Status::OK();
 }
 
-void CatalogCache::invalidateAll() {
-    stdx::lock_guard<stdx::mutex> guard(_mutex);
+Status EgressMetadataHookList::readReplyMetadata(const HostAndPort& replySource,
+                                                 const BSONObj& metadataObj) {
+    for (auto&& hook : _hooks) {
+        auto status = hook->readReplyMetadata(replySource, metadataObj);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
 
-    _databases.clear();
+    return Status::OK();
 }
 
+}  // namespace rpc
 }  // namespace mongo

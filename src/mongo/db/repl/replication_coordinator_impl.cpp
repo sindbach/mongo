@@ -40,8 +40,9 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/global_timestamp.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/logical_clock.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/repl/check_quorum_for_config_change.h"
 #include "mongo/db/repl/data_replicator_external_state_initial_sync.h"
@@ -93,6 +94,7 @@ namespace repl {
 
 MONGO_FP_DECLARE(transitionToPrimaryHangBeforeTakingGlobalExclusiveLock);
 
+using CallbackArgs = executor::TaskExecutor::CallbackArgs;
 using CallbackFn = executor::TaskExecutor::CallbackFn;
 using CallbackHandle = executor::TaskExecutor::CallbackHandle;
 using CBHandle = ReplicationExecutor::CallbackHandle;
@@ -287,7 +289,7 @@ DataReplicatorOptions createDataReplicatorOptions(
     options.getMyLastOptime = [replCoord]() { return replCoord->getMyLastAppliedOpTime(); };
     options.setMyLastOptime = [replCoord, externalState](const OpTime& opTime) {
         replCoord->setMyLastAppliedOpTime(opTime);
-        externalState->setGlobalTimestamp(opTime.getTimestamp());
+        externalState->setGlobalTimestamp(replCoord->getServiceContext(), opTime.getTimestamp());
     };
     options.getSlaveDelay = [replCoord]() { return replCoord->getSlaveDelaySecs(); };
     options.syncSourceSelector = replCoord;
@@ -305,13 +307,15 @@ std::string ReplicationCoordinatorImpl::SnapshotInfo::toString() const {
 }
 
 ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
+    ServiceContext* service,
     const ReplSettings& settings,
     std::unique_ptr<ReplicationCoordinatorExternalState> externalState,
     std::unique_ptr<NetworkInterface> network,
     std::unique_ptr<TopologyCoordinator> topCoord,
     StorageInterface* storage,
     int64_t prngSeed)
-    : _settings(settings),
+    : _service(service),
+      _settings(settings),
       _replMode(getReplicationModeFromSettings(settings)),
       _topCoord(std::move(topCoord)),
       _replExecutor(std::move(network), prngSeed),
@@ -325,6 +329,9 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _canAcceptNonLocalWrites(!(settings.usingReplSets() || settings.isSlave())),
       _canServeNonLocalReads(0U),
       _storage(storage) {
+
+    invariant(_service);
+
     if (!isReplEnabled()) {
         return;
     }
@@ -465,8 +472,8 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
 
     LockGuard topoLock(_topoMutex);
 
-    StatusWith<int> myIndex = validateConfigForStartUp(
-        _externalState.get(), _rsConfig, localConfig, getGlobalServiceContext());
+    StatusWith<int> myIndex =
+        validateConfigForStartUp(_externalState.get(), _rsConfig, localConfig, getServiceContext());
     if (!myIndex.isOK()) {
         if (myIndex.getStatus() == ErrorCodes::NodeNotFound ||
             myIndex.getStatus() == ErrorCodes::DuplicateKey) {
@@ -529,7 +536,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         lock.unlock();
     }
 
-    _externalState->setGlobalTimestamp(lastOpTime.getTimestamp());
+    _externalState->setGlobalTimestamp(getServiceContext(), lastOpTime.getTimestamp());
     // Step down is impossible, so we don't need to wait for the returned event.
     _updateTerm_incallback(term);
     LOG(1) << "Current term is now " << term;
@@ -1962,7 +1969,7 @@ Status ReplicationCoordinatorImpl::resyncData(OperationContext* txn, bool waitUn
     if (waitUntilCompleted)
         f = [&finishedEvent, this]() { _replExecutor.signalEvent(finishedEvent); };
 
-    UniqueLock lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
     _resetMyLastOpTimes_inlock();
     lk.unlock();  // unlock before calling into replCoordExtState.
     _startDataReplication(txn, f);
@@ -2120,13 +2127,12 @@ void ReplicationCoordinatorImpl::processReplSetGetConfig(BSONObjBuilder* result)
     result->append("config", _rsConfig.toBSON());
 }
 
-void ReplicationCoordinatorImpl::processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata,
-                                                        bool advanceCommitPoint) {
+void ReplicationCoordinatorImpl::processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) {
     EventHandle evh;
 
     {
         LockGuard topoLock(_topoMutex);
-        evh = _processReplSetMetadata_incallback(replMetadata, advanceCommitPoint);
+        evh = _processReplSetMetadata_incallback(replMetadata);
     }
 
     if (evh) {
@@ -2140,12 +2146,9 @@ void ReplicationCoordinatorImpl::cancelAndRescheduleElectionTimeout() {
 }
 
 EventHandle ReplicationCoordinatorImpl::_processReplSetMetadata_incallback(
-    const rpc::ReplSetMetadata& replMetadata, bool advanceCommitPoint) {
+    const rpc::ReplSetMetadata& replMetadata) {
     if (replMetadata.getConfigVersion() != _rsConfig.getConfigVersion()) {
         return EventHandle();
-    }
-    if (advanceCommitPoint) {
-        _setLastCommittedOpTime(replMetadata.getLastOpCommitted());
     }
     return _updateTerm_incallback(replMetadata.getTerm());
 }
@@ -2675,7 +2678,9 @@ void ReplicationCoordinatorImpl::_performPostMemberStateUpdateAction(
             } else {
                 _electionId = OID::gen();
             }
-            _topCoord->processWinElection(_electionId, getNextGlobalTimestamp());
+
+            auto ts = LogicalClock::get(getServiceContext())->reserveTicks(1).asTimestamp();
+            _topCoord->processWinElection(_electionId, ts);
             invariant(!_isCatchingUp);
             invariant(!_isWaitingForDrainToComplete);
             _isCatchingUp = true;
@@ -2870,13 +2875,15 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig_inlock(const ReplicaSetConfig& n
             // Downgrade
             invariant(newConfig.getProtocolVersion() == 0);
             _electionId = OID::gen();
-            _topCoord->setElectionInfo(_electionId, getNextGlobalTimestamp());
+            auto ts = LogicalClock::get(getServiceContext())->reserveTicks(1).asTimestamp();
+            _topCoord->setElectionInfo(_electionId, ts);
         } else if (oldConfig.getProtocolVersion() < newConfig.getProtocolVersion()) {
             // Upgrade
             invariant(newConfig.getProtocolVersion() == 1);
             invariant(_topCoord->getTerm() != OpTime::kUninitializedTerm);
             _electionId = OID::fromTerm(_topCoord->getTerm());
-            _topCoord->setElectionInfo(_electionId, getNextGlobalTimestamp());
+            auto ts = LogicalClock::get(getServiceContext())->reserveTicks(1).asTimestamp();
+            _topCoord->setElectionInfo(_electionId, ts);
         }
     }
 
@@ -3124,14 +3131,16 @@ void ReplicationCoordinatorImpl::resetLastOpTimesFromOplog(OperationContext* txn
     _reportUpstream_inlock(std::move(lock));
     // Unlocked below.
 
-    _externalState->setGlobalTimestamp(lastOpTime.getTimestamp());
+    _externalState->setGlobalTimestamp(txn->getServiceContext(), lastOpTime.getTimestamp());
 }
 
-bool ReplicationCoordinatorImpl::shouldChangeSyncSource(const HostAndPort& currentSource,
-                                                        const rpc::ReplSetMetadata& metadata) {
+bool ReplicationCoordinatorImpl::shouldChangeSyncSource(
+    const HostAndPort& currentSource,
+    const rpc::ReplSetMetadata& replMetadata,
+    boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
     LockGuard topoLock(_topoMutex);
     return _topCoord->shouldChangeSyncSource(
-        currentSource, getMyLastAppliedOpTime(), metadata, _replExecutor.now());
+        currentSource, getMyLastAppliedOpTime(), replMetadata, oqMetadata, _replExecutor.now());
 }
 
 void ReplicationCoordinatorImpl::_updateLastCommittedOpTime_inlock() {
@@ -3162,15 +3171,15 @@ void ReplicationCoordinatorImpl::_updateLastCommittedOpTime_inlock() {
     // need the majority to have this OpTime
     OpTime committedOpTime =
         votingNodesOpTimes[votingNodesOpTimes.size() - _rsConfig.getWriteMajority()];
-    _setLastCommittedOpTime_inlock(committedOpTime);
+    _advanceCommitPoint_inlock(committedOpTime);
 }
 
-void ReplicationCoordinatorImpl::_setLastCommittedOpTime(const OpTime& committedOpTime) {
+void ReplicationCoordinatorImpl::advanceCommitPoint(const OpTime& committedOpTime) {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
-    _setLastCommittedOpTime_inlock(committedOpTime);
+    _advanceCommitPoint_inlock(committedOpTime);
 }
 
-void ReplicationCoordinatorImpl::_setLastCommittedOpTime_inlock(const OpTime& committedOpTime) {
+void ReplicationCoordinatorImpl::_advanceCommitPoint_inlock(const OpTime& committedOpTime) {
     if (committedOpTime == _lastCommittedOpTime) {
         return;  // Hasn't changed, so ignore it.
     } else if (committedOpTime < _lastCommittedOpTime) {

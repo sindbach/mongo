@@ -43,7 +43,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/global_timestamp.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/query/find_common.h"
@@ -224,7 +223,7 @@ public:
                     {
                         // Set the namespace of the curop back to the view namespace so ctx records
                         // stats on this view namespace on destruction.
-                        stdx::lock_guard<Client>(*txn->getClient());
+                        stdx::lock_guard<Client> lk(*txn->getClient());
                         curOp->setNS_inlock(origNss.ns());
                     }
                     return retVal;
@@ -330,7 +329,7 @@ public:
 
         auto planSummary = Explain::getPlanSummary(exec);
         {
-            stdx::lock_guard<Client>(*txn->getClient());
+            stdx::lock_guard<Client> lk(*txn->getClient());
             curOp->setPlanSummary_inlock(planSummary);
 
             // Ensure that the original query or command object is available in the slow query log,

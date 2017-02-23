@@ -42,6 +42,7 @@
 #include "mongo/executor/test_network_connection_hook.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/legacy_reply_builder.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/log.h"
@@ -1008,7 +1009,10 @@ private:
 TEST_F(NetworkInterfaceASIOMetadataTest, Metadata) {
     bool wroteRequestMetadata = false;
     bool gotReplyMetadata = false;
-    start(stdx::make_unique<TestMetadataHook>(&wroteRequestMetadata, &gotReplyMetadata));
+    auto hookList = stdx::make_unique<rpc::EgressMetadataHookList>();
+    hookList->addHook(
+        stdx::make_unique<TestMetadataHook>(&wroteRequestMetadata, &gotReplyMetadata));
+    start(std::move(hookList));
 
     RemoteCommandRequest request{testHost, "blah", BSON("ping" << 1), nullptr};
     auto deferred = startCommand(makeCallbackHandle(), request);
