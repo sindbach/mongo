@@ -43,13 +43,16 @@ load('jstests/aggregation/extras/utils.js');
     assert.writeOK(coll.insert({_id: 9, subDoc: ['string']}));
     assertErrorCode(coll, [ {$match: {_id: 9}}, object_to_array_expr ], 40383);
 
+    assert.writeOK(coll.insert({_id: 12, subDoc: [{'a':'b'}]}));
+    assertErrorCode(coll, [ {$match: {_id: 12}}, object_to_array_expr ], 40383);
+
     // Document types.
     assert.writeOK(coll.insert({_id: 10, subDoc: {"y": []}}));
     result = coll.aggregate([ {$match: {_id: 10}}, object_to_array_expr ]).toArray();
     assert.eq(result, [{_id: 10,  expanded:[ {"k":"y", "v":[] }]}] );
 
 
-    assert.writeOK(coll.insert({_id: 11, subDoc: {"a":1, "b": {"d":"string"}, "c":[1, 2]}}));
+    assert.writeOK(coll.insert({_id: 11, subDoc: {"a": 1, "b": {"d":"string"}, "c":[1, 2]}}));
     result = coll.aggregate([ {$match: {_id: 11}}, object_to_array_expr ]).toArray();
     assert.eq(result, [{_id: 11,  expanded:[ {"k":"a", "v":1}, 
                                              {"k":"b", "v":{"d": "string"}}, 
