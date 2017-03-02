@@ -40,9 +40,9 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/chunk.h"
-#include "mongo/s/chunk_manager_targeter.h"
-#include "mongo/s/client/dbclient_multi_command.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/commands/chunk_manager_targeter.h"
+#include "mongo/s/commands/dbclient_multi_command.h"
 #include "mongo/s/config_server_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_util.h"
@@ -189,7 +189,7 @@ void splitIfNeeded(OperationContext* txn, const NamespaceString& nss, const Targ
     for (auto it = stats.chunkSizeDelta.cbegin(); it != stats.chunkSizeDelta.cend(); ++it) {
         std::shared_ptr<Chunk> chunk;
         try {
-            chunk = scopedCM.cm()->findIntersectingChunkWithSimpleCollation(txn, it->first);
+            chunk = scopedCM.cm()->findIntersectingChunkWithSimpleCollation(it->first);
         } catch (const AssertionException& ex) {
             warning() << "could not find chunk while checking for auto-split: "
                       << causedBy(redact(ex));
@@ -484,7 +484,7 @@ void updateChunkWriteStatsAndSplitIfNeeded(OperationContext* txn,
         // up-to-date view of the chunk we are about to move
         auto scopedCM = uassertStatusOK(ScopedChunkManager::refreshAndGet(txn, nss));
         auto suggestedChunk = scopedCM.cm()->findIntersectingChunkWithSimpleCollation(
-            txn, suggestedMigrateChunk->getMin());
+            suggestedMigrateChunk->getMin());
 
         ChunkType chunkToMove;
         chunkToMove.setNS(nss.ns());

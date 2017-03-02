@@ -66,7 +66,6 @@
 #include "mongo/util/signal_handlers.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/startup_test.h"
-#include "mongo/util/static_observer.h"
 #include "mongo/util/stringutils.h"
 #include "mongo/util/text.h"
 #include "mongo/util/version.h"
@@ -224,6 +223,7 @@ string getURIFromArgs(const std::string& url, const std::string& host, const std
     }
 
     bool hostEndsInSock = str::endsWith(host, ".sock");
+    const auto hostHasPort = (host.find(":") != std::string::npos);
 
     // If host looks like a full URI (i.e. has a slash and isn't a unix socket) and the other fields
     // are empty, then just return host.
@@ -252,8 +252,12 @@ string getURIFromArgs(const std::string& url, const std::string& host, const std
 
     if (!hostEndsInSock) {
         if (port.size() > 0) {
+            if (hostHasPort) {
+                std::cerr << "Cannot specify a port in --host and also with --port" << std::endl;
+                quickExit(-1);
+            }
             ss << ":" << port;
-        } else if (host.find(':') == string::npos || str::endsWith(host, "]")) {
+        } else if (!hostHasPort || str::endsWith(host, "]")) {
             // Default the port to 27017 if the host did not provide one (i.e. the host has no
             // colons or ends in ']' like an IPv6 address).
             ss << ":27017";
@@ -954,7 +958,6 @@ int _main(int argc, char* argv[], char** envp) {
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t* argvW[], wchar_t* envpW[]) {
-    static mongo::StaticObserver staticObserver;
     int returnCode;
     try {
         WindowsCommandLine wcl(argc, argvW, envpW);
@@ -967,7 +970,6 @@ int wmain(int argc, wchar_t* argvW[], wchar_t* envpW[]) {
 }
 #else   // #ifdef _WIN32
 int main(int argc, char* argv[], char** envp) {
-    static mongo::StaticObserver staticObserver;
     int returnCode;
     try {
         returnCode = _main(argc, argv, envp);

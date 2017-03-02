@@ -57,7 +57,6 @@
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_last_error_info.h"
 #include "mongo/s/commands/cluster_commands_common.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/commands/run_on_all_shards_cmd.h"
@@ -906,8 +905,9 @@ public:
         double numObjects = 0;
         int millis = 0;
 
-        set<ShardId> shardIds;
-        cm->getShardIdsForRange(shardIds, min, max);
+        std::set<ShardId> shardIds;
+        cm->getShardIdsForRange(min, max, &shardIds);
+
         for (const ShardId& shardId : shardIds) {
             const auto shardStatus = Grid::get(txn)->shardRegistry()->getShard(txn, shardId);
             if (!shardStatus.isOK()) {

@@ -1,5 +1,5 @@
-/**
- *    Copyright (C) 2016 MongoDB Inc.
+/*
+ *    Copyright (C) 2014 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,18 +26,56 @@
  *    it in the license file.
  */
 
-
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/s/sharding_connection_hook_for_mongod.h"
+#include "mongo/crypto/sha1_block.h"
 
-#include "mongo/s/sharding_egress_metadata_hook_for_mongod.h"
-#include "mongo/stdx/memory.h"
+#include "mongo/config.h"
+#include "mongo/util/assert_util.h"
+
+#ifdef MONGO_CONFIG_SSL
+#error This file should not be included if compiling with SSL support
+#endif
+
+#include "mongo/crypto/tom/tomcrypt.h"
 
 namespace mongo {
 
-ShardingConnectionHookForMongod::ShardingConnectionHookForMongod(bool shardedConnections)
-    : ShardingConnectionHook(shardedConnections,
-                             stdx::make_unique<rpc::ShardingEgressMetadataHookForMongod>()){};
+/*
+ * Computes a SHA-1 hash of 'input'.
+ */
+SHA1Block SHA1Block::computeHash(const uint8_t* input, size_t inputLen) {
+    HashType output;
+
+    hash_state hashState;
+    fassert(40381,
+            sha1_init(&hashState) == CRYPT_OK &&
+                sha1_process(&hashState, input, inputLen) == CRYPT_OK &&
+                sha1_done(&hashState, output.data()) == CRYPT_OK);
+    return SHA1Block(output);
+}
+
+/*
+ * Computes a HMAC SHA-1 keyed hash of 'input' using the key 'key'
+ */
+SHA1Block SHA1Block::computeHmac(const uint8_t* key,
+                                 size_t keyLen,
+                                 const uint8_t* input,
+                                 size_t inputLen) {
+    invariant(key && input);
+    HashType output;
+
+    static int hashId = -1;
+    if (hashId == -1) {
+        register_hash(&sha1_desc);
+        hashId = find_hash("sha1");
+    }
+
+    unsigned long sha1HashLen = 20;
+    fassert(40382,
+            hmac_memory(hashId, key, keyLen, input, inputLen, output.data(), &sha1HashLen) ==
+                CRYPT_OK);
+    return SHA1Block(output);
+}
 
 }  // namespace mongo

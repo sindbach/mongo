@@ -90,8 +90,7 @@ std::shared_ptr<ChunkManager> DBConfig::getChunkManagerIfExists(OperationContext
 
     try {
         return getChunkManager(txn, ns, shouldReload, forceReload);
-    } catch (AssertionException& e) {
-        warning() << "chunk manager not found for " << ns << causedBy(e);
+    } catch (const DBException&) {
         return nullptr;
     }
 }
@@ -357,16 +356,6 @@ bool DBConfig::_loadIfNeeded(OperationContext* txn, Counter reloadIteration) {
     _reloadCount.fetchAndAdd(1);
 
     return true;
-}
-
-void DBConfig::getAllShardIds(std::set<ShardId>* shardIds) {
-    stdx::lock_guard<stdx::mutex> lk(_lock);
-    shardIds->insert(_primaryId);
-
-    for (const auto& ciEntry : _collections) {
-        const auto& ci = ciEntry.second;
-        ci.cm->getAllShardIds(shardIds);
-    }
 }
 
 ShardId DBConfig::getPrimaryId() {

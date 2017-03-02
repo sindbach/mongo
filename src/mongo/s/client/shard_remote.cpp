@@ -240,7 +240,7 @@ Shard::HostWithResponse ShardRemote::_runCommand(OperationContext* txn,
                                                    std::move(writeConcernStatus)));
 }
 
-StatusWith<Shard::QueryResponse> ShardRemote::_exhaustiveFind(
+StatusWith<Shard::QueryResponse> ShardRemote::_exhaustiveFindOnConfig(
     OperationContext* txn,
     const ReadPreferenceSetting& readPref,
     const repl::ReadConcernLevel& readConcernLevel,
@@ -274,22 +274,19 @@ StatusWith<Shard::QueryResponse> ShardRemote::_exhaustiveFind(
                 return;
             }
 
-            auto& data = dataStatus.getValue();
+            const auto& data = dataStatus.getValue();
+
             if (data.otherFields.metadata.hasField(rpc::kReplSetMetadataFieldName)) {
                 auto replParseStatus =
                     rpc::ReplSetMetadata::readFromMetadata(data.otherFields.metadata);
-
                 if (!replParseStatus.isOK()) {
                     status = replParseStatus.getStatus();
                     response.docs.clear();
                     return;
                 }
 
-                response.opTime = replParseStatus.getValue().getLastOpCommitted();
-
-                // We return the config opTime that was returned for this particular request, but as
-                // a safeguard we ensure our global configOpTime is at least as large as it.
-                invariant(grid.configOpTime() >= response.opTime);
+                const auto& replSetMetadata = replParseStatus.getValue();
+                response.opTime = replSetMetadata.getLastOpCommitted();
             }
 
             for (const BSONObj& doc : data.documents) {
@@ -316,7 +313,7 @@ StatusWith<Shard::QueryResponse> ShardRemote::_exhaustiveFind(
     }
 
     const Milliseconds maxTimeMS =
-        std::min(txn->getRemainingMaxTimeMillis(), kDefaultCommandTimeout);
+        std::min(txn->getRemainingMaxTimeMillis(), kDefaultConfigCommandTimeout);
 
     BSONObjBuilder findCmdBuilder;
 
@@ -360,10 +357,10 @@ StatusWith<Shard::QueryResponse> ShardRemote::_exhaustiveFind(
     return response;
 }
 
-Status ShardRemote::createIndex(OperationContext* txn,
-                                const NamespaceString& ns,
-                                const BSONObj& keys,
-                                bool unique) {
+Status ShardRemote::createIndexOnConfig(OperationContext* txn,
+                                        const NamespaceString& ns,
+                                        const BSONObj& keys,
+                                        bool unique) {
     MONGO_UNREACHABLE;
 }
 

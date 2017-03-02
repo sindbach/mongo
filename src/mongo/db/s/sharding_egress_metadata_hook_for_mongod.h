@@ -31,16 +31,14 @@
 #include "mongo/s/sharding_egress_metadata_hook.h"
 
 namespace mongo {
-
 namespace rpc {
 
 class ShardingEgressMetadataHookForMongod final : public ShardingEgressMetadataHook {
-public:
-    ShardingEgressMetadataHookForMongod() = default;
-
 private:
     void _saveGLEStats(const BSONObj& metadata, StringData hostString) override;
+
     repl::OpTime _getConfigServerOpTime() override;
+
     Status _advanceConfigOptimeFromShard(ShardId shardId, const BSONObj& metadataObj) override;
 };
 

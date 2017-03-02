@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2016 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,12 +26,40 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+
 #include "mongo/platform/basic.h"
 
-#include "mongo/util/static_observer.h"
+#include "mongo/db/s/sharding_egress_metadata_hook_for_mongod.h"
+
+#include "mongo/base/status.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/server_options.h"
+#include "mongo/s/grid.h"
 
 namespace mongo {
+namespace rpc {
 
-bool StaticObserver::_destroyingStatics = false;
+void ShardingEgressMetadataHookForMongod::_saveGLEStats(const BSONObj& metadata,
+                                                        StringData hostString) {}
 
+repl::OpTime ShardingEgressMetadataHookForMongod::_getConfigServerOpTime() {
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        return repl::getGlobalReplicationCoordinator()->getCurrentCommittedSnapshotOpTime();
+    } else {
+        // TODO uncomment as part of SERVER-22663
+        // invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+        return grid.configOpTime();
+    }
+}
+
+Status ShardingEgressMetadataHookForMongod::_advanceConfigOptimeFromShard(
+    ShardId shardId, const BSONObj& metadataObj) {
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        return Status::OK();
+    }
+    return ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(shardId, metadataObj);
+}
+
+}  // namespace rpc
 }  // namespace mongo

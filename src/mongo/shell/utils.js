@@ -37,6 +37,12 @@ function _getErrorWithCode(codeOrObj, message) {
     return e;
 }
 
+// Checks if a javascript exception is a network error.
+function isNetworkError(error) {
+    return error.message.indexOf("error doing query") >= 0 ||
+        error.message.indexOf("socket exception") >= 0;
+}
+
 // Please consider using bsonWoCompare instead of this as much as possible.
 friendlyEqual = function(a, b) {
     if (a == b)
@@ -210,7 +216,7 @@ jsTestOptions = function() {
             adminUser: TestData.adminUser || "admin",
             adminPassword: TestData.adminPassword || "password",
             useLegacyConfigServers: TestData.useLegacyConfigServers || false,
-            useLegacyReplicationProtocol: TestData.useLegacyReplicationProtocol || false,
+            forceReplicationProtocolVersion: TestData.forceReplicationProtocolVersion,
             enableMajorityReadConcern: TestData.enableMajorityReadConcern,
             writeConcernMajorityShouldJournal: TestData.writeConcernMajorityShouldJournal,
             enableEncryption: TestData.enableEncryption,
@@ -1188,7 +1194,7 @@ rs._runCmd = function(c) {
     try {
         res = db.adminCommand(c);
     } catch (e) {
-        if (("" + e).indexOf("error doing query") >= 0) {
+        if (isNetworkError(e)) {
             // closed connection.  reconnect.
             db.getLastErrorObj();
             var o = db.getLastErrorObj();

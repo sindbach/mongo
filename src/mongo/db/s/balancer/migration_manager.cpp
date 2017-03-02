@@ -38,6 +38,8 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/client.h"
+#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/balancer/scoped_migration_request.h"
 #include "mongo/db/s/balancer/type_migration.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -185,7 +187,7 @@ Status MigrationManager::executeManualMigration(
 
     const auto& scopedCM = scopedCMStatus.getValue();
 
-    auto chunk = scopedCM.cm()->findIntersectingChunkWithSimpleCollation(txn, migrateInfo.minKey);
+    auto chunk = scopedCM.cm()->findIntersectingChunkWithSimpleCollation(migrateInfo.minKey);
     invariant(chunk);
 
     Status commandStatus = _processRemoteCommandResponse(
@@ -219,7 +221,7 @@ void MigrationManager::startRecoveryAndAcquireDistLocks(OperationContext* txn) {
 
     // Load the active migrations from the config.migrations collection.
     auto statusWithMigrationsQueryResponse =
-        Grid::get(txn)->shardRegistry()->getConfigShard()->exhaustiveFind(
+        Grid::get(txn)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
             txn,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
             repl::ReadConcernLevel::kLocalReadConcern,
@@ -330,7 +332,7 @@ void MigrationManager::finishRecovery(OperationContext* txn,
             migrateInfos.pop_front();
 
             auto chunk =
-                scopedCM.cm()->findIntersectingChunkWithSimpleCollation(txn, migrationInfo.minKey);
+                scopedCM.cm()->findIntersectingChunkWithSimpleCollation(migrationInfo.minKey);
             invariant(chunk);
 
             if (chunk->getShardId() != migrationInfo.from) {
@@ -442,7 +444,7 @@ shared_ptr<Notification<RemoteCommandResponse>> MigrationManager::_schedule(
         &builder,
         nss,
         migrateInfo.version,
-        Grid::get(txn)->shardRegistry()->getConfigServerConnectionString(),
+        repl::ReplicationCoordinator::get(txn)->getConfig().getConnectionString(),
         migrateInfo.from,
         migrateInfo.to,
         ChunkRange(migrateInfo.minKey, migrateInfo.maxKey),
