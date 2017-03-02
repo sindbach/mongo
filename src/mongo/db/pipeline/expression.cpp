@@ -600,10 +600,7 @@ const char* ExpressionArrayElemAt::getOpName() const {
     return "$arrayElemAt";
 }
 
-
 /* ------------------------- ExpressionObjectToArray -------------------------- */
-
-
 Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
     const Value targetVal = vpOperand[0]->evaluateInternal(vars);
 
