@@ -32,7 +32,9 @@
         }]);
 
     // Turns to array from the root of the document.
-    assert.writeOK(coll.insert({_id: 3, "a": 1, "b": 2, "c": 3})) result =
+    assert.writeOK(coll.insert({_id: 3, "a": 1, "b": 2, "c": 3}));
+
+    result =
         coll.aggregate([{$match: {_id: 3}}, {$project: {document: {$objectToArray: '$$ROOT'}}}])
             .toArray();
     assert.eq(result, [
@@ -43,12 +45,12 @@
         }
     ]);
 
-    assert.writeOK(coll.insert({_id: 4, "date": ISODate("2017-01-24T00:00:00")})) result =
-        coll.aggregate([
-                {$match: {_id: 4}},
-                {$project: {document: {$objectToArray: {dayOfWeek: {$dayOfWeek: "$date"}}}}}
-            ])
-            .toArray();
+    assert.writeOK(coll.insert({_id: 4, "date": ISODate("2017-01-24T00:00:00")}));
+    result = coll.aggregate([
+                     {$match: {_id: 4}},
+                     {$project: {document: {$objectToArray: {dayOfWeek: {$dayOfWeek: "$date"}}}}}
+                 ])
+                 .toArray();
     assert.eq(result, [{_id: 4, document: [{"k": "dayOfWeek", "v": 3}]}]);
 
     // $objectToArray errors on non-document types.
