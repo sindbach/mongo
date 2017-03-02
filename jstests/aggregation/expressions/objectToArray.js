@@ -89,7 +89,7 @@
     result = coll.aggregate([{$match: {_id: 15}}, object_to_array_expr]).toArray();
     assert.eq(result, [{_id: 15, expanded: null}]);
 
-    assert.writeOK(coll.insert({_id: 16}));
+    assert.writeOK(coll.insert({_id: 16, subDoc:{}}));
     result = coll.aggregate([{$match: {_id: 16}}, object_to_array_expr]).toArray();
-    assert.eq(result, [{_id: 16, expanded: null}]);
+    assert.eq(result, [{_id: 16, expanded: []}]);
 }());
