@@ -67,11 +67,11 @@
     assert.writeOK(coll.insert({_id: 15, expanded: {y: []}}));
     assertErrorCode(coll, [{$match: {_id: 15}}, array_to_object_expr], 40386);
 
-    assert.writeOK(coll.insert({_id: 16, expanded: [{y: "x"}]}));
+    assert.writeOK(coll.insert({_id: 16, expanded: [{y: "x", x: "y"}]}));
     assertErrorCode(coll, [{$match: {_id: 16}}, array_to_object_expr], 40393);
 
     assert.writeOK(coll.insert({_id: 17, expanded: [{k: "missing"}]}));
-    assertErrorCode(coll, [{$match: {_id: 17}}, array_to_object_expr], 40393);
+    assertErrorCode(coll, [{$match: {_id: 17}}, array_to_object_expr], 40392);
 
     assert.writeOK(coll.insert({_id: 18, expanded: [{k: 24, v: "string"}]}));
     assertErrorCode(coll, [{$match: {_id: 18}}, array_to_object_expr], 40394);
