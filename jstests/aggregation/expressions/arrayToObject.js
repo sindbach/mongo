@@ -3,7 +3,7 @@
     "use strict";
 
     // For assertErrorCode().
-    load('jstests/aggregation/extras/utils.js');
+    load("jstests/aggregation/extras/utils.js");
 
     let coll = db.array_to_object_expr;
     coll.drop();
@@ -39,11 +39,11 @@
     result = coll.aggregate([{$match: {_id: 3}}, array_to_object_expr]).toArray();
     assert.eq(result, [{_id: 3, collapsed: {}}]);
 
+    // $arrayToObject outputs null on null-ish types.
     assert.writeOK(coll.insert({_id: 4}));
     result = coll.aggregate([{$match: {_id: 4}}, array_to_object_expr]).toArray();
     assert.eq(result, [{_id: 4, collapsed: null}]);
 
-    // $arrayToObject outputs null on null-ish types.
     assert.writeOK(coll.insert({_id: 5, expanded: null}));
     result = coll.aggregate([{$match: {_id: 5}}, array_to_object_expr]).toArray();
     assert.eq(result, [{_id: 5, collapsed: null}]);
@@ -96,5 +96,4 @@
 
     assert.writeOK(coll.insert({_id: 21, expanded: NaN}));
     assertErrorCode(coll, [{$match: {_id: 21}}, array_to_object_expr], 40386);
-
 }());

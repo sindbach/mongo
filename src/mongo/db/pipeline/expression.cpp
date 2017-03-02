@@ -617,13 +617,14 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
     if (array.empty()) {
         return output.freezeToValue();
     }
+
     // There are two accepted input formats in an array: [ [key, val] ] or [ {k:key, v:val} ]
     // The first array element determines the format for the rest of the array.
     // Mixing input formats is not allowed.
     bool inputArrayFormat;
     if (array[0].isArray()) {
         inputArrayFormat = true;
-    } else if (array[0].getType() == Object) {
+    } else if (array[0].getType() == BSONType::Object) {
         inputArrayFormat = false;
     } else {
         uasserted(40387,
@@ -631,7 +632,7 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
                                 << typeName(array[0].getType()));
     }
 
-    for (auto elem : array) {
+    for (auto&& elem : array) {
         if (inputArrayFormat == true) {
             uassert(
                 40388,
@@ -652,7 +653,7 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
                     str::stream() << "$arrayToObject requires an array of key-value pairs, where "
                                      "the key must be type string, found type: "
                                   << typeName(valArray[0].getType()),
-                    (valArray[0].getType() == String));
+                    (valArray[0].getType() == BSONType::String));
 
             output.addField(valArray[0].getString(), valArray[1]);
 
@@ -662,29 +663,30 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
                 str::stream() << "$arrayToObject requires a consistent input format. Elements must"
                                  "all be arrays or all be objects. Object was detected now found: "
                               << typeName(elem.getType()),
-                (elem.getType() == Object));
+                (elem.getType() == BSONType::Object));
 
             uassert(40392,
                     str::stream() << "$arrayToObject requires an object keys of 'k' and 'v'. "
-                                     "Found an extra key.",
+                                     "Found incorrect number of keys:"
+                                  << elem.getDocument().size(),
                     (elem.getDocument().size() == 2));
 
             Value key = elem.getDocument().getField("k");
             Value value = elem.getDocument().getField("v");
 
-            if (key.nullish() || value.nullish()) {
-                uasserted(40393,
-                          str::stream()
-                              << "$arrayToObject requires an object with keys 'k' and 'v'. "
-                                 "Missing either or both keys from: "
-                              << elem.toString());
-            }
+
+            uassert(40393,
+                    str::stream() << "$arrayToObject requires an object with keys 'k' and 'v'. "
+                                     "Missing either or both keys from: "
+                                  << elem.toString()), 
+                    (!key.nullish() && !value.nullish());
+
             uassert(
                 40394,
                 str::stream() << "$arrayToObject requires an object with keys 'k' and 'v', where "
                                  "the key must be of type string, found type: "
                               << typeName(key.getType()),
-                (key.getType() == String));
+                (key.getType() == BSONType::String));
 
             output.addField(key.getString(), value);
         }
