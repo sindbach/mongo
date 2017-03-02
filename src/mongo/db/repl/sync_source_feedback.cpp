@@ -64,12 +64,9 @@ Milliseconds calculateKeepAliveInterval(OperationContext* txn, stdx::mutex& mtx)
  * Returns function to prepare update command
  */
 Reporter::PrepareReplSetUpdatePositionCommandFn makePrepareReplSetUpdatePositionCommandFn(
-    OperationContext* txn,
-    stdx::mutex& mtx,
-    const HostAndPort& syncTarget,
-    BackgroundSync* bgsync) {
-    return [&mtx, syncTarget, txn, bgsync](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle
-                                               commandStyle) -> StatusWith<BSONObj> {
+    OperationContext* txn, const HostAndPort& syncTarget, BackgroundSync* bgsync) {
+    return [syncTarget, txn, bgsync](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle
+                                         commandStyle) -> StatusWith<BSONObj> {
         auto currentSyncTarget = bgsync->getSyncTarget();
         if (currentSyncTarget != syncTarget) {
             if (currentSyncTarget.empty()) {
@@ -113,9 +110,7 @@ void SyncSourceFeedback::forwardSlaveProgress() {
     }
 }
 
-Status SyncSourceFeedback::_updateUpstream(OperationContext* txn,
-                                           BackgroundSync* bgsync,
-                                           Reporter* reporter) {
+Status SyncSourceFeedback::_updateUpstream(Reporter* reporter) {
     auto syncTarget = reporter->getTarget();
 
     auto triggerStatus = reporter->trigger();
@@ -129,24 +124,9 @@ Status SyncSourceFeedback::_updateUpstream(OperationContext* txn,
 
     if (!status.isOK()) {
         log() << "SyncSourceFeedback error sending update to " << syncTarget << ": " << status;
-
-        // Some errors should not cause result in blacklisting the sync source.
-        if (status != ErrorCodes::InvalidSyncSource) {
-            // The command could not be created because the node is now primary.
-        } else if (status != ErrorCodes::NodeNotFound) {
-            // The command could not be created, likely because this node was removed from the set.
-        } else {
-            // Blacklist sync target for .5 seconds and find a new one.
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            auto replCoord = repl::ReplicationCoordinator::get(txn);
-            const auto blacklistDuration = Milliseconds{500};
-            const auto until = Date_t::now() + blacklistDuration;
-            log() << "Blacklisting " << syncTarget << " due to error: '" << status << "' for "
-                  << blacklistDuration << " until: " << until;
-            replCoord->blacklistSyncSource(syncTarget, until);
-            bgsync->clearSyncTarget();
-        }
     }
+
+    // Sync source blacklisting will be done in BackgroundSync and SyncSourceResolver.
 
     return status;
 }
@@ -228,11 +208,10 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
             }
         }
 
-        Reporter reporter(
-            executor,
-            makePrepareReplSetUpdatePositionCommandFn(txn.get(), _mtx, syncTarget, bgsync),
-            syncTarget,
-            keepAliveInterval);
+        Reporter reporter(executor,
+                          makePrepareReplSetUpdatePositionCommandFn(txn.get(), syncTarget, bgsync),
+                          syncTarget,
+                          keepAliveInterval);
         {
             stdx::lock_guard<stdx::mutex> lock(_mtx);
             if (_shutdownSignaled) {
@@ -245,7 +224,7 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
             _reporter = nullptr;
         });
 
-        auto status = _updateUpstream(txn.get(), bgsync, &reporter);
+        auto status = _updateUpstream(&reporter);
         if (!status.isOK()) {
             LOG(1) << "The replication progress command (replSetUpdatePosition) failed and will be "
                       "retried: "

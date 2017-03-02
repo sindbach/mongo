@@ -58,12 +58,11 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/mongos_options.h"
+#include "mongo/s/is_mongos.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/destructor_guard.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/print.h"
 #include "mongo/util/unowned_ptr.h"
 
 namespace mongo {
@@ -81,18 +80,6 @@ inline std::string myErrnoWithDescription() {
 }
 
 template <typename Data, typename Comparator>
-void compIsntSane(const Comparator& comp, const Data& lhs, const Data& rhs) {
-    PRINT(typeid(comp).name());
-    PRINT(lhs.first);
-    PRINT(lhs.second);
-    PRINT(rhs.first);
-    PRINT(rhs.second);
-    PRINT(comp(lhs, rhs));
-    PRINT(comp(rhs, lhs));
-    dassert(false);
-}
-
-template <typename Data, typename Comparator>
 void dassertCompIsSane(const Comparator& comp, const Data& lhs, const Data& rhs) {
 #if defined(MONGO_CONFIG_DEBUG_BUILD) && !defined(_MSC_VER)
     // MSVC++ already does similar verification in debug mode in addition to using
@@ -102,21 +89,16 @@ void dassertCompIsSane(const Comparator& comp, const Data& lhs, const Data& rhs)
     // test reversed comparisons
     const int regular = comp(lhs, rhs);
     if (regular == 0) {
-        if (!(comp(rhs, lhs) == 0))
-            compIsntSane(comp, lhs, rhs);
+        invariant(comp(rhs, lhs) == 0);
     } else if (regular < 0) {
-        if (!(comp(rhs, lhs) > 0))
-            compIsntSane(comp, lhs, rhs);
-    } else /*regular > 0*/ {
-        if (!(comp(rhs, lhs) < 0))
-            compIsntSane(comp, lhs, rhs);
+        invariant(comp(rhs, lhs) > 0);
+    } else {
+        invariant(comp(rhs, lhs) < 0);
     }
 
     // test reflexivity
-    if (!(comp(lhs, lhs) == 0))
-        compIsntSane(comp, lhs, lhs);
-    if (!(comp(rhs, rhs) == 0))
-        compIsntSane(comp, rhs, rhs);
+    invariant(comp(lhs, lhs) == 0);
+    invariant(comp(rhs, rhs) == 0);
 #endif
 }
 

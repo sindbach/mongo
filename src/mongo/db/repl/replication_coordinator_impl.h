@@ -174,11 +174,10 @@ public:
 
     virtual bool setFollowerMode(const MemberState& newState) override;
 
-    virtual bool isWaitingForApplierToDrain() override;
+    virtual ApplierState getApplierState() override;
 
-    virtual bool isCatchingUp() override;
-
-    virtual void signalDrainComplete(OperationContext* txn) override;
+    virtual void signalDrainComplete(OperationContext* txn,
+                                     long long termWhenBufferIsEmpty) override;
 
     virtual Status waitForDrainFinish(Milliseconds timeout) override;
 
@@ -344,11 +343,17 @@ public:
      */
     Date_t getElectionTimeout_forTest() const;
 
-    /**
-     * Returns scheduled time of priority takeover callback.
-     * Returns Date_t() if callback is not scheduled.
+    /*
+     * Return a randomized offset amount that is scaled in proportion to the size of the
+     * _electionTimeoutPeriod.
      */
-    Date_t getPriorityTakeover_forTest() const;
+    Milliseconds getRandomizedElectionOffset_forTest();
+
+    /**
+     * Returns the scheduled time of the priority takeover callback. If a priority
+     * takeover has not been scheduled, returns boost::none.
+     */
+    boost::optional<Date_t> getPriorityTakeover_forTest() const;
 
     /**
      * Simple wrappers around _setLastOptime_inlock to make it easier to test.
@@ -726,6 +731,12 @@ private:
     void _trackHeartbeatHandle(const StatusWith<ReplicationExecutor::CallbackHandle>& handle);
 
     void _untrackHeartbeatHandle(const ReplicationExecutor::CallbackHandle& handle);
+
+    /*
+     * Return a randomized offset amount that is scaled in proportion to the size of the
+     * _electionTimeoutPeriod. Used to add randomization to an election timeout.
+     */
+    Milliseconds _getRandomizedElectionOffset();
 
     /**
      * Helper for _handleHeartbeatResponse.
@@ -1134,10 +1145,8 @@ private:
                                       long long originalTerm);
     /**
      * Finish catch-up mode and start drain mode.
-     * If "startToDrain" is true, the node enters drain mode. Otherwise, it goes back to secondary
-     * mode.
      */
-    void _finishCatchUpOplog_inlock(bool startToDrain);
+    void _finishCatchingUpOplog_inlock();
 
     /**
      * Waits for the config state to leave kConfigStartingUp, which indicates that start() has
@@ -1247,11 +1256,7 @@ private:
     // Used to signal threads waiting for changes to _memberState.
     stdx::condition_variable _drainFinishedCond;  // (M)
 
-    // True if we are waiting for the applier to finish draining.
-    bool _isWaitingForDrainToComplete;  // (M)
-
-    // True if we are waiting for oplog catch-up to finish.
-    bool _isCatchingUp = false;  // (M)
+    ReplicationCoordinator::ApplierState _applierState = ApplierState::Running;  // (M)
 
     // Used to signal threads waiting for changes to _rsConfigState.
     stdx::condition_variable _rsConfigStateChange;  // (M)

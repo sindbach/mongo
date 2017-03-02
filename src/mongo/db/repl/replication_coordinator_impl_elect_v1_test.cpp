@@ -51,6 +51,60 @@ namespace {
 using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
+using ApplierState = ReplicationCoordinator::ApplierState;
+
+TEST_F(ReplCoordTest, RandomizedElectionOffsetWithinProperBounds) {
+    BSONObj configObj = BSON("_id"
+                             << "mySet"
+                             << "version"
+                             << 1
+                             << "members"
+                             << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                      << "node1:12345")
+                                           << BSON("_id" << 2 << "host"
+                                                         << "node2:12345")
+                                           << BSON("_id" << 3 << "host"
+                                                         << "node3:12345")));
+    assertStartSuccess(configObj, HostAndPort("node1", 12345));
+    ReplicaSetConfig config = assertMakeRSConfig(configObj);
+
+    Milliseconds electionTimeout = config.getElectionTimeoutPeriod();
+    long long randomOffsetUpperBound = durationCount<Milliseconds>(electionTimeout) *
+        getExternalState()->getElectionTimeoutOffsetLimitFraction();
+    Milliseconds randomOffset;
+
+    // Verify for numerous rounds of random number generation.
+    int rounds = 1000;
+    for (int i = 0; i < rounds; i++) {
+        randomOffset = getReplCoord()->getRandomizedElectionOffset_forTest();
+        ASSERT_GREATER_THAN_OR_EQUALS(randomOffset, Milliseconds(0));
+        ASSERT_LESS_THAN_OR_EQUALS(randomOffset, Milliseconds(randomOffsetUpperBound));
+    }
+}
+
+TEST_F(ReplCoordTest, RandomizedElectionOffsetAvoidsDivideByZero) {
+    BSONObj configObj = BSON("_id"
+                             << "mySet"
+                             << "version"
+                             << 1
+                             << "members"
+                             << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                      << "node1:12345")
+                                           << BSON("_id" << 2 << "host"
+                                                         << "node2:12345")
+                                           << BSON("_id" << 3 << "host"
+                                                         << "node3:12345"))
+                             << "protocolVersion"
+                             << 1
+                             << "settings"
+                             << BSON("electionTimeoutMillis" << 1));
+    assertStartSuccess(configObj, HostAndPort("node1", 12345));
+
+    // Make sure that an election timeout of 1ms doesn't make the random number
+    // generator attempt to divide by zero.
+    Milliseconds randomOffset = getReplCoord()->getRandomizedElectionOffset_forTest();
+    ASSERT_EQ(Milliseconds(0), randomOffset);
+}
 
 TEST_F(ReplCoordTest, ElectionSucceedsWhenNodeIsTheOnlyElectableNode) {
     assertStartSuccess(BSON("_id"
@@ -106,7 +160,7 @@ TEST_F(ReplCoordTest, ElectionSucceedsWhenNodeIsTheOnlyElectableNode) {
     ASSERT(getReplCoord()->getMemberState().primary())
         << getReplCoord()->getMemberState().toString();
     simulateCatchUpTimeout();
-    ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Draining);
 
     const auto txnPtr = makeOperationContext();
     auto& txn = *txnPtr;
@@ -116,7 +170,7 @@ TEST_F(ReplCoordTest, ElectionSucceedsWhenNodeIsTheOnlyElectableNode) {
     getReplCoord()->fillIsMasterForReplSet(&imResponse);
     ASSERT_FALSE(imResponse.isMaster()) << imResponse.toBSON().toString();
     ASSERT_TRUE(imResponse.isSecondary()) << imResponse.toBSON().toString();
-    getReplCoord()->signalDrainComplete(&txn);
+    getReplCoord()->signalDrainComplete(&txn, getReplCoord()->getTerm());
     getReplCoord()->fillIsMasterForReplSet(&imResponse);
     ASSERT_TRUE(imResponse.isMaster()) << imResponse.toBSON().toString();
     ASSERT_FALSE(imResponse.isSecondary()) << imResponse.toBSON().toString();
@@ -170,7 +224,7 @@ TEST_F(ReplCoordTest, ElectionSucceedsWhenNodeIsTheOnlyNode) {
         << getReplCoord()->getMemberState().toString();
     // Wait for catchup check to finish.
     simulateCatchUpTimeout();
-    ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Draining);
 
     const auto txnPtr = makeOperationContext();
     auto& txn = *txnPtr;
@@ -180,7 +234,7 @@ TEST_F(ReplCoordTest, ElectionSucceedsWhenNodeIsTheOnlyNode) {
     getReplCoord()->fillIsMasterForReplSet(&imResponse);
     ASSERT_FALSE(imResponse.isMaster()) << imResponse.toBSON().toString();
     ASSERT_TRUE(imResponse.isSecondary()) << imResponse.toBSON().toString();
-    getReplCoord()->signalDrainComplete(&txn);
+    getReplCoord()->signalDrainComplete(&txn, getReplCoord()->getTerm());
     getReplCoord()->fillIsMasterForReplSet(&imResponse);
     ASSERT_TRUE(imResponse.isMaster()) << imResponse.toBSON().toString();
     ASSERT_FALSE(imResponse.isSecondary()) << imResponse.toBSON().toString();
@@ -737,46 +791,70 @@ TEST_F(ReplCoordTest, ElectionFailsWhenTermChangesDuringActualElection) {
 
 class PriorityTakeoverTest : public ReplCoordTest {
 public:
-    void respondToAllHeartbeats(const ReplicaSetConfig& config,
-                                Date_t runUntil,
-                                const HostAndPort& primaryHostAndPort,
-                                const OpTime& otherNodesOpTime) {
-        auto replCoord = getReplCoord();
+    /*
+     * Verify that a given priority takeover delay is valid. Takeover delays are
+     * verified in terms of bounds since the delay value is randomized.
+     */
+    void assertValidTakeoverDelay(ReplicaSetConfig config,
+                                  Date_t now,
+                                  Date_t priorityTakeoverTime,
+                                  int nodeIndex) {
+
+        Milliseconds priorityTakeoverDelay = priorityTakeoverTime - now;
+        Milliseconds electionTimeout = config.getElectionTimeoutPeriod();
+
+        long long baseTakeoverDelay =
+            durationCount<Milliseconds>(config.getPriorityTakeoverDelay(nodeIndex));
+        long long randomOffsetUpperBound = durationCount<Milliseconds>(electionTimeout) *
+            getExternalState()->getElectionTimeoutOffsetLimitFraction();
+
+        auto takeoverDelayUpperBound = Milliseconds(baseTakeoverDelay + randomOffsetUpperBound);
+        auto takeoverDelayLowerBound = Milliseconds(baseTakeoverDelay);
+
+        ASSERT_GREATER_THAN_OR_EQUALS(priorityTakeoverDelay, takeoverDelayLowerBound);
+        ASSERT_LESS_THAN_OR_EQUALS(priorityTakeoverDelay, takeoverDelayUpperBound);
+    }
+
+    /*
+     * Processes and mocks responses to any pending PV1 heartbeat requests that have been
+     * scheduled at or before 'until'. For any such scheduled heartbeat requests, the
+     * heartbeat responses will be mocked at the same time the request was made. So,
+     * for a heartbeat request made at time 't', the response will be mocked as
+     * occurring at time 't'. This function will always run the clock forward to time
+     * 'until'.
+     *
+     * The applied & durable optimes of the mocked response will be set to
+     * 'otherNodesOpTime', and the primary set as 'primaryHostAndPort'.
+     *
+     * Returns the time that it ran until, which should always be equal to 'until'.
+     */
+    Date_t respondToHeartbeatsUntil(const ReplicaSetConfig& config,
+                                    Date_t until,
+                                    const HostAndPort& primaryHostAndPort,
+                                    const OpTime& otherNodesOpTime) {
 
         auto net = getNet();
         net->enterNetwork();
-        while (net->now() < runUntil || net->hasReadyRequests()) {
-            if (net->now() < runUntil) {
-                net->runUntil(runUntil);
-            }
-            auto noi = net->getNextReadyRequest();
-            auto&& request = noi->getRequest();
-            log() << request.target << " processing " << request.cmdObj;
-            ASSERT_EQUALS("replSetHeartbeat", request.cmdObj.firstElement().fieldNameStringData());
-            ReplSetHeartbeatArgsV1 hbArgs;
-            if (hbArgs.initialize(request.cmdObj).isOK()) {
-                ReplSetHeartbeatResponse hbResp;
-                hbResp.setSetName(config.getReplSetName());
-                if (request.target == primaryHostAndPort) {
-                    hbResp.setState(MemberState::RS_PRIMARY);
-                } else {
-                    hbResp.setState(MemberState::RS_SECONDARY);
-                }
-                hbResp.setConfigVersion(config.getConfigVersion());
-                hbResp.setTerm(replCoord->getTerm());
-                hbResp.setAppliedOpTime(otherNodesOpTime);
-                hbResp.setDurableOpTime(otherNodesOpTime);
-                auto response =
-                    makeResponseStatus(hbResp.toBSON(replCoord->isV1ElectionProtocol()));
-                net->scheduleResponse(noi, net->now(), response);
-            } else {
-                error() << "Black holing unexpected request to " << request.target << ": "
-                        << request.cmdObj;
-                net->blackHole(noi);
+
+        // If 'until' is equal to net->now(), process any currently queued requests and return,
+        // without running the clock.
+        if (net->now() == until) {
+            _respondToHeartbeatsNow(config, primaryHostAndPort, otherNodesOpTime);
+        } else {
+            // Otherwise, run clock and process heartbeats along the way.
+            while (net->now() < until) {
+                // Run clock forward to time 'until', or until the time of the next queued request.
+                net->runUntil(until);
+                _respondToHeartbeatsNow(config, primaryHostAndPort, otherNodesOpTime);
             }
         }
+
         net->runReadyNetworkOperations();
         net->exitNetwork();
+
+        ASSERT_EQ(net->now(), until);
+
+        return net->now();
     }
 
     void performSuccessfulPriorityTakeover(Date_t priorityTakeoverTime) {
@@ -795,6 +873,50 @@ public:
 
         ASSERT_EQUALS(1, countLogLinesContaining("Starting an election for a priority takeover"));
         ASSERT_EQUALS(1, countLogLinesContaining("election succeeded"));
+    }
+
+private:
+    /*
+     * Processes and schedules mock responses to any PV1 heartbeat requests scheduled at or
+     * before the current time. Assumes that the caller has already entered the network with
+     * 'enterNetwork()'. It does not run the virtual clock.
+     *
+     * Intended as a helper function only.
+     */
+    void _respondToHeartbeatsNow(const ReplicaSetConfig& config,
+                                 const HostAndPort& primaryHostAndPort,
+                                 const OpTime& otherNodesOpTime) {
+
+        auto replCoord = getReplCoord();
+        auto net = getNet();
+
+        // Process all requests queued at the present time.
+        while (net->hasReadyRequests()) {
+            auto noi = net->getNextReadyRequest();
+            auto&& request = noi->getRequest();
+
+            log() << request.target << " processing " << request.cmdObj;
+            ASSERT_EQUALS("replSetHeartbeat", request.cmdObj.firstElement().fieldNameStringData());
+
+            // Make sure the heartbeat request is valid.
+            ReplSetHeartbeatArgsV1 hbArgs;
+            ASSERT_OK(hbArgs.initialize(request.cmdObj));
+
+            // Build the mock heartbeat response.
+            ReplSetHeartbeatResponse hbResp;
+            hbResp.setSetName(config.getReplSetName());
+            if (request.target == primaryHostAndPort) {
+                hbResp.setState(MemberState::RS_PRIMARY);
+            } else {
+                hbResp.setState(MemberState::RS_SECONDARY);
+            }
+            hbResp.setConfigVersion(config.getConfigVersion());
+            hbResp.setTerm(replCoord->getTerm());
+            hbResp.setAppliedOpTime(otherNodesOpTime);
+            hbResp.setDurableOpTime(otherNodesOpTime);
+            auto response = makeResponseStatus(hbResp.toBSON(replCoord->isV1ElectionProtocol()));
+            net->scheduleResponse(noi, net->now(), response);
+        }
     }
 };
 
@@ -818,25 +940,31 @@ TEST_F(PriorityTakeoverTest, SchedulesPriorityTakeoverIfNodeHasHigherPriorityTha
     ReplicaSetConfig config = assertMakeRSConfig(configObj);
 
     auto replCoord = getReplCoord();
+    auto now = getNet()->now();
 
     OperationContextNoop txn;
-    OpTime time1(Timestamp(100, 1), 0);
-    replCoord->setMyLastAppliedOpTime(time1);
-    replCoord->setMyLastDurableOpTime(time1);
+    OpTime myOptime(Timestamp(100, 1), 0);
+    replCoord->setMyLastAppliedOpTime(myOptime);
+    replCoord->setMyLastDurableOpTime(myOptime);
+
+    // Make sure we're secondary and that no priority takeover has been scheduled.
     ASSERT(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_FALSE(replCoord->getPriorityTakeover_forTest());
 
-    ASSERT_EQUALS(Date_t(), replCoord->getPriorityTakeover_forTest());
+    // Mock a first round of heartbeat responses, which should give us enough information to know
+    // that we supersede priorities of all other nodes, prompting the scheduling of a priority
+    // takeover.
+    now = respondToHeartbeatsUntil(config, now, HostAndPort("node2", 12345), myOptime);
 
-    auto now = getNet()->now();
-    respondToAllHeartbeats(config, now, HostAndPort("node2", 12345), time1);
+    // Make sure that the priority takeover has actually been scheduled and at the
+    // correct time.
+    ASSERT(replCoord->getPriorityTakeover_forTest());
+    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest().get();
+    assertValidTakeoverDelay(config, now, priorityTakeoverTime, 0);
 
-    ASSERT_NOT_EQUALS(Date_t(), replCoord->getPriorityTakeover_forTest());
-    ASSERT_EQUALS(now + config.getPriorityTakeoverDelay(0),
-                  replCoord->getPriorityTakeover_forTest());
-
-    // Updating term cancels priority takeover callback.
+    // Also make sure that updating the term cancels the scheduled priority takeover.
     ASSERT_EQUALS(ErrorCodes::StaleTerm, replCoord->updateTerm(&txn, replCoord->getTerm() + 1));
-    ASSERT_EQUALS(Date_t(), replCoord->getPriorityTakeover_forTest());
+    ASSERT_FALSE(replCoord->getPriorityTakeover_forTest());
 }
 
 TEST_F(PriorityTakeoverTest, SuccessfulPriorityTakeover) {
@@ -859,21 +987,34 @@ TEST_F(PriorityTakeoverTest, SuccessfulPriorityTakeover) {
     ReplicaSetConfig config = assertMakeRSConfig(configObj);
 
     auto replCoord = getReplCoord();
+    auto now = getNet()->now();
 
     OperationContextNoop txn;
-    OpTime time1(Timestamp(100, 1), 0);
-    replCoord->setMyLastAppliedOpTime(time1);
-    replCoord->setMyLastDurableOpTime(time1);
+    OpTime myOptime(Timestamp(100, 1), 0);
+    replCoord->setMyLastAppliedOpTime(myOptime);
+    replCoord->setMyLastDurableOpTime(myOptime);
+
+    // Make sure we're secondary and that no priority takeover has been scheduled.
     ASSERT(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_FALSE(replCoord->getPriorityTakeover_forTest());
 
-    ASSERT_EQUALS(Date_t(), replCoord->getPriorityTakeover_forTest());
+    // Mock a first round of heartbeat responses, which should give us enough information to know
+    // that we supersede priorities of all other nodes, prompting the scheduling of a priority
+    // takeover.
+    now = respondToHeartbeatsUntil(config, now, HostAndPort("node2", 12345), myOptime);
 
-    auto now = getNet()->now();
-    respondToAllHeartbeats(config, now, HostAndPort("node2", 12345), time1);
+    // Make sure that the priority takeover has actually been scheduled and at the
+    // correct time.
+    ASSERT(replCoord->getPriorityTakeover_forTest());
+    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest().get();
+    assertValidTakeoverDelay(config, now, priorityTakeoverTime, 0);
 
-    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest();
-    ASSERT_NOT_EQUALS(Date_t(), priorityTakeoverTime);
-    ASSERT_EQUALS(now + config.getPriorityTakeoverDelay(0), priorityTakeoverTime);
+    // The priority takeover might be scheduled at a time later than one election
+    // timeout after our initial heartbeat responses, so mock another round of
+    // heartbeat responses to prevent a normal election timeout.
+    Milliseconds halfElectionTimeout = config.getElectionTimeoutPeriod() / 2;
+    now = respondToHeartbeatsUntil(
+        config, now + halfElectionTimeout, HostAndPort("node2", 12345), myOptime);
 
     performSuccessfulPriorityTakeover(priorityTakeoverTime);
 }
@@ -899,32 +1040,35 @@ TEST_F(PriorityTakeoverTest, DontCallForPriorityTakeoverWhenLaggedSameSecond) {
     HostAndPort primaryHostAndPort("node2", 12345);
 
     auto replCoord = getReplCoord();
+    auto timeZero = getNet()->now();
+    auto now = getNet()->now();
 
     OperationContextNoop txn;
     OpTime currentOpTime(Timestamp(100, 5000), 0);
     OpTime behindOpTime(Timestamp(100, 3999), 0);
     OpTime closeEnoughOpTime(Timestamp(100, 4000), 0);
+
     replCoord->setMyLastAppliedOpTime(behindOpTime);
     replCoord->setMyLastDurableOpTime(behindOpTime);
+
+    // Make sure we're secondary and that no priority takeover has been scheduled.
     ASSERT(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_FALSE(replCoord->getPriorityTakeover_forTest());
 
-    ASSERT_EQUALS(Date_t(), replCoord->getPriorityTakeover_forTest());
+    // Mock a first round of heartbeat responses.
+    now = respondToHeartbeatsUntil(config, now, primaryHostAndPort, currentOpTime);
 
-    auto now = getNet()->now();
-
-    respondToAllHeartbeats(config, now, primaryHostAndPort, currentOpTime);
-
-    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest();
-    ASSERT_NOT_EQUALS(Date_t(), priorityTakeoverTime);
-    ASSERT_EQUALS(now + config.getPriorityTakeoverDelay(0), priorityTakeoverTime);
-
+    // Make sure that the priority takeover has actually been scheduled and at the
+    // correct time.
+    ASSERT(replCoord->getPriorityTakeover_forTest());
+    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest().get();
+    assertValidTakeoverDelay(config, now, priorityTakeoverTime, 0);
 
     // At this point the other nodes are all ahead of the current node, so it can't call for
     // priority takeover.
     startCapturingLogMessages();
-    respondToAllHeartbeats(config, priorityTakeoverTime, primaryHostAndPort, currentOpTime);
+    now = respondToHeartbeatsUntil(config, priorityTakeoverTime, primaryHostAndPort, currentOpTime);
     stopCapturingLogMessages();
-
 
     ASSERT(replCoord->getMemberState().secondary());
     ASSERT_EQUALS(1,
@@ -932,11 +1076,17 @@ TEST_F(PriorityTakeoverTest, DontCallForPriorityTakeoverWhenLaggedSameSecond) {
                                           "caught up enough to the most up-to-date member to "
                                           "call for priority takeover"));
 
-    now = getNet()->now();
-    ASSERT_EQUALS(now, priorityTakeoverTime);
-    priorityTakeoverTime = replCoord->getPriorityTakeover_forTest();
-    ASSERT_NOT_EQUALS(Date_t(), priorityTakeoverTime);
-    ASSERT_EQUALS(now + config.getPriorityTakeoverDelay(0), priorityTakeoverTime);
+    // Mock another round of heartbeat responses that occur after the previous
+    // 'priorityTakeoverTime', which should schedule a new priority takeover
+    Milliseconds halfElectionTimeout = config.getElectionTimeoutPeriod() / 2;
+    now = respondToHeartbeatsUntil(
+        config, timeZero + halfElectionTimeout * 3, primaryHostAndPort, currentOpTime);
+
+    // Make sure that a new priority takeover has been scheduled and at the
+    // correct time.
+    ASSERT(replCoord->getPriorityTakeover_forTest());
+    priorityTakeoverTime = replCoord->getPriorityTakeover_forTest().get();
+    assertValidTakeoverDelay(config, now, priorityTakeoverTime, 0);
 
     // Now make us caught up enough to call for priority takeover to succeed.
     replCoord->setMyLastAppliedOpTime(closeEnoughOpTime);
@@ -966,6 +1116,8 @@ TEST_F(PriorityTakeoverTest, DontCallForPriorityTakeoverWhenLaggedDifferentSecon
     HostAndPort primaryHostAndPort("node2", 12345);
 
     auto replCoord = getReplCoord();
+    auto timeZero = getNet()->now();
+    auto now = getNet()->now();
 
     OperationContextNoop txn;
     OpTime currentOpTime(Timestamp(100, 0), 0);
@@ -973,25 +1125,25 @@ TEST_F(PriorityTakeoverTest, DontCallForPriorityTakeoverWhenLaggedDifferentSecon
     OpTime closeEnoughOpTime(Timestamp(98, 0), 0);
     replCoord->setMyLastAppliedOpTime(behindOpTime);
     replCoord->setMyLastDurableOpTime(behindOpTime);
+
+    // Make sure we're secondary and that no priority takeover has been scheduled.
     ASSERT(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_FALSE(replCoord->getPriorityTakeover_forTest());
 
-    ASSERT_EQUALS(Date_t(), replCoord->getPriorityTakeover_forTest());
 
-    auto now = getNet()->now();
+    now = respondToHeartbeatsUntil(config, now, primaryHostAndPort, currentOpTime);
 
-    respondToAllHeartbeats(config, now, primaryHostAndPort, currentOpTime);
-
-    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest();
-    ASSERT_NOT_EQUALS(Date_t(), priorityTakeoverTime);
-    ASSERT_EQUALS(now + config.getPriorityTakeoverDelay(0), priorityTakeoverTime);
-
+    // Make sure that the priority takeover has actually been scheduled and at the
+    // correct time.
+    ASSERT(replCoord->getPriorityTakeover_forTest());
+    auto priorityTakeoverTime = replCoord->getPriorityTakeover_forTest().get();
+    assertValidTakeoverDelay(config, now, priorityTakeoverTime, 0);
 
     // At this point the other nodes are all ahead of the current node, so it can't call for
     // priority takeover.
     startCapturingLogMessages();
-    respondToAllHeartbeats(config, priorityTakeoverTime, primaryHostAndPort, currentOpTime);
+    now = respondToHeartbeatsUntil(config, priorityTakeoverTime, primaryHostAndPort, currentOpTime);
     stopCapturingLogMessages();
-
 
     ASSERT(replCoord->getMemberState().secondary());
     ASSERT_EQUALS(1,
@@ -999,11 +1151,17 @@ TEST_F(PriorityTakeoverTest, DontCallForPriorityTakeoverWhenLaggedDifferentSecon
                                           "caught up enough to the most up-to-date member to "
                                           "call for priority takeover"));
 
-    now = getNet()->now();
-    ASSERT_EQUALS(now, priorityTakeoverTime);
-    priorityTakeoverTime = replCoord->getPriorityTakeover_forTest();
-    ASSERT_NOT_EQUALS(Date_t(), priorityTakeoverTime);
-    ASSERT_EQUALS(now + config.getPriorityTakeoverDelay(0), priorityTakeoverTime);
+    // Mock another round of heartbeat responses that occur after the previous
+    // 'priorityTakeoverTime', which should schedule a new priority takeover
+    Milliseconds halfElectionTimeout = config.getElectionTimeoutPeriod() / 2;
+    now = respondToHeartbeatsUntil(
+        config, timeZero + halfElectionTimeout * 3, primaryHostAndPort, currentOpTime);
+
+    // Make sure that a new priority takeover has been scheduled and at the
+    // correct time.
+    ASSERT(replCoord->getPriorityTakeover_forTest());
+    priorityTakeoverTime = replCoord->getPriorityTakeover_forTest().get();
+    assertValidTakeoverDelay(config, now, priorityTakeoverTime, 0);
 
     // Now make us caught up enough to call for priority takeover to succeed.
     replCoord->setMyLastAppliedOpTime(closeEnoughOpTime);
@@ -1120,6 +1278,15 @@ protected:
     using NetworkOpIter = NetworkInterfaceMock::NetworkOperationIterator;
     using FreshnessScanFn = stdx::function<void(const NetworkOpIter)>;
 
+    void replyToHeartbeatRequestAsSecondaries(const NetworkOpIter noi) {
+        ReplicaSetConfig rsConfig = getReplCoord()->getReplicaSetConfig_forTest();
+        ReplSetHeartbeatResponse hbResp;
+        hbResp.setSetName(rsConfig.getReplSetName());
+        hbResp.setState(MemberState::RS_SECONDARY);
+        hbResp.setConfigVersion(rsConfig.getConfigVersion());
+        getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(hbResp.toBSON(true)));
+    }
+
     void simulateSuccessfulV1Voting() {
         ReplicationCoordinatorImpl* replCoord = getReplCoord();
         NetworkInterfaceMock* net = getNet();
@@ -1128,32 +1295,25 @@ protected:
         ASSERT_NOT_EQUALS(Date_t(), electionTimeoutWhen);
         log() << "Election timeout scheduled at " << electionTimeoutWhen << " (simulator time)";
 
-        ReplicaSetConfig rsConfig = replCoord->getReplicaSetConfig_forTest();
         ASSERT(replCoord->getMemberState().secondary()) << replCoord->getMemberState().toString();
         bool hasReadyRequests = true;
         // Process requests until we're primary and consume the heartbeats for the notification
-        // of election win. Exit immediately on catch up.
-        while (!replCoord->isCatchingUp() &&
-               (!replCoord->getMemberState().primary() || hasReadyRequests)) {
+        // of election win. Exit immediately on unexpected requests.
+        while (!replCoord->getMemberState().primary() || hasReadyRequests) {
             log() << "Waiting on network in state " << replCoord->getMemberState();
-            getNet()->enterNetwork();
+            net->enterNetwork();
             if (net->now() < electionTimeoutWhen) {
                 net->runUntil(electionTimeoutWhen);
             }
-            const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
+            // Peek the next request, don't consume it yet.
+            const NetworkOpIter noi = net->getFrontOfUnscheduledQueue();
             const RemoteCommandRequest& request = noi->getRequest();
             log() << request.target.toString() << " processing " << request.cmdObj;
-            ReplSetHeartbeatArgsV1 hbArgs;
-            Status status = hbArgs.initialize(request.cmdObj);
-            if (hbArgs.initialize(request.cmdObj).isOK()) {
-                ReplSetHeartbeatResponse hbResp;
-                hbResp.setSetName(rsConfig.getReplSetName());
-                hbResp.setState(MemberState::RS_SECONDARY);
-                hbResp.setConfigVersion(rsConfig.getConfigVersion());
-                net->scheduleResponse(noi, net->now(), makeResponseStatus(hbResp.toBSON(true)));
+            if (ReplSetHeartbeatArgsV1().initialize(request.cmdObj).isOK()) {
+                replyToHeartbeatRequestAsSecondaries(net->getNextReadyRequest());
             } else if (request.cmdObj.firstElement().fieldNameStringData() ==
                        "replSetRequestVotes") {
-                net->scheduleResponse(noi,
+                net->scheduleResponse(net->getNextReadyRequest(),
                                       net->now(),
                                       makeResponseStatus(BSON("ok" << 1 << "reason"
                                                                    << ""
@@ -1162,9 +1322,9 @@ protected:
                                                                    << "voteGranted"
                                                                    << true)));
             } else {
-                error() << "Black holing unexpected request to " << request.target << ": "
-                        << request.cmdObj;
-                net->blackHole(noi);
+                // Stop the loop and let the caller handle unexpected requests.
+                net->exitNetwork();
+                break;
             }
             net->runReadyNetworkOperations();
             // Successful elections need to write the last vote to disk, which is done by DB worker.
@@ -1173,7 +1333,7 @@ protected:
             getReplExec()->waitForDBWork_forTest();
             net->runReadyNetworkOperations();
             hasReadyRequests = net->hasReadyRequests();
-            getNet()->exitNetwork();
+            net->exitNetwork();
         }
     }
 
@@ -1220,15 +1380,39 @@ protected:
         while (net->hasReadyRequests()) {
             const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
             const RemoteCommandRequest& request = noi->getRequest();
+            log() << request.target.toString() << " processing " << request.cmdObj;
             if (request.cmdObj.firstElement().fieldNameStringData() == "replSetGetStatus") {
-                log() << request.target.toString() << " processing " << request.cmdObj;
                 onFreshnessScanRequest(noi);
+            } else if (ReplSetHeartbeatArgsV1().initialize(request.cmdObj).isOK()) {
+                replyToHeartbeatRequestAsSecondaries(noi);
             } else {
                 log() << "Black holing unexpected request to " << request.target << ": "
                       << request.cmdObj;
                 net->blackHole(noi);
             }
             net->runReadyNetworkOperations();
+        }
+        net->exitNetwork();
+    }
+
+    void replyHeartbeatsAndRunUntil(Date_t until) {
+        auto net = getNet();
+        net->enterNetwork();
+        while (net->now() < until) {
+            while (net->hasReadyRequests()) {
+                // Peek the next request
+                auto noi = net->getFrontOfUnscheduledQueue();
+                auto& request = noi->getRequest();
+                if (ReplSetHeartbeatArgsV1().initialize(request.cmdObj).isOK()) {
+                    // Consume the next request
+                    replyToHeartbeatRequestAsSecondaries(net->getNextReadyRequest());
+                } else {
+                    // Cannot consume other requests than heartbeats.
+                    net->exitNetwork();
+                    return;
+                }
+            }
+            net->runUntil(until);
         }
         net->exitNetwork();
     }
@@ -1242,11 +1426,11 @@ TEST_F(PrimaryCatchUpTest, PrimaryDoNotNeedToCatchUp) {
     processFreshnessScanRequests([this](const NetworkOpIter noi) {
         getNet()->scheduleResponse(noi, getNet()->now(), makeFreshnessScanResponse(OpTime()));
     });
-    ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Draining);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1, countLogLinesContaining("My optime is most up-to-date, skipping catch-up"));
     auto txn = makeOperationContext();
-    getReplCoord()->signalDrainComplete(txn.get());
+    getReplCoord()->signalDrainComplete(txn.get(), getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->canAcceptWritesForDatabase("test"));
 }
 
@@ -1263,14 +1447,13 @@ TEST_F(PrimaryCatchUpTest, PrimaryFreshnessScanTimeout) {
     });
 
     auto net = getNet();
-    net->enterNetwork();
-    net->runUntil(net->now() + config.getCatchUpTimeoutPeriod());
-    net->exitNetwork();
-    ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+    replyHeartbeatsAndRunUntil(net->now() + config.getCatchUpTimeoutPeriod());
+    ASSERT_EQ((int)getReplCoord()->getApplierState(), (int)ApplierState::Draining);
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Draining);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1, countLogLinesContaining("Could not access any nodes within timeout"));
     auto txn = makeOperationContext();
-    getReplCoord()->signalDrainComplete(txn.get());
+    getReplCoord()->signalDrainComplete(txn.get(), getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->canAcceptWritesForDatabase("test"));
 }
 
@@ -1288,18 +1471,18 @@ TEST_F(PrimaryCatchUpTest, PrimaryCatchUpSucceeds) {
     });
 
     NetworkInterfaceMock* net = getNet();
-    ASSERT(getReplCoord()->isCatchingUp());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
     // Simulate the work done by bgsync and applier threads.
     // setMyLastAppliedOpTime() will signal the optime waiter.
     getReplCoord()->setMyLastAppliedOpTime(time2);
     net->enterNetwork();
     net->runReadyNetworkOperations();
     net->exitNetwork();
-    ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Draining);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1, countLogLinesContaining("Finished catch-up oplog after becoming primary."));
     auto txn = makeOperationContext();
-    getReplCoord()->signalDrainComplete(txn.get());
+    getReplCoord()->signalDrainComplete(txn.get(), getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->canAcceptWritesForDatabase("test"));
 }
 
@@ -1316,16 +1499,13 @@ TEST_F(PrimaryCatchUpTest, PrimaryCatchUpTimeout) {
         net->scheduleResponse(noi, net->now(), makeFreshnessScanResponse(time2));
     });
 
-    NetworkInterfaceMock* net = getNet();
-    ASSERT(getReplCoord()->isCatchingUp());
-    net->enterNetwork();
-    net->runUntil(net->now() + config.getCatchUpTimeoutPeriod());
-    net->exitNetwork();
-    ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
+    replyHeartbeatsAndRunUntil(getNet()->now() + config.getCatchUpTimeoutPeriod());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Draining);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1, countLogLinesContaining("Cannot catch up oplog after becoming primary"));
     auto txn = makeOperationContext();
-    getReplCoord()->signalDrainComplete(txn.get());
+    getReplCoord()->signalDrainComplete(txn.get(), getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->canAcceptWritesForDatabase("test"));
 }
 
@@ -1341,18 +1521,15 @@ TEST_F(PrimaryCatchUpTest, PrimaryStepsDownDuringFreshnessScan) {
         log() << "Black holing request to " << request.target << ": " << request.cmdObj;
         getNet()->blackHole(noi);
     });
-    ASSERT(getReplCoord()->isCatchingUp());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
 
     TopologyCoordinator::UpdateTermResult updateTermResult;
     auto evh = getReplCoord()->updateTerm_forTest(2, &updateTermResult);
     ASSERT_TRUE(evh.isValid());
     getReplExec()->waitForEvent(evh);
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
-    auto net = getNet();
-    net->enterNetwork();
-    net->runUntil(net->now() + config.getCatchUpTimeoutPeriod());
-    net->exitNetwork();
-    ASSERT_FALSE(getReplCoord()->isWaitingForApplierToDrain());
+    replyHeartbeatsAndRunUntil(getNet()->now() + config.getCatchUpTimeoutPeriod());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1, countLogLinesContaining("Stopped transition to primary"));
     ASSERT_FALSE(getReplCoord()->canAcceptWritesForDatabase("test"));
@@ -1370,7 +1547,7 @@ TEST_F(PrimaryCatchUpTest, PrimaryStepsDownDuringCatchUp) {
         // The old primary accepted one more op and all nodes caught up after voting for me.
         net->scheduleResponse(noi, net->now(), makeFreshnessScanResponse(time2));
     });
-    ASSERT(getReplCoord()->isCatchingUp());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
 
     TopologyCoordinator::UpdateTermResult updateTermResult;
     auto evh = getReplCoord()->updateTerm_forTest(2, &updateTermResult);
@@ -1382,13 +1559,63 @@ TEST_F(PrimaryCatchUpTest, PrimaryStepsDownDuringCatchUp) {
     net->runReadyNetworkOperations();
     net->exitNetwork();
     auto txn = makeOperationContext();
-    // Simulate bgsync signaling replCoord to exit drain mode.
+    // Simulate the applier signaling replCoord to exit drain mode.
     // At this point, we see the stepdown and reset the states.
-    getReplCoord()->signalDrainComplete(txn.get());
-    ASSERT_FALSE(getReplCoord()->isWaitingForApplierToDrain());
+    getReplCoord()->signalDrainComplete(txn.get(), getReplCoord()->getTerm());
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1, countLogLinesContaining("Cannot catch up oplog after becoming primary"));
     ASSERT_FALSE(getReplCoord()->canAcceptWritesForDatabase("test"));
+}
+
+TEST_F(PrimaryCatchUpTest, PrimaryStepsDownDuringDrainMode) {
+    startCapturingLogMessages();
+
+    OpTime time1(Timestamp(100, 1), 0);
+    OpTime time2(Timestamp(100, 2), 0);
+    ReplicaSetConfig config = setUp3NodeReplSetAndRunForElection(time1);
+
+    processFreshnessScanRequests([this, time2](const NetworkOpIter noi) {
+        auto net = getNet();
+        // The old primary accepted one more op and all nodes caught up after voting for me.
+        net->scheduleResponse(noi, net->now(), makeFreshnessScanResponse(time2));
+    });
+
+    NetworkInterfaceMock* net = getNet();
+    ReplicationCoordinatorImpl* replCoord = getReplCoord();
+    ASSERT(getReplCoord()->getApplierState() == ApplierState::Running);
+    // Simulate the work done by bgsync and applier threads.
+    // setMyLastAppliedOpTime() will signal the optime waiter.
+    replCoord->setMyLastAppliedOpTime(time2);
+    net->enterNetwork();
+    net->runReadyNetworkOperations();
+    net->exitNetwork();
+    ASSERT(replCoord->getApplierState() == ApplierState::Draining);
+    stopCapturingLogMessages();
+    ASSERT_EQUALS(1, countLogLinesContaining("Finished catch-up oplog after becoming primary."));
+
+    // Step down during drain mode.
+    TopologyCoordinator::UpdateTermResult updateTermResult;
+    auto evh = replCoord->updateTerm_forTest(2, &updateTermResult);
+    ASSERT_TRUE(evh.isValid());
+    getReplExec()->waitForEvent(evh);
+    ASSERT_TRUE(replCoord->getMemberState().secondary());
+
+    // Step up again
+    ASSERT(replCoord->getApplierState() == ApplierState::Running);
+    simulateSuccessfulV1Voting();
+    ASSERT_TRUE(replCoord->getMemberState().primary());
+
+    // No need to catch-up, so we enter drain mode.
+    processFreshnessScanRequests([this](const NetworkOpIter noi) {
+        getNet()->scheduleResponse(noi, getNet()->now(), makeFreshnessScanResponse(OpTime()));
+    });
+    ASSERT(replCoord->getApplierState() == ApplierState::Draining);
+    ASSERT_FALSE(replCoord->canAcceptWritesForDatabase("test"));
+    auto txn = makeOperationContext();
+    replCoord->signalDrainComplete(txn.get(), replCoord->getTerm());
+    ASSERT(replCoord->getApplierState() == ApplierState::Stopped);
+    ASSERT_TRUE(replCoord->canAcceptWritesForDatabase("test"));
 }
 
 }  // namespace

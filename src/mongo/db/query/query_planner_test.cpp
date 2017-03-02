@@ -3878,9 +3878,7 @@ TEST_F(QueryPlannerTest, ShardFilterCompoundProjCovered) {
         "{ixscan: {pattern: {a: 1, b: 1}}}}}}}");
 }
 
-TEST_F(QueryPlannerTest, ShardFilterNestedProjNotCovered) {
-    // Nested projections can't be covered currently, though the shard key filter shouldn't need
-    // to fetch.
+TEST_F(QueryPlannerTest, ShardFilterNestedProjCovered) {
     params.options = QueryPlannerParams::INCLUDE_SHARD_FILTER;
     params.shardKey = BSON("a" << 1 << "b.c" << 1);
     addIndex(BSON("a" << 1 << "b.c" << 1));
@@ -3890,9 +3888,8 @@ TEST_F(QueryPlannerTest, ShardFilterNestedProjNotCovered) {
     assertNumSolutions(1U);
     assertSolutionExists(
         "{proj: {spec: {_id: 0, a: 1, 'b.c': 1 }, type: 'default', node: "
-        "{fetch: {node: "
         "{sharding_filter: {node: "
-        "{ixscan: {pattern: {a: 1, 'b.c': 1}}}}}}}}}");
+        "{ixscan: {filter: null, pattern: {a: 1, 'b.c': 1}}}}}}}");
 }
 
 TEST_F(QueryPlannerTest, ShardFilterHashProjNotCovered) {
@@ -4988,6 +4985,286 @@ TEST_F(QueryPlannerTest, ContainedOrNotPredicateIsLeadingFieldInBothBranchesInde
         "false, true]], c: [[7, 7, true, true]]}}}]}},"
         "{ixscan: {pattern: {a: 1, c: 1}, bounds: {a: [['MinKey', 5, true, false], [5, 'MaxKey', "
         "false, true]], c: [['MinKey', 'MaxKey', true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineLeadingFields) {
+    const bool multikey = true;
+    addIndex(BSON("a" << 1), multikey);
+    addIndex(BSON("b" << 1));
+
+    runQuery(fromjson("{$and: [{a: {$gte: 0}}, {$or: [{a: {$lte: 10}}, {b: 6}]}]}"));
+    assertNumSolutions(3);
+    assertSolutionExists(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {a: 1}, bounds: {a: [[-Infinity, 10, true, true]]}}},"
+        "{ixscan: {pattern: {b: 1}, bounds: {b: [[6, 6, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists(
+        "{fetch: {filter: {$or: [{a: {$lte: 10}}, {b: 6}]}, node: "
+        "{ixscan: {pattern: {a: 1}, bounds: {a: [[0, Infinity, true, true]]}}}"
+        "}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineLeadingFields) {
+    MultikeyPaths multikeyPaths{{0U}};
+    addIndex(BSON("a" << 1), multikeyPaths);
+    addIndex(BSON("b" << 1));
+
+    runQuery(fromjson("{$and: [{a: {$gte: 0}}, {$or: [{a: {$lte: 10}}, {b: 6}]}]}"));
+    assertNumSolutions(3);
+    assertSolutionExists(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {a: 1}, bounds: {a: [[-Infinity, 10, true, true]]}}},"
+        "{ixscan: {pattern: {b: 1}, bounds: {b: [[6, 6, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists(
+        "{fetch: {filter: {$or: [{a: {$lte: 10}}, {b: 6}]}, node: "
+        "{ixscan: {pattern: {a: 1}, bounds: {a: [[0, Infinity, true, true]]}}}"
+        "}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineLeadingFields) {
+    MultikeyPaths multikeyPaths{{}, {0U}};
+    addIndex(BSON("a" << 1 << "c" << 1), multikeyPaths);
+    addIndex(BSON("b" << 1));
+
+    runQuery(fromjson("{$and: [{a: {$gte: 0}}, {$or: [{a: {$lte: 10}}, {b: 6}]}]}"));
+    assertNumSolutions(3);
+    assertSolutionExists(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {a: 1, c: 1}, bounds: {a: [[0, 10, true, true]]}}},"
+        "{ixscan: {pattern: {b: 1}, bounds: {b: [[6, 6, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists(
+        "{fetch: {filter: {$or: [{a: {$lte: 10}}, {b: 6}]}, node: "
+        "{ixscan: {pattern: {a: 1, c: 1}, bounds: {a: [[0, Infinity, true, true]], c: [['MinKey', "
+        "'MaxKey', true, true]]}}}"
+        "}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrMultikeyCompoundFields) {
+    const bool multikey = true;
+    addIndex(BSON("b" << 1 << "a" << 1), multikey);
+    addIndex(BSON("c" << 1));
+
+    runQuery(fromjson("{$and: [{a: 5}, {$or: [{b: 6}, {c: 7}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {a: 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[5, 5, true, "
+        "true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCompoundFields) {
+    const bool multikey = true;
+    addIndex(BSON("a.c" << 1 << "a.b" << 1), multikey);
+    addIndex(BSON("d" << 1));
+
+    runQuery(fromjson("{$and: [{'a.b': 5}, {$or: [{'a.c': 6}, {d: 7}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {'a.b': 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {'a.c': 1, 'a.b': 1}, bounds: {'a.c': [[6, 6, true, true]], 'a.b': "
+        "[['MinKey', 'MaxKey', true, true]]}}},"
+        "{ixscan: {pattern: {d: 1}, bounds: {d: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundFields) {
+    MultikeyPaths multikeyPaths{{0U}, {0U}};
+    addIndex(BSON("b" << 1 << "a" << 1), multikeyPaths);
+    addIndex(BSON("c" << 1));
+
+    runQuery(fromjson("{$and: [{a: 5}, {$or: [{b: 6}, {c: 7}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {a: 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[5, 5, true, "
+        "true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundDottedFields) {
+    MultikeyPaths multikeyPaths{{1U}, {1U}};
+    addIndex(BSON("a.c" << 1 << "a.b" << 1), multikeyPaths);
+    addIndex(BSON("d" << 1));
+
+    runQuery(fromjson("{$and: [{'a.b': 5}, {$or: [{'a.c': 6}, {d: 7}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {'a.b': 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {'a.c': 1, 'a.b': 1}, bounds: {'a.c': [[6, 6, true, true]], 'a.b': "
+        "[[5, 5, true, true]]}}},"
+        "{ixscan: {pattern: {d: 1}, bounds: {d: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundFields) {
+    MultikeyPaths multikeyPaths{{0U}, {0U}};
+    addIndex(BSON("a.c" << 1 << "a.b" << 1), multikeyPaths);
+    addIndex(BSON("d" << 1));
+
+    runQuery(fromjson("{$and: [{'a.b': 5}, {$or: [{'a.c': 6}, {d: 7}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {'a.b': 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {'a.c': 1, 'a.b': 1}, bounds: {'a.c': [[6, 6, true, true]], 'a.b': "
+        "[['MinKey', 'MaxKey', true, true]]}}},"
+        "{ixscan: {pattern: {d: 1}, bounds: {d: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineTrailingFields) {
+    const bool multikey = true;
+    addIndex(BSON("b" << 1 << "a" << 1), multikey);
+    addIndex(BSON("c" << 1));
+
+    runQuery(
+        fromjson("{$and: [{a: {$gte: 0}}, {$or: [{$and: [{a: {$lte: 10}}, {b: 6}]}, {c: 7}]}]}"));
+    assertNumSolutions(2);
+    std::vector<std::string> alternates;
+    alternates.push_back(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[-Infinity, 10, "
+        "true, true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    alternates.push_back(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[0, Infinity, "
+        "true, true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertHasOneSolutionOf(alternates);
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineTrailingFields) {
+    MultikeyPaths multikeyPaths{{}, {0U}};
+    addIndex(BSON("b" << 1 << "a" << 1), multikeyPaths);
+    addIndex(BSON("c" << 1));
+
+    runQuery(
+        fromjson("{$and: [{a: {$gte: 0}}, {$or: [{$and: [{a: {$lte: 10}}, {b: 6}]}, {c: 7}]}]}"));
+    assertNumSolutions(2);
+    std::vector<std::string> alternates;
+    alternates.push_back(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[-Infinity, 10, "
+        "true, true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    alternates.push_back(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[0, Infinity, "
+        "true, true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertHasOneSolutionOf(alternates);
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineTrailingFields) {
+    MultikeyPaths multikeyPaths{{0U}, {}};
+    addIndex(BSON("b" << 1 << "a" << 1), multikeyPaths);
+    addIndex(BSON("c" << 1));
+
+    runQuery(
+        fromjson("{$and: [{a: {$gte: 0}}, {$or: [{$and: [{a: {$lte: 10}}, {b: 6}]}, {c: 7}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {a: {$gte: 0}}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[0, 10, true, "
+        "true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrMultikeyCompoundTrailingFields) {
+    const bool multikey = true;
+    addIndex(BSON("b" << 1 << "a" << 1 << "c" << 1), multikey);
+    addIndex(BSON("d" << 1));
+
+    runQuery(fromjson("{$and: [{a: 5}, {$or: [{$and: [{b: 6}, {c: 7}]}, {d: 8}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {a: 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1, c: 1}, bounds: {b: [[6, 6, true, true]], a: [[5, 5, true, "
+        "true]], c: [[7, 7, true, true]]}}},"
+        "{ixscan: {pattern: {d: 1}, bounds: {d: [[8, 8, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCompoundTrailingFields) {
+    const bool multikey = true;
+    addIndex(BSON("d" << 1 << "a.b" << 1 << "a.c" << 1), multikey);
+    addIndex(BSON("e" << 1));
+
+    runQuery(fromjson("{$and: [{'a.b': 5}, {$or: [{$and: [{'a.c': 6}, {d: 7}]}, {e: 8}]}]}"));
+    assertNumSolutions(2);
+    std::vector<std::string> alternates;
+    alternates.push_back(
+        "{fetch: {filter: {'a.b': 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {d: 1, 'a.b': 1, 'a.c': 1}, bounds: {d: [[7, 7, true, true]], 'a.b': "
+        "[['MinKey', 'MaxKey', true, true]], 'a.c': [[6, 6, true, true]]}}},"
+        "{ixscan: {pattern: {e: 1}, bounds: {e: [[8, 8, true, true]]}}}"
+        "]}}}}");
+    alternates.push_back(
+        "{fetch: {filter: {'a.b': 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {d: 1, 'a.b': 1, 'a.c': 1}, bounds: {d: [[7, 7, true, true]], 'a.b': "
+        "[[5, 5, true, true]], 'a.c': [['MinKey', 'MaxKey', true, true]]}}},"
+        "{ixscan: {pattern: {e: 1}, bounds: {e: [[8, 8, true, true]]}}}"
+        "]}}}}");
+    assertHasOneSolutionOf(alternates);
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundTrailingFields) {
+    MultikeyPaths multikeyPaths{{}, {0U}, {}};
+    addIndex(BSON("b" << 1 << "a" << 1 << "c" << 1), multikeyPaths);
+    addIndex(BSON("d" << 1));
+
+    runQuery(fromjson("{$and: [{a: 5}, {$or: [{$and: [{b: 6}, {c: 7}]}, {d: 8}]}]}"));
+    assertNumSolutions(2);
+    assertSolutionExists(
+        "{fetch: {filter: {a: 5}, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1, c: 1}, bounds: {b: [[6, 6, true, true]], a: [[5, 5, true, "
+        "true]], c: [[7, 7, true, true]]}}},"
+        "{ixscan: {pattern: {d: 1}, bounds: {d: [[8, 8, true, true]]}}}"
+        "]}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}}}");
+}
+
+TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundTrailingFields) {
+    MultikeyPaths multikeyPaths{{}, {0U}, {0U}};
+    addIndex(BSON("d" << 1 << "a.b" << 1 << "a.c" << 1), multikeyPaths);
+    addIndex(BSON("e" << 1));
+
+    runQuery(fromjson("{$and: [{'a.b': 5}, {$or: [{$and: [{'a.c': 6}, {d: 7}]}, {e: 8}]}]}"));
+    assertNumSolutions(2);
+    // When we have path-level multikey info, we ensure that predicates are assigned in order of
+    // index position.
+    assertSolutionExists(
+        "{fetch: {filter: {'a.b': 5}, node: {or: {nodes: ["
+        "{fetch: {filter: {'a.c': 6}, node: {ixscan: {pattern: {d: 1, 'a.b': 1, 'a.c': 1}, bounds: "
+        "{d: [[7, 7, true, true]], 'a.b': [[5, 5, true, true]], 'a.c': [['MinKey', 'MaxKey', true, "
+        "true]]}}}}},"
+        "{ixscan: {pattern: {e: 1}, bounds: {e: [[8, 8, true, true]]}}}"
         "]}}}}");
     assertSolutionExists("{cscan: {dir: 1}}}}");
 }

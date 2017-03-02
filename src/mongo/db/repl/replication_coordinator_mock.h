@@ -128,11 +128,9 @@ public:
 
     virtual bool setFollowerMode(const MemberState& newState);
 
-    virtual bool isWaitingForApplierToDrain();
+    virtual ApplierState getApplierState();
 
-    virtual bool isCatchingUp();
-
-    virtual void signalDrainComplete(OperationContext*);
+    virtual void signalDrainComplete(OperationContext*, long long);
 
     virtual Status waitForDrainFinish(Milliseconds timeout) override;
 
@@ -275,6 +273,8 @@ public:
      */
     void alwaysAllowWrites(bool allowWrites);
 
+    void setMaster(bool isMaster);
+
     virtual ServiceContext* getServiceContext() override {
         return _service;
     }
@@ -282,7 +282,7 @@ public:
 private:
     AtomicUInt64 _snapshotNameGenerator;
     ServiceContext* const _service;
-    const ReplSettings _settings;
+    ReplSettings _settings;
     MemberState _memberState;
     OpTime _myLastDurableOpTime;
     OpTime _myLastAppliedOpTime;

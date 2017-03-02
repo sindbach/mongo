@@ -46,7 +46,7 @@ public:
 protected:
     static const std::string CONFIG_HOST_PORT;
 
-    void expectFindOnConfigSendErrorCode(ErrorCodes::Error code);
     void expectFindOnConfigSendBSONObjVector(std::vector<BSONObj> obj);
 };
+
 }  // namespace mongo

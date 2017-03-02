@@ -344,10 +344,15 @@ void ReplCoordTest::simulateSuccessfulV1ElectionAt(Date_t electionTime) {
             net->blackHole(noi);
         }
         net->runReadyNetworkOperations();
+        // Successful elections need to write the last vote to disk, which is done by DB worker.
+        // Wait until DB worker finishes its job to ensure the synchronization with the
+        // executor.
+        getReplExec()->waitForDBWork_forTest();
+        net->runReadyNetworkOperations();
         hasReadyRequests = net->hasReadyRequests();
         getNet()->exitNetwork();
     }
-    ASSERT(replCoord->isWaitingForApplierToDrain());
+    ASSERT(replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Draining);
     ASSERT(replCoord->getMemberState().primary()) << replCoord->getMemberState().toString();
 
     IsMasterResponse imResponse;
@@ -356,8 +361,9 @@ void ReplCoordTest::simulateSuccessfulV1ElectionAt(Date_t electionTime) {
     ASSERT_TRUE(imResponse.isSecondary()) << imResponse.toBSON().toString();
     {
         auto txn = makeOperationContext();
-        replCoord->signalDrainComplete(txn.get());
+        replCoord->signalDrainComplete(txn.get(), replCoord->getTerm());
     }
+    ASSERT(replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Stopped);
     replCoord->fillIsMasterForReplSet(&imResponse);
     ASSERT_TRUE(imResponse.isMaster()) << imResponse.toBSON().toString();
     ASSERT_FALSE(imResponse.isSecondary()) << imResponse.toBSON().toString();
@@ -409,7 +415,7 @@ void ReplCoordTest::simulateSuccessfulElection() {
         hasReadyRequests = net->hasReadyRequests();
         getNet()->exitNetwork();
     }
-    ASSERT(replCoord->isWaitingForApplierToDrain());
+    ASSERT(replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Draining);
     ASSERT(replCoord->getMemberState().primary()) << replCoord->getMemberState().toString();
 
     IsMasterResponse imResponse;
@@ -418,7 +424,7 @@ void ReplCoordTest::simulateSuccessfulElection() {
     ASSERT_TRUE(imResponse.isSecondary()) << imResponse.toBSON().toString();
     {
         auto txn = makeOperationContext();
-        replCoord->signalDrainComplete(txn.get());
+        replCoord->signalDrainComplete(txn.get(), replCoord->getTerm());
     }
     replCoord->fillIsMasterForReplSet(&imResponse);
     ASSERT_TRUE(imResponse.isMaster()) << imResponse.toBSON().toString();

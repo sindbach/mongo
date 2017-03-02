@@ -142,43 +142,67 @@ variables:
   - *run_jstestfuzz_tests
 
 # buildvariants in this list have debug symbols which are uploaded to s3.
+# Note this sorted list contains all buildvariants. A buildvariant that does not
+# create separate symbol files is commented out.
 - &debug_symbol_variants
+  - amazon
+  - debian71
+  - debian81
+  - enterprise-debian71-64
+  - enterprise-debian81-64
   - enterprise-linux-64-amazon-ami
   - enterprise-osx-107
   - enterprise-rhel-62-64-bit
   - enterprise-rhel-62-64-bit-coverage
+  - enterprise-rhel-62-64-bit-inmem
+  - enterprise-rhel-67-s390x
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-71-ppc64le
+  - enterprise-rhel-71-ppc64le-inmem
   - enterprise-rhel-72-s390x
+  - enterprise-rhel-72-s390x-inmem
   - enterprise-suse11-64
   - enterprise-suse11-s390x
   - enterprise-suse12-64
   - enterprise-suse12-s390x
+  # - enterprise-ubuntu-dynamic-1604-64-bit # Does not create separate symbol files.
   - enterprise-ubuntu1204-64
   - enterprise-ubuntu1404-64
   - enterprise-ubuntu1604-64
   - enterprise-ubuntu1604-arm64
+  # - enterprise-ubuntu1604-clang-3.7-libcxx # Does not create separate symbol files.
   - enterprise-ubuntu1604-ppc64le
   - enterprise-ubuntu1604-s390x
-  - enterprise-debian71-64
-  - enterprise-debian81-64
+  - enterprise-windows-64
+  - enterprise-windows-64-2k8-debug-unoptimized
+  - enterprise-windows-64-inmem
+  - initsync-3dot2-rhel-62
   - linux-64
   - linux-64-debug
-  - amazon
+  - linux-64-duroff
+  - linux-64-ephemeralForTest
+  - linux-64-lsm
+  - linux-64-repeated-execution
+  - osx-107
+  - osx-107-debug
+  - osx-107-ssl
   - rhel62
   - rhel70
+  - solaris-64-bit
   - suse11
   - suse12
   - ubuntu1204
   - ubuntu1404
+  - ubuntu1404-rocksdb
   - ubuntu1604
   - ubuntu1604-arm64
-  - ubuntu1404-rocksdb
-  - debian71
-  - debian81
-  - solaris-64-bit
-  - osx-107-ssl
-  - osx-107
+  - ubuntu1604-asan
+  - ubuntu1604-debug-asan
+  - ubuntu1604-debug-ubsan
+  - windows-64
+  - windows-64-2k8
+  - windows-64-2k8-debug
+  - windows-64-2k8-ssl
 
 
 #######################################
@@ -498,14 +522,14 @@ functions:
         if [ ${run_multiple_jobs|false} = true ]; then
           processor_architecture=$(uname -m)
           num_jobs_available=${num_jobs_available|1}
-          # Reduce the number of available jobs by half when running any sharding*, replicasets*
-          # and select jsCore_small_oplog tasks on Windows and ARM to avoid overwhelming test hosts.
+          # Reduce the number of available jobs by half when running any sharding*, replica_sets*
+          # and select jsCore passthrough tasks on Windows and ARM to avoid overwhelming test hosts.
           if [ "Windows_NT" = "$OS" ] || [ "aarch64" = $processor_architecture ]; then
             case "${task_name}" in
-            jsCore_small_oplog_rs_initsync          \
-            |jsCore_small_oplog_rs_initsync_static  \
-            |jsCore_small_oplog_rs_resync_static    \
-            |replicasets*                           \
+            replica_sets_initsync_jscore_passthrough          \
+            |replica_sets_initsync_static_jscore_passthrough  \
+            |replica_sets_resync_static_jscore_passthrough    \
+            |replica_sets*                           \
             |sharding*                              \
             )
               num_jobs_available=$((${num_jobs_available|2} / 2))
@@ -760,7 +784,7 @@ functions:
         set -o errexit
         set -o verbose
 
-        rm -rf src /data/db/* mongo-diskstats* mongo-coredumps.tgz ~/.aws
+        rm -rf src /data/db/* mongo-diskstats* mongo-*.tgz ~/.aws
 
   "kill processes" :
     command: shell.exec
@@ -858,6 +882,9 @@ functions:
         export KITCHEN_SSH_KEY_ID="${kitchen_ssh_key_id}"
         export KITCHEN_SUBNET="${kitchen_subnet}"
 
+        # set expiration tag 2 hours in the future, since no test should take this long
+        export KITCHEN_EXPIRE="$(python -c 'import datetime; print((datetime.datetime.now() + datetime.timedelta(0, 2*60*60)).strftime("%Y-%m-%d %H:%M:%S"))')"
+
         for i in {1..3}
         do
           if ! kitchen verify "${packager_distro}"; then
@@ -905,7 +932,7 @@ pre:
         ulimit -a
         # Clear the dmesg ring buffer. The "post" phase will check dmesg for OOM messages.
         ${set_sudo}
-        $sudo dmesg --clear > /dev/null 2>&1
+        $sudo dmesg -c > /dev/null 2>&1
         if [ $? -eq 0 ]; then
           echo "Cleared the dmesg ring buffer"
         else
@@ -1091,6 +1118,25 @@ post:
       display_name: Core Dumps - Execution ${execution}
       optional: true
 
+  # Gather and archive hang_analyzer debugger files.
+  - command: archive.targz_pack
+    params:
+      target: "src/mongo-hanganalyzer.tgz"
+      source_dir: "src"
+      include:
+        - "./debugger*.log"
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/mongo-hanganalyzer.tgz
+      remote_file: mongodb-mongo-master/${build_variant}/${revision}/hanganalyzer/mongo-hanganalyzer-${build_id}-${task_name}-${execution}.tgz
+      bucket: mciuploads
+      permissions: public-read
+      content_type: ${content_type|application/x-gzip}
+      display_name: Hang Analyzer Output - Execution ${execution}
+      optional: true
+
   # Gather and archive disk statistics.
   - command: archive.targz_pack
     params:
@@ -1133,10 +1179,9 @@ timeout:
       working_dir: src
       script: |
         set -o verbose
-        ${set_sudo}
-        $sudo hang_analyzer_option="-p ${hang_analyzer_processes|dbtest,java,mongo,mongod,mongos,python,_test} -g bsondump,mongodump,mongoexport,mongofiles,mongoimport,mongooplog,mongoreplay,mongorestore,mongostat,mongotop"
-        echo "Calling the hang analyzer: python buildscripts/hang_analyzer.py $hang_analyzer_option"
-        PATH=/opt/mongodbtoolchain/gdb/bin:$PATH python buildscripts/hang_analyzer.py $hang_analyzer_option
+        hang_analyzer_option="-c -o file -o stdout -p ${hang_analyzer_processes|dbtest,java,mongo,mongod,mongos,python,_test} -g bsondump,mongodump,mongoexport,mongofiles,mongoimport,mongooplog,mongoreplay,mongorestore,mongostat,mongotop"
+        echo "Calling the hang analyzer: PATH=\"/opt/mongodbtoolchain/gdb/bin:$PATH\" python buildscripts/hang_analyzer.py $hang_analyzer_option"
+        PATH="/opt/mongodbtoolchain/gdb/bin:$PATH" python buildscripts/hang_analyzer.py $hang_analyzer_option
 
 #######################################
 #               Tasks                 #
@@ -2056,146 +2101,146 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog
+  name: master_slave_jscore_passthrough
   depends_on:
   - name: jsCore
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog --storageEngine=mmapv1
+      resmoke_args: --suites=master_slave_jscore_passthrough --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_WT
+  name: master_slave_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog --storageEngine=wiredTiger
+      resmoke_args: --suites=master_slave_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs
+  name: replica_sets_jscore_passthrough
   depends_on:
   - name: jsCore
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs --storageEngine=mmapv1
+      resmoke_args: --suites=replica_sets_jscore_passthrough --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_WT
+  name: replica_sets_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs --storageEngine=wiredTiger
+      resmoke_args: --suites=replica_sets_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_initsync
+  name: replica_sets_initsync_jscore_passthrough
   depends_on:
   - name: jsCore
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_initsync --storageEngine=mmapv1
+      resmoke_args: --suites=replica_sets_initsync_jscore_passthrough --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_initsync_WT
+  name: replica_sets_initsync_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_initsync --storageEngine=wiredTiger
+      resmoke_args: --suites=replica_sets_initsync_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_resync
+  name: replica_sets_resync_jscore_passthrough
   depends_on:
   - name: jsCore
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_resync --storageEngine=mmapv1
+      resmoke_args: --suites=replica_sets_resync_jscore_passthrough --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_resync_WT
+  name: replica_sets_resync_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_resync --storageEngine=wiredTiger
+      resmoke_args: --suites=replica_sets_resync_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_initsync_static
+  name: replica_sets_initsync_static_jscore_passthrough
   depends_on:
   - name: jsCore
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_initsync_static --storageEngine=mmapv1
+      resmoke_args: --suites=replica_sets_initsync_static_jscore_passthrough --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_initsync_static_WT
+  name: replica_sets_initsync_static_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_initsync_static --storageEngine=wiredTiger
+      resmoke_args: --suites=replica_sets_initsync_static_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_resync_static
+  name: replica_sets_resync_static_jscore_passthrough
   depends_on:
   - name: jsCore
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_resync_static --storageEngine=mmapv1
+      resmoke_args: --suites=replica_sets_resync_static_jscore_passthrough --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_resync_static_WT
+  name: replica_sets_resync_static_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_resync_static --storageEngine=wiredTiger
+      resmoke_args: --suites=replica_sets_resync_static_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: jsCore_small_oplog_rs_kill_secondaries_WT
+  name: replica_sets_kill_secondaries_jscore_passthrough_WT
   depends_on:
   - name: jsCore_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=core_small_oplog_rs_kill_secondaries --storageEngine=wiredTiger
+      resmoke_args: --suites=replica_sets_kill_secondaries_jscore_passthrough --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
@@ -2571,7 +2616,7 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replicasets
+  name: replica_sets
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -2580,7 +2625,7 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replicasets_WT
+  name: replica_sets_WT
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -2589,7 +2634,7 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replicasets_WT_ese
+  name: replica_sets_WT_ese
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -2598,7 +2643,7 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replicasets_auth
+  name: replica_sets_auth
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -2607,7 +2652,7 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replicasets_compression
+  name: replica_sets_compression
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -2616,41 +2661,41 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replicasets_legacy
+  name: replica_sets_pv0
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=replica_sets_legacy
+      resmoke_args: --suites=replica_sets_pv0
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replication
+  name: master_slave
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=replication --storageEngine=mmapv1
+      resmoke_args: --suites=master_slave --storageEngine=mmapv1
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replication_WT
+  name: master_slave_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=replication --storageEngine=wiredTiger
+      resmoke_args: --suites=master_slave --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
-  name: replication_auth
+  name: master_slave_auth
   depends_on:
-  - name: replication_WT
+  - name: master_slave_WT
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=replication_auth
+      resmoke_args: --suites=master_slave_auth
       run_multiple_jobs: true
 
 - <<: *task_template
@@ -3377,7 +3422,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --release
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars --release
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
     build_mongoreplay: true
@@ -3427,10 +3472,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -3473,13 +3514,17 @@ buildvariants:
   - name: read_only_WT
   - name: read_only_sharded
   - name: read_only_sharded_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -3504,7 +3549,7 @@ buildvariants:
   - rhel62-small
   batchtime: 1440 # 1 day
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --repeat=10 --shuffle
     use_scons_cache: true
@@ -3541,7 +3586,7 @@ buildvariants:
     push_name: linux-debug
     push_arch: x86_64
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     use_scons_cache: true
     build_mongoreplay: true
   tasks:
@@ -3572,10 +3617,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: mmap
   - name: mongosTest
   - name: noPassthrough
@@ -3617,13 +3658,17 @@ buildvariants:
   - name: read_concern_linearizable_passthrough
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -3649,7 +3694,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux-duroff
     push_arch: x86_64
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --nojournal --excludeWithAnyTags=requires_journaling
     use_scons_cache: true
@@ -3675,8 +3720,6 @@ buildvariants:
   - name: jsCore
   - name: jsCore_auth
   - name: jsCore_compatibility
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -3700,11 +3743,13 @@ buildvariants:
   - name: concurrency_replication
   - name: concurrency_sharded
   - name: concurrency_simultaneous
-  - name: replicasets
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
   - name: sharding
   - name: sharding_auth
   - name: slow1
@@ -3719,7 +3764,7 @@ buildvariants:
   - rhel62-small
   batchtime: 1440 # 1 day
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --wiredTigerCollectionConfig=type=lsm --wiredTigerIndexConfig=type=lsm
     use_scons_cache: true
@@ -3742,8 +3787,6 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: jsCore_WT
   - name: jsCore_compatibility_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -3759,8 +3802,10 @@ buildvariants:
   - name: concurrency_replication_WT
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous_WT
-  - name: replicasets_WT
-  - name: replication_WT
+  - name: replica_sets_WT
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding_WT
   - name: slow1_WT
   - name: serial_run_WT
@@ -3780,7 +3825,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-ubuntu1204
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1204 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1204 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "ubuntu1204"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -3830,10 +3875,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -3868,12 +3909,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -3904,7 +3949,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-ubuntu1404
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1404 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1404 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "ubuntu1404"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -3963,10 +4008,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -4001,12 +4042,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -4037,7 +4082,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "ubuntu1604"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -4087,10 +4132,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -4125,12 +4166,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -4165,7 +4210,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: arm64-enterprise-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=armv8-a+crc -mtune=generic" --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=armv8-a+crc -mtune=generic" --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -4196,8 +4241,6 @@ buildvariants:
   - name: jsCore_WT
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -4225,10 +4268,12 @@ buildvariants:
   - name: concurrency_simultaneous_WT
     distros:
     - ubuntu1604-arm64-small
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding_WT
   - name: sharding_auth
   - name: slow1_WT
@@ -4254,7 +4299,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: arm64-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --release CCFLAGS="-march=armv8-a+crc -mtune=generic" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --release CCFLAGS="-march=armv8-a+crc -mtune=generic" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -4285,8 +4330,6 @@ buildvariants:
   - name: jsCore_WT
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -4314,10 +4357,12 @@ buildvariants:
   - name: concurrency_simultaneous_WT
     distros:
     - ubuntu1604-arm64-small
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding_WT
   - name: sharding_auth
   - name: slow1_WT
@@ -4345,7 +4390,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: ppc64le-enterprise-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) --release CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) --release CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: 2
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -4377,8 +4422,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_compression
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -4395,10 +4438,12 @@ buildvariants:
   - name: concurrency_replication_WT
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous_WT
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding_WT
   - name: sharding_auth
   - name: slow1_WT
@@ -4426,7 +4471,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: s390x-enterprise-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
     num_jobs_available: 2
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -4472,8 +4517,6 @@ buildvariants:
   - name: jsCore_compression
   - name: jsCore_decimal_WT
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: mongosTest
   - name: noPassthroughWithMongod_WT
   - name: noPassthrough_WT
@@ -4481,13 +4524,15 @@ buildvariants:
   - name: parallel_compatibility_WT
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_compression
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_compression
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_WT
@@ -4523,7 +4568,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-amzn64
-    compile_flags: --ssl MONGO_DISTMOD=amzn64 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=amzn64 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -4576,10 +4621,10 @@ buildvariants:
   - name: noPassthroughWithMongod_WT
   - name: bulk_gle_passthrough
   - name: bulk_gle_passthrough_WT
-  - name: replicasets_auth
-  - name: replicasets_WT_ese
-  - name: replication_auth
-  - name: replication_WT
+  - name: replica_sets_auth
+  - name: replica_sets_WT_ese
+  - name: master_slave_auth
+  - name: master_slave_WT
   - name: sasl
   - name: sharding_auth
   - name: sharding_auth_audit_WT
@@ -4613,7 +4658,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-amazon
-    compile_flags: --ssl MONGO_DISTMOD=amazon -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=amazon -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "amzn64"
     multiversion_edition: "enterprise"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -4663,10 +4708,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -4701,12 +4742,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -4747,7 +4792,7 @@ buildvariants:
     push_arch: x86_64
     msi_target: msi
     content_type: application/zip
-    compile_flags: --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) VARIANT_DIR=win32
+    compile_flags: --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     ext: zip
     use_scons_cache: true
@@ -4786,10 +4831,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -4822,10 +4863,14 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: slow1
@@ -4858,7 +4903,7 @@ buildvariants:
     multiversion_platform_arch: "windows/x86_64-2008plus"
     msi_target: msi
     content_type: application/zip
-    compile_flags: --release --win-version-min=ws08r2 -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) MONGO_DISTMOD=2008plus VARIANT_DIR=win32
+    compile_flags: --release --win-version-min=ws08r2 -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) MONGO_DISTMOD=2008plus
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     ext: zip
     use_scons_cache: true
@@ -4900,10 +4945,6 @@ buildvariants:
   - name: jsCore_compression
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -4943,11 +4984,15 @@ buildvariants:
   - name: read_concern_linearizable_passthrough
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_compression
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_compression
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_compression
@@ -5016,35 +5061,6 @@ buildvariants:
   - name: jsCore_compression
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_WT
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_initsync
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_initsync_WT
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_initsync_static
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_initsync_static_WT
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_resync_static
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_resync_static_WT
-    distros:
-    - windows-64-vs2015-large
-  - name: jsCore_small_oplog_rs_kill_secondaries_WT
-    distros:
-    - windows-64-vs2015-large
   - name: mmap
   - name: mongosTest
   - name: noPassthrough
@@ -5096,14 +5112,43 @@ buildvariants:
   - name: read_only_WT
   - name: read_only_sharded
   - name: read_only_sharded_WT
-  - name: replicasets
+  - name: replica_sets
     distros:
     - windows-64-vs2015-large
-  - name: replicasets_WT
+  - name: replica_sets_WT
     distros:
     - windows-64-vs2015-large
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets_jscore_passthrough
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_jscore_passthrough_WT
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_initsync_jscore_passthrough
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_initsync_jscore_passthrough_WT
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_initsync_static_jscore_passthrough
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_initsync_static_jscore_passthrough_WT
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_resync_static_jscore_passthrough
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_resync_static_jscore_passthrough_WT
+    distros:
+    - windows-64-vs2015-large
+  - name: replica_sets_kill_secondaries_jscore_passthrough_WT
+    distros:
+    - windows-64-vs2015-large
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
     distros:
     - windows-64-vs2015-large
@@ -5130,7 +5175,7 @@ buildvariants:
     push_arch: x86_64-enterprise-windows-64
     msi_target: msi
     content_type: application/zip
-    compile_flags: --release --ssl MONGO_DISTMOD=windows-64 CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
+    compile_flags: --release --ssl MONGO_DISTMOD=windows-64 CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     ext: zip
     use_scons_cache: true
@@ -5169,8 +5214,8 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
-  - name: replicasets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_WT_ese
   - name: sasl
   - name: sharding_auth
   - name: sharding_auth_audit_WT
@@ -5200,7 +5245,7 @@ buildvariants:
     push_arch: x86_64-enterprise-windows-64
     msi_target: msi
     content_type: application/zip
-    compile_flags: --release --ssl MONGO_DISTMOD=windows-64 CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
+    compile_flags: --release --ssl MONGO_DISTMOD=windows-64 CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_journaling
     ext: zip
@@ -5224,8 +5269,6 @@ buildvariants:
   - name: concurrency_simultaneous
   - name: jsCore
   - name: jsCore_auth
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: jstestfuzz
   - name: jstestfuzz_concurrent
   - name: jstestfuzz_concurrent_WT
@@ -5236,7 +5279,9 @@ buildvariants:
   - name: jstestfuzz_replication_WT
   - name: jstestfuzz_sharded_WT
   - name: read_concern_linearizable_passthrough
-  - name: replicasets_auth
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave_jscore_passthrough
   - name: sasl
   - name: sharding_auth
   - name: sharding_auth_audit_WT
@@ -5260,7 +5305,7 @@ buildvariants:
     push_arch: x86_64-2008plus-ssl
     msi_target: msi
     content_type: application/zip
-    compile_flags: --release --ssl MONGO_DISTMOD=2008plus-ssl CPPPATH="c:/openssl/include" LIBPATH="c:/openssl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
+    compile_flags: --release --ssl MONGO_DISTMOD=2008plus-ssl CPPPATH="c:/openssl/include" LIBPATH="c:/openssl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     ext: zip
     use_scons_cache: true
@@ -5287,10 +5332,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -5323,10 +5364,14 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: slow1
@@ -5359,7 +5404,7 @@ buildvariants:
     exe: ".exe"
     gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH"'
     content_type: application/zip
-    compile_flags: --dbg=on --opt=off --ssl MONGO_DISTMOD=2008plus CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
+    compile_flags: --dbg=on --opt=off --ssl MONGO_DISTMOD=2008plus CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     ext: zip
     use_scons_cache: true
@@ -5423,10 +5468,6 @@ buildvariants:
   - name: jsCore_compression
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -5459,11 +5500,15 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_compression
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_compression
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: slow1
   - name: slow1_WT
   - name: serial_run
@@ -5526,11 +5571,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
-  - name: jsCore_small_oplog_rs_kill_secondaries_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -5564,10 +5604,15 @@ buildvariants:
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: replica_sets_kill_secondaries_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: slow1
   - name: slow1_WT
   - name: serial_run
@@ -5615,10 +5660,10 @@ buildvariants:
   - name: jsCore_decimal_WT
   - name: mmap
   - name: mongosTest
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: master_slave
+  - name: master_slave_WT
   - name: tool
   - name: tool_WT
 
@@ -5663,7 +5708,7 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: snmp
   - name: snmp_WT
@@ -5691,7 +5736,7 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-rhel62
     rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
     multiversion_platform_arch: "rhel62"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -5769,35 +5814,6 @@ buildvariants:
   - name: jsCore_minimum_batch_size_WT
   - name: jsCore_op_query
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_static
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_static_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_resync_static
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_resync_static_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_kill_secondaries_WT
-    distros:
-    - rhel62-large
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -5839,27 +5855,56 @@ buildvariants:
   - name: read_only_WT
   - name: read_only_sharded
   - name: read_only_sharded_WT
-  - name: replicasets
+  - name: replica_sets
     distros:
     - rhel62-large
-  - name: replicasets_WT
+  - name: replica_sets_WT
     distros:
     - rhel62-large
-  - name: replicasets_WT_ese
+  - name: replica_sets_WT_ese
     distros:
     - rhel62-large
-  - name: replicasets_auth
+  - name: replica_sets_auth
     distros:
     - rhel62-large
-  - name: replicasets_compression
+  - name: replica_sets_compression
     distros:
     - rhel62-large
-  - name: replicasets_legacy
+  - name: replica_sets_pv0
     distros:
     - rhel62-large
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_resync_static_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_resync_static_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_kill_secondaries_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: rlp
   - name: rlp_WT
   - name: sasl
@@ -5926,7 +5971,7 @@ buildvariants:
     gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
     tooltags: "-tags 'ssl sasl'"
     rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
-    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
     multiversion_platform_arch: "rhel62"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -6016,35 +6061,6 @@ buildvariants:
   - name: jsCore_minimum_batch_size_WT
   - name: jsCore_op_query
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_static
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_static_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_resync_static
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_resync_static_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_kill_secondaries_WT
-    distros:
-    - rhel62-large
   - name: mmap
   - name: mongosTest
   - name: multiversion
@@ -6072,27 +6088,56 @@ buildvariants:
   - name: read_only_WT
   - name: read_only_sharded
   - name: read_only_sharded_WT
-  - name: replicasets
+  - name: replica_sets
     distros:
     - rhel62-large
-  - name: replicasets_WT
+  - name: replica_sets_WT
     distros:
     - rhel62-large
-  - name: replicasets_WT_ese
+  - name: replica_sets_WT_ese
     distros:
     - rhel62-large
-  - name: replicasets_auth
+  - name: replica_sets_auth
     distros:
     - rhel62-large
-  - name: replicasets_compression
+  - name: replica_sets_compression
     distros:
     - rhel62-large
-  - name: replicasets_legacy
+  - name: replica_sets_pv0
     distros:
     - rhel62-large
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_resync_static_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_resync_static_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_kill_secondaries_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: rlp
   - name: rlp_WT
   - name: sasl
@@ -6155,7 +6200,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-rhel70
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -6192,7 +6237,7 @@ buildvariants:
   - name: jstestfuzz_sharded_WT
   - name: external_auth_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: snmp
@@ -6217,7 +6262,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-rhel62
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "rhel62"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -6267,10 +6312,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -6305,12 +6346,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -6342,7 +6387,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-rhel70
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "rhel70"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -6392,10 +6437,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -6446,12 +6487,16 @@ buildvariants:
   - name: concurrency_simultaneous_WT
     distros:
     - rhel70
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -6484,7 +6529,7 @@ buildvariants:
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
     # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
-    compile_flags: --ssl MONGO_DISTMOD=rhel71 --release -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=rhel71 --release -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(echo "$(grep -c processor /proc/cpuinfo)/4" | bc)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -6555,10 +6600,6 @@ buildvariants:
   # - name: jsCore_minimum_batch_size_WT
   # - name: jsCore_op_query
   - name: jsCore_op_query_WT
-  # - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  # - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   # - name: mmap
   - name: mongosTest
   # - name: noPassthrough
@@ -6572,14 +6613,18 @@ buildvariants:
   # - name: read_concern_linearizable_passthrough
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  # - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  # - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  # - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  # - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  # - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  # - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   # - name: sharded_collections_jscore_passthrough
   - name: sharded_collections_jscore_passthrough_WT
@@ -6623,7 +6668,7 @@ buildvariants:
   expansions:
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
-    compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
+    compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
     num_jobs_available: 2
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -6694,10 +6739,6 @@ buildvariants:
   # - name: jsCore_minimum_batch_size_WT
   # - name: jsCore_op_query
   - name: jsCore_op_query_WT
-  # - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  # - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   # - name: mmap
   - name: mongosTest
   # - name: noPassthrough
@@ -6711,14 +6752,18 @@ buildvariants:
   # - name: read_concern_linearizable_passthrough
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  # - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  # - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  # - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  # - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  # - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  # - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   # - name: sharded_collections_jscore_passthrough
   - name: sharded_collections_jscore_passthrough_WT
@@ -6750,6 +6795,145 @@ buildvariants:
     distros:
     - rhel70-small
 
+- name: enterprise-rhel-67-s390x
+  display_name: Enterprise RHEL 6.7 s390x
+  modules:
+  - enterprise
+  run_on:
+  - rhel67-zseries-build
+  - rhel67-zseries-test
+  batchtime: 1440 # 1 day
+  stepback: false
+  expansions:
+    gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
+    tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libcrypto) -lsasl2" -tags 'sasl ssl'
+    compile_flags: --ssl MONGO_DISTMOD=rhel67 --release -j3 CCFLAGS="-march=z9-109 -mtune=z10" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
+    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
+    test_flags: --excludeWithAnyTags=requires_mmapv1
+    has_packages: true
+    packager_script: packager-enterprise.py
+    packager_arch: s390x
+    packager_distro: rhel67
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: s390x-enterprise-rhel67
+    repo_edition: enterprise
+    build_mongoreplay: true
+  tasks:
+  - name: compile
+    distros:
+    - rhel67-zseries-build
+  - name: compile_all
+    distros:
+    - rhel67-zseries-build
+  # - name: aggregation
+  - name: aggregation_WT
+  - name: aggregation_WT_ese
+  - name: aggregation_auth
+  - name: aggregation_read_concern_majority_passthrough_WT
+  - name: aggregation_sharded_collections_passthrough_WT
+  # - name: audit
+  - name: audit_WT
+  # - name: auth
+  - name: auth_WT
+  # - name: auth_audit
+  - name: auth_audit_WT
+  # - name: bulk_gle_passthrough
+  - name: bulk_gle_passthrough_WT
+  # - name: concurrency
+  - name: concurrency_WT
+  # - name: concurrency_replication
+  - name: concurrency_replication_WT
+  # - name: concurrency_sharded
+  - name: concurrency_sharded_WT
+  # - name: concurrency_simultaneous
+  - name: concurrency_simultaneous_WT
+  # - name: dbtest
+  - name: dbtest_WT
+  # - name: disk
+  # - name: dur_jscore_passthrough
+  # - name: durability
+  - name: ese_WT
+  - name: failpoints
+  - name: failpoints_auth
+  # - name: gle_auth
+  - name: gle_auth_WT
+  # - name: gle_auth_basics_passthrough
+  - name: gle_auth_basics_passthrough_WT
+  # - name: gle_auth_basics_passthrough_write_cmd
+  - name: gle_auth_basics_passthrough_write_cmd_WT
+  # - name: gle_auth_write_cmd
+  - name: gle_auth_write_cmd_WT
+  - name: httpinterface
+  - name: integration_tests_replset
+  - name: integration_tests_standalone
+  # - name: jsCore
+  - name: jsCore_WT
+  - name: jsCore_WT_ese
+  # - name: jsCore_auth
+  # - name: jsCore_compatibility
+  - name: jsCore_compatibility_WT
+  - name: jsCore_decimal_WT
+  # - name: jsCore_minimum_batch_size_WT
+  # - name: jsCore_op_query
+  - name: jsCore_op_query_WT
+  # - name: mmap
+  - name: mongosTest
+  # - name: noPassthrough
+  # - name: noPassthroughWithMongod
+  - name: noPassthroughWithMongod_WT
+  - name: noPassthrough_WT
+  # - name: parallel
+  - name: parallel_WT
+  # - name: parallel_compatibility
+  - name: parallel_compatibility_WT
+  # - name: read_concern_linearizable_passthrough
+  - name: read_concern_linearizable_passthrough_WT
+  - name: read_concern_majority_passthrough_WT
+  # - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  # - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  # - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  # - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
+  - name: sasl
+  # - name: sharded_collections_jscore_passthrough
+  - name: sharded_collections_jscore_passthrough_WT
+  # - name: sharding
+  - name: sharding_WT
+  - name: sharding_WT_ese
+  - name: sharding_auth
+  - name: sharding_auth_audit_WT
+  - name: sharding_csrs_continuous_config_stepdown_WT
+  # - name: sharding_gle_auth_basics_passthrough
+  - name: sharding_gle_auth_basics_passthrough_WT
+  # - name: sharding_gle_auth_basics_passthrough_write_cmd
+  - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
+  # - name: sharding_jscore_passthrough
+  - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_passthrough_wire_ops_WT
+  - name: sharding_op_query_WT
+  # - name: slow1
+  - name: slow1_WT
+  # - name: serial_run
+  - name: serial_run_WT
+  # - name: snmp
+  - name: snmp_WT
+  - name: ssl
+  - name: sslSpecial
+  # - name: tool
+  - name: tool_WT
+  - name: push
+    distros:
+    - rhel62-small
+
 ###########################################
 #          Ubuntu buildvariants           #
 ###########################################
@@ -6768,7 +6952,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-ubuntu1204
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1204 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1204 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -6804,7 +6988,7 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: snmp
@@ -6831,7 +7015,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-ubuntu1404
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1404 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1404 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -6876,7 +7060,7 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: snmp
@@ -6903,7 +7087,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -6939,7 +7123,7 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: snmp
@@ -6990,7 +7174,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -7025,7 +7209,7 @@ buildvariants:
   - name: jstestfuzz_replication_WT
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: mmap
@@ -7054,7 +7238,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: s390x-enterprise-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
+    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -7099,8 +7283,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal_WT
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: mongosTest
   - name: noPassthroughWithMongod_WT
   - name: noPassthrough_WT
@@ -7108,12 +7290,14 @@ buildvariants:
   - name: parallel_compatibility_WT
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_WT
@@ -7148,7 +7332,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=suse12 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     multiversion_platform_arch: "suse12"
     multiversion_edition: "targeted"
@@ -7196,10 +7380,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_compatibility_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -7234,12 +7414,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -7274,7 +7458,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-suse11
-    compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -7308,7 +7492,7 @@ buildvariants:
   - name: jstestfuzz_replication_WT
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: mmap
@@ -7335,7 +7519,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: s390x-enterprise-suse11
-    compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z9-109 -mtune=z10" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
+    compile_flags: --ssl MONGO_DISTMOD=suse11 --release -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z9-109 -mtune=z10" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_mmapv1
     has_packages: true
@@ -7375,8 +7559,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal_WT
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs_WT
   - name: mongosTest
   - name: noPassthroughWithMongod_WT
   - name: noPassthrough_WT
@@ -7384,12 +7566,14 @@ buildvariants:
   - name: parallel_compatibility_WT
   - name: read_concern_linearizable_passthrough_WT
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_WT
@@ -7424,7 +7608,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-suse11
-    compile_flags: --ssl MONGO_DISTMOD=suse11 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=suse11 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "suse11"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -7471,10 +7655,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_compatibility_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -7509,12 +7689,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -7550,7 +7734,7 @@ buildvariants:
     push_arch: x86_64
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "-lsocket -lnsl"
-    compile_flags: CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy -j$(kstat cpu | sort -u | grep -c "^module") --release CCFLAGS="-m64" LINKFLAGS="-m64 -static-libstdc++ -static-libgcc" OBJCOPY=/opt/mongodbtoolchain/bin/objcopy
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_gcc.vars -j$(kstat cpu | sort -u | grep -c "^module") --release CCFLAGS="-m64" LINKFLAGS="-m64 -static-libstdc++ -static-libgcc"
     num_jobs_available: $(( $(kstat cpu | sort -u | grep -c "^module") / 2 ))
     use_scons_cache: true
   tasks:
@@ -7582,10 +7766,6 @@ buildvariants:
   - name: jsCore_compatibility_WT
   - name: jsCore_decimal
   - name: jsCore_decimal_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
-  - name: jsCore_small_oplog_WT
   - name: jsCore_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
@@ -7609,10 +7789,14 @@ buildvariants:
   - name: parallel_compatibility
   - name: parallel_compatibility_WT
   - name: parallel_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replication
-  - name: replication_WT
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharded_collections_jscore_passthrough
   - name: sharded_collections_jscore_passthrough_WT
@@ -7648,7 +7832,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-debian71
-    compile_flags: --ssl MONGO_DISTMOD=debian71 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=debian71 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -7684,7 +7868,7 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: snmp
@@ -7711,7 +7895,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-debian81
-    compile_flags: --ssl MONGO_DISTMOD=debian81 --release -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=debian81 --release -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     has_packages: true
     packager_script: packager-enterprise.py
@@ -7747,7 +7931,7 @@ buildvariants:
   - name: jstestfuzz_sharded
   - name: jstestfuzz_sharded_WT
   - name: mmap
-  - name: replicasets_auth
+  - name: replica_sets_auth
   - name: sasl
   - name: sharding_auth
   - name: snmp
@@ -7772,7 +7956,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-debian71
-    compile_flags: --ssl MONGO_DISTMOD=debian71 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=debian71 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "debian71"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -7820,10 +8004,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_compatibility_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -7858,12 +8038,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -7899,7 +8083,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-debian81
-    compile_flags: --ssl MONGO_DISTMOD=debian81 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --ssl MONGO_DISTMOD=debian81 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform_arch: "debian81"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -7947,10 +8131,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_compatibility_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent
@@ -7985,12 +8165,16 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_simultaneous
   - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sharding
   - name: sharding_WT
   - name: sharding_auth
@@ -8030,7 +8214,7 @@ buildvariants:
     tooltags: "-tags 'ssl sasl'"
     rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_journaling
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
     build_mongoreplay: true
@@ -8069,8 +8253,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_op_query
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -8084,11 +8266,13 @@ buildvariants:
   - name: parallel_compatibility
   - name: read_concern_linearizable_passthrough
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
   - name: rlp
   - name: sasl
   - name: sharded_collections_jscore_passthrough
@@ -8114,7 +8298,7 @@ buildvariants:
   batchtime: 1440 # 1 day
   expansions:
     test_flags: --storageEngine=ephemeralForTest --excludeWithAnyTags=requires_persistence,requires_fsync,SERVER-21420,SERVER-21658,requires_journaling
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
     build_mongoreplay: true
@@ -8151,8 +8335,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_op_query
   - name: jsCore_compatibility
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: jstestfuzz_WT
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -8168,11 +8350,13 @@ buildvariants:
   - name: parallel
   - name: parallel_compatibility
   - name: read_concern_linearizable_passthrough
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
   - name: sharding
   - name: sharding_auth
   - name: sharding_op_query_WT
@@ -8196,7 +8380,7 @@ buildvariants:
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
     # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
-    compile_flags: --dbg=on --opt=on --ssl MONGO_DISTMOD=rhel71 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: --dbg=on --opt=on --ssl MONGO_DISTMOD=rhel71 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     num_jobs_available: $(echo "$(grep -c processor /proc/cpuinfo)/4" | bc)
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling
     build_mongoreplay: true
@@ -8233,8 +8417,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_op_query
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: mongosTest
   - name: noPassthrough
   - name: noPassthroughWithMongod
@@ -8242,11 +8424,13 @@ buildvariants:
   - name: parallel_compatibility
   - name: read_concern_linearizable_passthrough
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
   - name: sasl
   - name: sharded_collections_jscore_passthrough
   - name: sharding
@@ -8276,7 +8460,7 @@ buildvariants:
   expansions:
     gorootvars: PATH=/opt/mongodbtoolchain/v2/bin:$PATH
     tooltags: -gccgoflags "$(pkg-config --libs --cflags libssl libsasl2)" -tags 'sasl ssl'
-    compile_flags: --dbg=on --opt=on --ssl --link-model=static MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --use-s390x-crc32=off
+    compile_flags: --dbg=on --opt=on --ssl MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
     num_jobs_available: 2
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling
     build_mongoreplay: true
@@ -8321,8 +8505,6 @@ buildvariants:
   - name: jsCore_auth
   - name: jsCore_compatibility
   - name: jsCore_op_query
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: mongosTest
   - name: noPassthrough
   - name: noPassthroughWithMongod
@@ -8330,11 +8512,13 @@ buildvariants:
   - name: parallel_compatibility
   - name: read_concern_linearizable_passthrough
   - name: read_concern_majority_passthrough_WT
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replicasets_legacy
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets_WT
+  - name: replica_sets_auth
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
   - name: sasl
   - name: sharded_collections_jscore_passthrough
   - name: sharding
@@ -8361,7 +8545,7 @@ buildvariants:
   batchtime: 1440 # 1 day
   expansions:
     build_rocksdb: true
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on CPPPATH=$(readlink -f ../rocksdb/include/) LIBPATH=$(readlink -f ../rocksdb/) LIBS=rocksdb CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy VARIANT_DIR=release --runtime-hardening=off
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on CPPPATH=$(readlink -f ../rocksdb/include/) LIBPATH=$(readlink -f ../rocksdb/) LIBS=rocksdb --variables-files=etc/scons/mongodbtoolchain_gcc.vars --runtime-hardening=off
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: --storageEngine=rocksdb
     use_scons_cache: true
@@ -8392,8 +8576,6 @@ buildvariants:
   - name: jsCore
   - name: jsCore_auth
   - name: jsCore_compatibility
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_rs
   - name: jstestfuzz
   - name: jstestfuzz_concurrent_WT
   - name: jstestfuzz_concurrent_replication_WT
@@ -8413,11 +8595,13 @@ buildvariants:
     - ubuntu1404-build
   - name: concurrency_simultaneous
   - name: read_concern_linearizable_passthrough
-  - name: replicasets
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_auth
+  - name: replica_sets_jscore_passthrough
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
   - name: sharding
   - name: sharding_auth
   - name: slow1
@@ -8439,9 +8623,9 @@ buildvariants:
   expansions:
     tooltags: "-tags 'ssl'"
     # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
-    variant_path_suffix: /usr/lib/llvm-3.8/bin
+    variant_path_suffix: /opt/mongodbtoolchain/v2/bin
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1
-    compile_flags: CC=/usr/bin/clang-3.8 CXX=/usr/bin/clang++-3.8 CPPDEFINES="_GLIBCXX_USE_CXX11_ABI=0" --dbg=on --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip VARIANT_DIR=build
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
     multiversion_platform_arch: "ubuntu1604"
     multiversion_edition: "targeted"
     num_jobs_available: $(($(grep -c ^processor /proc/cpuinfo) / 3)) # Avoid starting too many mongod's under ASAN build.
@@ -8505,17 +8689,6 @@ buildvariants:
   - name: jsCore_minimum_batch_size_WT
   - name: jsCore_op_query
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
-  - name: jsCore_small_oplog_rs_initsync
-  - name: jsCore_small_oplog_rs_initsync_WT
-  - name: jsCore_small_oplog_rs_initsync_static
-  - name: jsCore_small_oplog_rs_initsync_static_WT
-  - name: jsCore_small_oplog_rs_resync_static
-  - name: jsCore_small_oplog_rs_resync_static_WT
-  - name: jsCore_small_oplog_rs_kill_secondaries_WT
   - name: mmap
   - name: mongosTest
   - name: multiversion
@@ -8537,15 +8710,26 @@ buildvariants:
   - name: read_only_WT
   - name: read_only_sharded
   - name: read_only_sharded_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_compression
-  - name: replicasets_legacy
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_compression
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: replica_sets_initsync_jscore_passthrough
+  - name: replica_sets_initsync_jscore_passthrough_WT
+  - name: replica_sets_initsync_static_jscore_passthrough
+  - name: replica_sets_initsync_static_jscore_passthrough_WT
+  - name: replica_sets_resync_static_jscore_passthrough
+  - name: replica_sets_resync_static_jscore_passthrough_WT
+  - name: replica_sets_kill_secondaries_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   - name: sharded_collections_jscore_passthrough
   - name: sharded_collections_jscore_passthrough_WT
@@ -8584,9 +8768,9 @@ buildvariants:
   expansions:
     tooltags: "-tags 'ssl'"
     # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
-    variant_path_suffix: /usr/lib/llvm-3.8/bin
+    variant_path_suffix: /opt/mongodbtoolchain/v2/bin
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1
-    compile_flags: CC=/usr/bin/clang-3.8 CXX=/usr/bin/clang++-3.8 CPPDEFINES="_GLIBCXX_USE_CXX11_ABI=0" --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip VARIANT_DIR=build
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
     num_jobs_available: $(($(grep -c ^processor /proc/cpuinfo) / 3)) # Avoid starting too many mongod's under ASAN build.
     build_mongoreplay: true
   tasks:
@@ -8615,11 +8799,11 @@ buildvariants:
   batchtime: 1440 # 1 day
   expansions:
     # We need llvm-symbolizer in the PATH for UBSAN.
-    variant_path_suffix: /usr/lib/llvm-3.8/bin
+    variant_path_suffix: /opt/mongodbtoolchain/v2/bin
     gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
     tooltags: "-tags 'ssl sasl'"
     san_options: UBSAN_OPTIONS="print_stacktrace=1"
-    compile_flags: CC=/usr/bin/clang-3.8 CXX=/usr/bin/clang++-3.8 --dbg=on --opt=on --allocator=system --sanitize=undefined --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip CXXFLAGS="-nostdlib -nostdinc++" LIBPATH=/opt/mongodbtoolchain/v2/lib/gcc/x86_64-mongodb-linux/5.4.0 CPPPATH="/opt/mongodbtoolchain/v2/include/c++/5.4.0/ /opt/mongodbtoolchain/v2/include/c++/5.4.0/x86_64-mongodb-linux" CPPDEFINES="_GLIBCXX_USE_CXX11_ABI=0" VARIANT_DIR=build
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
     multiversion_platform_arch: "ubuntu1604"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
@@ -8687,17 +8871,6 @@ buildvariants:
   - name: jsCore_minimum_batch_size_WT
   - name: jsCore_op_query
   - name: jsCore_op_query_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
-  - name: jsCore_small_oplog_rs_initsync
-  - name: jsCore_small_oplog_rs_initsync_WT
-  - name: jsCore_small_oplog_rs_initsync_static
-  - name: jsCore_small_oplog_rs_initsync_static_WT
-  - name: jsCore_small_oplog_rs_resync_static
-  - name: jsCore_small_oplog_rs_resync_static_WT
-  - name: jsCore_small_oplog_rs_kill_secondaries_WT
   - name: mmap
   - name: mongosTest
   - name: multiversion
@@ -8719,15 +8892,26 @@ buildvariants:
   - name: read_only_WT
   - name: read_only_sharded
   - name: read_only_sharded_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_WT_ese
-  - name: replicasets_auth
-  - name: replicasets_compression
-  - name: replicasets_legacy
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
+  - name: replica_sets
+  - name: replica_sets_WT
+  - name: replica_sets_WT_ese
+  - name: replica_sets_auth
+  - name: replica_sets_compression
+  - name: replica_sets_pv0
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_WT
+  - name: replica_sets_initsync_jscore_passthrough
+  - name: replica_sets_initsync_jscore_passthrough_WT
+  - name: replica_sets_initsync_static_jscore_passthrough
+  - name: replica_sets_initsync_static_jscore_passthrough_WT
+  - name: replica_sets_resync_static_jscore_passthrough
+  - name: replica_sets_resync_static_jscore_passthrough_WT
+  - name: replica_sets_kill_secondaries_jscore_passthrough_WT
+  - name: master_slave
+  - name: master_slave_WT
+  - name: master_slave_auth
+  - name: master_slave_jscore_passthrough
+  - name: master_slave_jscore_passthrough_WT
   - name: sasl
   - name: sharded_collections_jscore_passthrough
   - name: sharded_collections_jscore_passthrough_WT
@@ -8764,7 +8948,7 @@ buildvariants:
   expansions:
     gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
     tooltags: "-tags 'ssl sasl'"
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --link-model=dynamic
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars --link-model=dynamic
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
     scons_cache_mode: all
@@ -8789,7 +8973,7 @@ buildvariants:
     tooltags: "-tags 'ssl sasl'"
     rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
     test_flags: "\"--mongodSetParameters={use3dot2InitialSync: true, initialSyncOplogBuffer: \"inMemoryBlockingQueue\"}\""
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
     build_mongoreplay: true
@@ -8805,24 +8989,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: jsCore
   - name: jsCore_WT
-  - name: jsCore_small_oplog_rs
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_static
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_initsync_static_WT
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_resync_static
-    distros:
-    - rhel62-large
-  - name: jsCore_small_oplog_rs_resync_static_WT
-    distros:
-    - rhel62-large
   - name: noPassthrough
   - name: noPassthroughWithMongod
   - name: noPassthroughWithMongod_WT
@@ -8836,19 +9002,37 @@ buildvariants:
   - name: read_concern_majority_passthrough_WT
     distros:
     - rhel62-large
-  - name: replicasets
+  - name: replica_sets
     distros:
     - rhel62-large
-  - name: replicasets_WT
+  - name: replica_sets_WT
     distros:
     - rhel62-large
-  - name: replicasets_WT_ese
+  - name: replica_sets_WT_ese
     distros:
     - rhel62-large
-  - name: replicasets_auth
+  - name: replica_sets_auth
     distros:
     - rhel62-large
-  - name: replicasets_legacy
+  - name: replica_sets_pv0
+    distros:
+    - rhel62-large
+  - name: replica_sets_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough_WT
+    distros:
+    - rhel62-large
+  - name: replica_sets_resync_static_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_resync_static_jscore_passthrough_WT
     distros:
     - rhel62-large
   - name: sharded_collections_jscore_passthrough

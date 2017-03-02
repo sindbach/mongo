@@ -71,13 +71,14 @@
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
-#include "mongo/s/client/sharding_connection_hook_for_mongos.h"
+#include "mongo/s/client/sharding_connection_hook.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
 #include "mongo/s/mongos_options.h"
 #include "mongo/s/query/cluster_cursor_cleanup_job.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/service_entry_point_mongos.h"
+#include "mongo/s/sharding_egress_metadata_hook_for_mongos.h"
 #include "mongo/s/sharding_egress_metadata_hook_for_mongos.h"
 #include "mongo/s/sharding_initialization.h"
 #include "mongo/s/sharding_uptime_reporter.h"
@@ -101,7 +102,6 @@
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers.h"
 #include "mongo/util/stacktrace.h"
-#include "mongo/util/static_observer.h"
 #include "mongo/util/stringutils.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/system_tick_source.h"
@@ -256,8 +256,11 @@ static ExitCode runMongosServer() {
     }
 
     // Add sharding hooks to both connection pools - ShardingConnectionHook includes auth hooks
-    globalConnPool.addHook(new ShardingConnectionHookForMongos(false));
-    shardConnectionPool.addHook(new ShardingConnectionHookForMongos(true));
+    globalConnPool.addHook(new ShardingConnectionHook(
+        false, stdx::make_unique<rpc::ShardingEgressMetadataHookForMongos>()));
+
+    shardConnectionPool.addHook(new ShardingConnectionHook(
+        true, stdx::make_unique<rpc::ShardingEgressMetadataHookForMongos>()));
 
     ReplicaSetMonitor::setAsynchronousConfigChangeHook(
         &ShardRegistry::replicaSetChangeConfigServerUpdateHook);
@@ -449,7 +452,7 @@ MONGO_INITIALIZER_GENERAL(setSSLManagerType, MONGO_NO_PREREQUISITES, ("SSLManage
 
 int mongoSMain(int argc, char* argv[], char** envp) {
     mongo::setMongos();
-    static StaticObserver staticObserver;
+
     if (argc < 1)
         return EXIT_FAILURE;
 

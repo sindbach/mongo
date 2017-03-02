@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2017 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,42 +26,43 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+#pragma once
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/s/sharding_egress_metadata_hook_for_mongod.h"
-
-#include "mongo/base/status.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/server_options.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_egress_metadata_hook_for_mongos.h"
+#include "mongo/base/status_with.h"
+#include "mongo/db/signed_logical_time.h"
 
 namespace mongo {
 
+class BSONElement;
+class BSONObjBuilder;
+
 namespace rpc {
 
-void ShardingEgressMetadataHookForMongod::_saveGLEStats(const BSONObj& metadata,
-                                                        StringData hostString) {}
+/**
+ * Format:
+ * logicalTime: {
+ *     clusterTime: <Timestamp>,
+ *     signature: <SHA1 hash of clusterTime as BinData>
+ * }
+ */
+class LogicalTimeMetadata {
+public:
+    explicit LogicalTimeMetadata(SignedLogicalTime time);
 
-repl::OpTime ShardingEgressMetadataHookForMongod::_getConfigServerOpTime() {
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        return repl::getGlobalReplicationCoordinator()->getCurrentCommittedSnapshotOpTime();
-    } else {
-        // TODO uncomment as part of SERVER-22663
-        // invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer);
-        return grid.configOpTime();
-    }
-}
+    static StatusWith<LogicalTimeMetadata> readFromMetadata(const BSONObj& metadata);
+    static StatusWith<LogicalTimeMetadata> readFromMetadata(const BSONElement& metadataElem);
 
-Status ShardingEgressMetadataHookForMongod::_advanceConfigOptimeFromShard(
-    ShardId shardId, const BSONObj& metadataObj) {
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        return Status::OK();
+    void writeToMetadata(BSONObjBuilder* metadataBuilder) const;
+
+    const SignedLogicalTime& getSignedTime() const;
+
+    static StringData fieldName() {
+        return "logicalTime";
     }
-    return ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(shardId, metadataObj);
-}
+
+private:
+    SignedLogicalTime _clusterTime;
+};
 
 }  // namespace rpc
 }  // namespace mongo

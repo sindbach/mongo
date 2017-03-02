@@ -450,8 +450,8 @@ var ReplSetTest = function(opts) {
             cfg.members.push(member);
         }
 
-        if (jsTestOptions().useLegacyReplicationProtocol) {
-            cfg.protocolVersion = 0;
+        if (jsTestOptions().forceReplicationProtocolVersion !== undefined) {
+            cfg.protocolVersion = jsTestOptions().forceReplicationProtocolVersion;
         }
 
         if (_configSettings) {
@@ -689,20 +689,19 @@ var ReplSetTest = function(opts) {
     };
 
     this._setDefaultConfigOptions = function(config) {
-        if (jsTestOptions().useLegacyReplicationProtocol &&
+        if (jsTestOptions().forceReplicationProtocolVersion !== undefined &&
             !config.hasOwnProperty("protocolVersion")) {
-            config.protocolVersion = 0;
+            config.protocolVersion = jsTestOptions().forceReplicationProtocolVersion;
         }
         // Update config for non journaling test variants
         this._updateConfigIfNotDurable(config);
     };
 
-    this.initiate = function(cfg, initCmd, timeout) {
+    this.initiate = function(cfg, initCmd) {
         var master = this.nodes[0].getDB("admin");
         var config = cfg || this.getReplSetConfig();
         var cmd = {};
         var cmdKey = initCmd || 'replSetInitiate';
-        timeout = timeout || self.kDefaultTimeoutMS;
 
         // Throw an exception if nodes[0] is unelectable in the given config.
         if (!_isElectable(config.members[0])) {
@@ -748,9 +747,20 @@ var ReplSetTest = function(opts) {
             // if a heartbeat times out during the quorum check. We retry three times to reduce
             // the chance of failing this way.
             assert.retry(() => {
-                const res = master.runCommand(cmd);
-                if (res.ok === 1) {
-                    return true;
+                var res;
+                try {
+                    res = master.runCommand(cmd);
+                    if (res.ok === 1) {
+                        return true;
+                    }
+                } catch (e) {
+                    // reconfig can lead to a stepdown if the primary looks for a majority before
+                    // a majority of nodes have successfully joined the set. If there is a stepdown
+                    // then the reconfig request will be killed and respond with a network error.
+                    if (isNetworkError(e)) {
+                        return true;
+                    }
+                    throw e;
                 }
 
                 assert.commandFailedWithCode(
@@ -758,7 +768,7 @@ var ReplSetTest = function(opts) {
                 return false;
             }, "replSetReconfig during initiate failed", 3, 5 * 1000);
 
-            this.awaitSecondaryNodes(timeout);
+            this.stepUp(this.nodes[0]);
         }
 
         // Setup authentication if running test with authentication
@@ -766,6 +776,46 @@ var ReplSetTest = function(opts) {
             master = this.getPrimary();
             jsTest.authenticateNodes(this.nodes);
         }
+    };
+
+    this.stepUp = function(node) {
+        this.awaitSecondaryNodes();
+        this.awaitNodesAgreeOnPrimary();
+        if (this.getPrimary() === node) {
+            return;
+        }
+
+        if (this.protocolVersion === 0 || jsTestOptions().forceReplicationProtocolVersion === 0) {
+            // Ensure the specified node is primary.
+            for (let i = 0; i < this.nodes.length; i++) {
+                let primary = this.getPrimary();
+                if (primary === node) {
+                    break;
+                }
+                try {
+                    // Make sure the nodes do not step back up for 10 minutes.
+                    assert.commandWorked(
+                        primary.adminCommand({replSetStepDown: 10 * 60, force: true}));
+                } catch (ex) {
+                    print("Caught exception while stepping down node '" + tojson(node.host) +
+                          "': " + tojson(ex));
+                }
+                this.awaitNodesAgreeOnPrimary();
+            }
+
+            // Reset the rest of the nodes so they can run for election during the test.
+            for (let i = 0; i < this.nodes.length; i++) {
+                // Cannot call replSetFreeze on the primary.
+                if (this.nodes[i] === node) {
+                    continue;
+                }
+                assert.commandWorked(this.nodes[i].adminCommand({replSetFreeze: 0}));
+            }
+        } else {
+            assert.commandWorked(node.adminCommand({replSetStepUp: 1}));
+            this.awaitNodesAgreeOnPrimary();
+        }
+        assert.eq(this.getPrimary(), node, node.host + " was not primary after stepUp");
     };
 
     /**
@@ -795,7 +845,7 @@ var ReplSetTest = function(opts) {
         try {
             assert.commandWorked(this.getPrimary().adminCommand({replSetReconfig: config}));
         } catch (e) {
-            if (tojson(e).indexOf("error doing query: failed") < 0) {
+            if (!isNetworkError(e)) {
                 throw e;
             }
         }
@@ -1260,11 +1310,12 @@ var ReplSetTest = function(opts) {
                     var secondaryCollInfo = secondary.getDB(dbName).getCollectionInfos();
                     secondaryCollInfo.forEach(secondaryInfo => {
                         primaryCollInfo.forEach(primaryInfo => {
-                            if (secondaryInfo.name === primaryInfo.name) {
+                            if (secondaryInfo.name === primaryInfo.name &&
+                                secondaryInfo.type === primaryInfo.type) {
                                 if (!bsonBinaryEqual(secondaryInfo, primaryInfo)) {
                                     print(msgPrefix +
                                           ', the primary and secondary have different ' +
-                                          'attributes for the collection ' + dbName + '.' +
+                                          'attributes for the collection or view' + dbName + '.' +
                                           secondaryInfo.name);
                                     print('Collection info on the primary: ' + tojson(primaryInfo));
                                     print('Collection info on the secondary: ' +

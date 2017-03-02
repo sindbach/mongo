@@ -293,16 +293,17 @@ protected:
      */
     void assertChangeWasLogged(const ShardType& addedShard) {
         auto response = assertGet(
-            getConfigShard()->exhaustiveFind(operationContext(),
-                                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                             repl::ReadConcernLevel::kLocalReadConcern,
-                                             NamespaceString("config.changelog"),
-                                             BSON("what"
-                                                  << "addShard"
-                                                  << "details.name"
-                                                  << addedShard.getName()),
-                                             BSONObj(),
-                                             1));
+            getConfigShard()->exhaustiveFindOnConfig(operationContext(),
+                                                     ReadPreferenceSetting{
+                                                         ReadPreference::PrimaryOnly},
+                                                     repl::ReadConcernLevel::kLocalReadConcern,
+                                                     NamespaceString("config.changelog"),
+                                                     BSON("what"
+                                                          << "addShard"
+                                                          << "details.name"
+                                                          << addedShard.getName()),
+                                                     BSONObj(),
+                                                     1));
         ASSERT_EQ(1U, response.docs.size());
         auto logEntryBSON = response.docs.front();
         auto logEntry = assertGet(ChangeLogType::fromBSON(logEntryBSON));
@@ -326,20 +327,21 @@ TEST_F(AddShardTest, CreateShardIdentityUpsertForAddShard) {
     BSONObj expectedBSON = BSON("update"
                                 << "system.version"
                                 << "updates"
-                                << BSON_ARRAY(BSON(
-                                       "q"
-                                       << BSON("_id"
-                                               << "shardIdentity"
-                                               << "shardName"
-                                               << shardName
-                                               << "clusterId"
-                                               << _clusterId)
-                                       << "u"
-                                       << BSON("$set" << BSON(
-                                                   "configsvrConnectionString"
-                                                   << getConfigShard()->getConnString().toString()))
-                                       << "upsert"
-                                       << true))
+                                << BSON_ARRAY(
+                                       BSON("q" << BSON("_id"
+                                                        << "shardIdentity"
+                                                        << "shardName"
+                                                        << shardName
+                                                        << "clusterId"
+                                                        << _clusterId)
+                                                << "u"
+                                                << BSON("$set" << BSON("configsvrConnectionString"
+                                                                       << replicationCoordinator()
+                                                                              ->getConfig()
+                                                                              .getConnectionString()
+                                                                              .toString()))
+                                                << "upsert"
+                                                << true))
                                 << "writeConcern"
                                 << BSON("w"
                                         << "majority"
