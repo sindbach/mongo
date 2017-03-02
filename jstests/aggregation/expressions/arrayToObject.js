@@ -38,48 +38,48 @@
     assert.eq(result, [{_id: 5, collapsed: null}]);
 
     assert.writeOK(coll.insert({_id: 6, expanded: [{"k": "price", "v": 24}, ["item", "apple"]]}));
-    assertErrorCode(coll, [{$match: {_id: 6}}, array_to_object_expr], 40393);
+    assertErrorCode(coll, [{$match: {_id: 6}}, array_to_object_expr], 40391);
 
     assert.writeOK(coll.insert({_id: 7, expanded: [["item", "apple"], {"k": "price", "v": 24}]}));
-    assertErrorCode(coll, [{$match: {_id: 7}}, array_to_object_expr], 40390);
+    assertErrorCode(coll, [{$match: {_id: 7}}, array_to_object_expr], 40388);
 
     assert.writeOK(coll.insert({_id: 8, expanded: "string"}));
-    assertErrorCode(coll, [{$match: {_id: 8}}, array_to_object_expr], 40388);
+    assertErrorCode(coll, [{$match: {_id: 8}}, array_to_object_expr], 40386);
 
     assert.writeOK(coll.insert({_id: 9, expanded: ObjectId()}));
-    assertErrorCode(coll, [{$match: {_id: 9}}, array_to_object_expr], 40388);
+    assertErrorCode(coll, [{$match: {_id: 9}}, array_to_object_expr], 40386);
 
     assert.writeOK(coll.insert({_id: 10, expanded: NumberLong(0)}));
-    assertErrorCode(coll, [{$match: {_id: 10}}, array_to_object_expr], 40388);
+    assertErrorCode(coll, [{$match: {_id: 10}}, array_to_object_expr], 40386);
 
     assert.writeOK(coll.insert({_id: 11, expanded: [0]}));
-    assertErrorCode(coll, [{$match: {_id: 11}}, array_to_object_expr], 40389);
+    assertErrorCode(coll, [{$match: {_id: 11}}, array_to_object_expr], 40387);
 
     assert.writeOK(coll.insert({_id: 12, expanded: [["missing_value"]]}));
-    assertErrorCode(coll, [{$match: {_id: 12}}, array_to_object_expr], 40391);
+    assertErrorCode(coll, [{$match: {_id: 12}}, array_to_object_expr], 40389);
 
     assert.writeOK(coll.insert({_id: 13, expanded: [[321, 12]]}));
-    assertErrorCode(coll, [{$match: {_id: 13}}, array_to_object_expr], 40392);
+    assertErrorCode(coll, [{$match: {_id: 13}}, array_to_object_expr], 40390);
 
     assert.writeOK(coll.insert({_id: 14, expanded: [["key", "value", "offset"]]}));
-    assertErrorCode(coll, [{$match: {_id: 14}}, array_to_object_expr], 40391);
+    assertErrorCode(coll, [{$match: {_id: 14}}, array_to_object_expr], 40389);
 
     assert.writeOK(coll.insert({_id: 15, expanded: {y: []}}));
-    assertErrorCode(coll, [{$match: {_id: 15}}, array_to_object_expr], 40388);
+    assertErrorCode(coll, [{$match: {_id: 15}}, array_to_object_expr], 40386);
 
     assert.writeOK(coll.insert({_id: 16, expanded: [{y: "x"}]}));
-    assertErrorCode(coll, [{$match: {_id: 16}}, array_to_object_expr], 40395);
+    assertErrorCode(coll, [{$match: {_id: 16}}, array_to_object_expr], 40393);
 
     assert.writeOK(coll.insert({_id: 17, expanded: [{k: "missing"}]}));
-    assertErrorCode(coll, [{$match: {_id: 17}}, array_to_object_expr], 40395);
+    assertErrorCode(coll, [{$match: {_id: 17}}, array_to_object_expr], 40393);
 
     assert.writeOK(coll.insert({_id: 18, expanded: [{k: 24, v: "string"}]}));
-    assertErrorCode(coll, [{$match: {_id: 18}}, array_to_object_expr], 40396);
+    assertErrorCode(coll, [{$match: {_id: 18}}, array_to_object_expr], 40394);
 
     assert.writeOK(coll.insert({_id: 19, expanded: [{y: "ignored", k: "item", v: "pear"}]}));
-    assertErrorCode(coll, [{$match: {_id: 19}}, array_to_object_expr], 40394);
+    assertErrorCode(coll, [{$match: {_id: 19}}, array_to_object_expr], 40392);
 
     assert.writeOK(coll.insert({_id: 20, expanded: NaN}));
-    assertErrorCode(coll, [{$match: {_id: 20}}, array_to_object_expr], 40388);
+    assertErrorCode(coll, [{$match: {_id: 20}}, array_to_object_expr], 40386);
 
 }());

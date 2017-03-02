@@ -607,7 +607,7 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
         return Value(BSONNULL);
     }
 
-    uassert(40388,
+    uassert(40386,
             str::stream() << "$arrayToObject requires an array input, found: "
                           << typeName(input.getType()),
             input.isArray());
@@ -626,14 +626,14 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
     } else if (array[0].getType() == Object) {
         inputArrayFormat = false;
     } else {
-        uasserted(40389,
+        uasserted(40387,
                   str::stream() << "Unrecognised input type format for $arrayToObject: "
                                 << typeName(array[0].getType()));
     }
 
     for (auto elem: array) {
         if (inputArrayFormat == true) {
-            uassert(40390,
+            uassert(40388,
                     str::stream() << "$arrayToObject requires a consistent input format. Elements must"
                                      "all be arrays or all be objects. Array was detected, now found: "
                                   << typeName(elem.getType()),
@@ -641,13 +641,13 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
 
             const vector<Value>& valArray = elem.getArray();
 
-            uassert(40391,
+            uassert(40389,
                     str::stream() << "$arrayToObject requires an array of size 2 arrays,"
                                      "found array of size: "
                                   << valArray.size(),
                     (valArray.size() == 2));
 
-            uassert(40392,
+            uassert(40390,
                     str::stream() << "$arrayToObject requires an array of key-value pairs, where "
                                      "the key must be type string, found type: "
                                   << typeName(valArray[0].getType()),
@@ -656,13 +656,13 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
             output.addField(valArray[0].getString(), valArray[1]);
 
         } else {
-            uassert(40393,
+            uassert(40391,
                     str::stream() << "$arrayToObject requires a consistent input format. Elements must"
                                      "all be arrays or all be objects. Object was detected now found: "
                                   << typeName(elem.getType()),
                     (elem.getType() == Object));
 
-            uassert(40394,
+            uassert(40392,
                     str::stream() << "$arrayToObject requires an object keys of 'k' and 'v'. "
                                      "Found an extra key.",
                     (elem.getDocument().size() < 2));      
@@ -671,12 +671,12 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
             Value value = elem.getDocument().getField("v");
 
             if (key.nullish() || value.nullish()) {
-                uasserted(40395,
+                uasserted(40393,
                           str::stream() << "$arrayToObject requires an object with keys 'k' and 'v'. "
                                            "Missing either or both keys from: "
                                         << elem.toString());
             }
-            uassert(40396,
+            uassert(40394,
                     str::stream() << "$arrayToObject requires an object with keys 'k' and 'v', where "
                                      "the key must be of type string, found type: "
                                   << typeName(key.getType()),
