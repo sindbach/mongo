@@ -608,10 +608,10 @@ Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
         return Value(BSONNULL);
     }
 
-    uassert(40383,
+    uassert(40384,
             str::stream() << "$objectToArray requires a document input, found: "
                           << typeName(targetVal.getType()),
-            (targetVal.getType() == Object));
+            (targetVal.getType() == BSONType::Object));
 
     vector<Value> output;
 
