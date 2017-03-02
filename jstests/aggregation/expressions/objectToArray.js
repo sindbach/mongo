@@ -1,76 +1,90 @@
-// SERVER-18794: Add $objectToArray aggregation expression.
-load('jstests/aggregation/extras/utils.js');
+// Tests for the $objectToArray aggregation expression.
 
-(function (){
-    var coll = db.object_to_array_expr;
+(function () {
+    "use strict";
+
+    // For assertErrorCode().
+    load('jstests/aggregation/extras/utils.js');
+
+    let coll = db.object_to_array_expr;
     coll.drop();
 
-    var object_to_array_expr =  { $project: {
+    let object_to_array_expr =  { $project: {
                                           expanded: {$objectToArray: '$subDoc'}
                                 }};
-    // As description
+
+    // $objectToArray correctly converts a document to an array of key-value pairs. 
     assert.writeOK(coll.insert({_id: 0, subDoc: { "a": 1, "b": 2, "c": "foo" } } ));
-    var result = coll.aggregate([{$match: {_id: 0}}, object_to_array_expr ]).toArray();
+    let result = coll.aggregate([{$match: {_id: 0}}, object_to_array_expr ]).toArray();
     assert.eq(result, [{_id: 0, expanded: [{"k":"a", "v":1}, {"k":"b", "v":2}, {"k":"c", "v":"foo"}]}]);
 
-    // Non-document types.
-    assert.writeOK(coll.insert({_id: 1, subDoc: "string"}));
-    assertErrorCode(coll, [ {$match: {_id: 1}}, object_to_array_expr ], 40383);
+    assert.writeOK(coll.insert({_id: 1, subDoc: {"y": []}}));
+    result = coll.aggregate([ {$match: {_id: 1}}, object_to_array_expr ]).toArray();
+    assert.eq(result, [{_id: 1,  expanded:[ {"k":"y", "v":[] }]}] );
 
-    assert.writeOK(coll.insert({_id: 2, subDoc: ObjectId()}));
-    assertErrorCode(coll, [ {$match: {_id: 2}}, object_to_array_expr ], 40383);
-
-    assert.writeOK(coll.insert({_id: 3, subDoc: NumberLong(0)}));
-    assertErrorCode(coll, [ {$match: {_id: 3}}, object_to_array_expr ], 40383);
-
-    assert.writeOK(coll.insert({_id: 4, subDoc: null}));
-    result = coll.aggregate([ {$match: {_id: 4}}, object_to_array_expr ]).toArray();
-    assert.eq(result, [{_id: 4, expanded: null }] );
-
-    assert.writeOK(coll.insert({_id: 5, subDoc: undefined}));
-    result = coll.aggregate([ {$match: {_id: 5}}, object_to_array_expr ]).toArray();
-    assert.eq(result, [{_id: 5, expanded: null }] );
-
-    assert.writeOK(coll.insert({_id: 6, subDoc: NaN}));
-    assertErrorCode(coll, [ {$match: {_id: 6}}, object_to_array_expr ], 40383);
-
-    assert.writeOK(coll.insert({_id: 7, subDoc: []}));
-    assertErrorCode(coll, [ {$match: {_id: 7}}, object_to_array_expr ], 40383);
-
-    assert.writeOK(coll.insert({_id: 8, subDoc: [0]}));
-    assertErrorCode(coll, [ {$match: {_id: 8}}, object_to_array_expr ], 40383);
-
-    assert.writeOK(coll.insert({_id: 9, subDoc: ['string']}));
-    assertErrorCode(coll, [ {$match: {_id: 9}}, object_to_array_expr ], 40383);
-
-    assert.writeOK(coll.insert({_id: 12, subDoc: [{'a':'b'}]}));
-    assertErrorCode(coll, [ {$match: {_id: 12}}, object_to_array_expr ], 40383);
-
-    // Document types.
-    assert.writeOK(coll.insert({_id: 10, subDoc: {"y": []}}));
-    result = coll.aggregate([ {$match: {_id: 10}}, object_to_array_expr ]).toArray();
-    assert.eq(result, [{_id: 10,  expanded:[ {"k":"y", "v":[] }]}] );
-
-
-    assert.writeOK(coll.insert({_id: 11, subDoc: {"a": 1, "b": {"d":"string"}, "c":[1, 2]}}));
-    result = coll.aggregate([ {$match: {_id: 11}}, object_to_array_expr ]).toArray();
-    assert.eq(result, [{_id: 11,  expanded:[ {"k":"a", "v":1}, 
+    assert.writeOK(coll.insert({_id: 2, subDoc: {"a": 1, "b": {"d":"string"}, "c":[1, 2]}}));
+    result = coll.aggregate([ {$match: {_id: 2}}, object_to_array_expr ]).toArray();
+    assert.eq(result, [{_id: 2,  expanded:[ {"k":"a", "v":1}, 
                                              {"k":"b", "v":{"d": "string"}}, 
                                              {"k":"c", "v":[1, 2]}]}]);
-    coll.drop(); 
 
-    // Turns to array from the root of the document
-    assert.writeOK(coll.insert({_id: 0, "a": 1, "b": 2, "c": 3}))
-    results = coll.aggregate([{$sort: {_id: 1}},
-                                  {
-                                      $project: {
-                                          document: {$objectToArray: '$$ROOT'}
-                                      }
-                                  },
-                                 ]).toArray();
-    expectedResults = [
-        {_id:0, document: [ {"k":"_id", "v":0}, {"k":"a", "v":1}, {"k":"b", "v":2}, {"k":"c", "v":3}]}
-    ];
-    assert.eq(results, expectedResults);
+    // Turns to array from the root of the document.
+    assert.writeOK(coll.insert({_id: 3, "a": 1, "b": 2, "c": 3}))
+    result = coll.aggregate([{$match: {_id: 3}},
+                                      { $project: {
+                                            document: {$objectToArray: '$$ROOT'}
+                                            }
+                                      }]).toArray();
+    assert.eq(result, [{_id: 3, document: [{"k":"_id", "v":3}, 
+                                            {"k":"a", "v":1}, 
+                                            {"k":"b", "v":2}, 
+                                            {"k":"c", "v":3}]}]);
+
+    assert.writeOK(coll.insert({_id: 4, "date": ISODate("2017-01-24T00:00:00")}))
+    result = coll.aggregate([{$match: {_id: 4}},
+                                      { $project: {
+                                                document: {$objectToArray: {dayOfWeek:{$dayOfWeek:"$date"}}}
+                                            }
+                                      }]).toArray();
+    assert.eq(result, [{_id: 4, document: [ {"k":"dayOfWeek", "v":3}
+                                           ]}]);
+
+    // $objectToArray errors on non-document types.
+    assert.writeOK(coll.insert({_id: 5, subDoc: "string"}));
+    assertErrorCode(coll, [ {$match: {_id: 5}}, object_to_array_expr ], 40383);
+
+    assert.writeOK(coll.insert({_id: 6, subDoc: ObjectId()}));
+    assertErrorCode(coll, [ {$match: {_id: 6}}, object_to_array_expr ], 40383);
+
+    assert.writeOK(coll.insert({_id: 7, subDoc: NumberLong(0)}));
+    assertErrorCode(coll, [ {$match: {_id: 7}}, object_to_array_expr ], 40383);
+
+    assert.writeOK(coll.insert({_id: 8, subDoc: []}));
+    assertErrorCode(coll, [ {$match: {_id: 8}}, object_to_array_expr ], 40383);
+
+    assert.writeOK(coll.insert({_id: 9, subDoc: [0]}));
+    assertErrorCode(coll, [ {$match: {_id: 9}}, object_to_array_expr ], 40383);
+
+    assert.writeOK(coll.insert({_id: 10, subDoc: ['string']}));
+    assertErrorCode(coll, [ {$match: {_id: 10}}, object_to_array_expr ], 40383);
+
+    assert.writeOK(coll.insert({_id: 11, subDoc: [{'a':'b'}]}));
+    assertErrorCode(coll, [ {$match: {_id: 11}}, object_to_array_expr ], 40383);
+
+    // $objectToArray outputs null on null-ish types.
+    assert.writeOK(coll.insert({_id: 12, subDoc: null}));
+    result = coll.aggregate([ {$match: {_id: 12}}, object_to_array_expr ]).toArray();
+    assert.eq(result, [{_id: 12, expanded: null }] );
+
+    assert.writeOK(coll.insert({_id: 13, subDoc: undefined}));
+    result = coll.aggregate([ {$match: {_id: 13}}, object_to_array_expr ]).toArray();
+    assert.eq(result, [{_id: 13, expanded: null }] );
+
+    assert.writeOK(coll.insert({_id: 14}));
+    result = coll.aggregate([ {$match: {_id: 14}}, object_to_array_expr ]).toArray();
+    assert.eq(result, [{_id: 14, expanded: null }] );
+
+    assert.writeOK(coll.insert({_id: 15, subDoc: NaN}));
+    assertErrorCode(coll, [ {$match: {_id: 15}}, object_to_array_expr ], 40383);
 
 }());
