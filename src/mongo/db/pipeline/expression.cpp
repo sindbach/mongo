@@ -651,7 +651,7 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
 
             uassert(40390,
                     str::stream() << "$arrayToObject requires an array of key-value pairs, where "
-                                     "the key must be type string, found type: "
+                                     "the key must be of type string. Found key type: "
                                   << typeName(valArray[0].getType()),
                     (valArray[0].getType() == BSONType::String));
 
@@ -661,7 +661,7 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
             uassert(
                 40391,
                 str::stream() << "$arrayToObject requires a consistent input format. Elements must"
-                                 "all be arrays or all be objects. Object was detected now found: "
+                                 "all be arrays or all be objects. Object was detected, now found: "
                               << typeName(elem.getType()),
                 (elem.getType() == BSONType::Object));
 
@@ -674,17 +674,16 @@ Value ExpressionArrayToObject::evaluateInternal(Variables* vars) const {
             Value key = elem.getDocument().getField("k");
             Value value = elem.getDocument().getField("v");
 
-
             uassert(40393,
                     str::stream() << "$arrayToObject requires an object with keys 'k' and 'v'. "
                                      "Missing either or both keys from: "
-                                  << elem.toString()), 
-                    (!key.nullish() && !value.nullish());
+                                  << elem.toString(),
+                    (!key.nullish() && !value.nullish()));
 
             uassert(
                 40394,
                 str::stream() << "$arrayToObject requires an object with keys 'k' and 'v', where "
-                                 "the key must be of type string, found type: "
+                                 "the value of 'k' must be of type string. Found type: "
                               << typeName(key.getType()),
                 (key.getType() == BSONType::String));
 
