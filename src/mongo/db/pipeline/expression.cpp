@@ -604,23 +604,23 @@ const char* ExpressionArrayElemAt::getOpName() const {
 Value ExpressionObjectToArray::evaluateInternal(Variables* vars) const {
     const Value targetVal = vpOperand[0]->evaluateInternal(vars);
 
-    if (targetVal.nullish()){
-         return Value(BSONNULL);
+    if (targetVal.nullish()) {
+        return Value(BSONNULL);
     }
 
-    uassert(40383, 
-             str::stream() << "$objectToArray requires a document input, found: "
-                           << typeName(targetVal.getType()), 
-             (targetVal.getType() == Object)) ;
+    uassert(40383,
+            str::stream() << "$objectToArray requires a document input, found: "
+                          << typeName(targetVal.getType()),
+            (targetVal.getType() == Object));
 
-    vector<Value> output; 
+    vector<Value> output;
 
     FieldIterator iter = targetVal.getDocument().fieldIterator();
-    while(iter.more()){
+    while (iter.more()) {
         Document::FieldPair pair = iter.next();
         MutableDocument keyvalue;
         keyvalue.addField("k", Value(pair.first));
-        keyvalue.addField("v", pair.second); 
+        keyvalue.addField("v", pair.second);
         output.push_back(keyvalue.freezeToValue());
     }
 
