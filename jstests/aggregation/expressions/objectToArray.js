@@ -30,7 +30,7 @@
                 [{"k": "a", "v": 1}, {"k": "b", "v": {"d": "string"}}, {"k": "c", "v": [1, 2]}]
         }]);
 
-    assert.writeOK(coll.insert({_id: 3, subDoc:{}}));
+    assert.writeOK(coll.insert({_id: 3, subDoc: {}}));
     result = coll.aggregate([{$match: {_id: 3}}, object_to_array_expr]).toArray();
     assert.eq(result, [{_id: 3, expanded: []}]);
 
