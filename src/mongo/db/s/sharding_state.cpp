@@ -160,7 +160,7 @@ void ShardingState::shutDown(OperationContext* opCtx) {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     if (enabled()) {
         grid.getExecutorPool()->shutdownAndJoin();
-        grid.catalogClient(opCtx)->shutDown(opCtx);
+        grid.catalogClient()->shutDown(opCtx);
     }
 }
 
@@ -490,23 +490,7 @@ ChunkVersion ShardingState::_refreshMetadata(OperationContext* opCtx, const Name
             return nullptr;
         }
 
-        RangeMap shardChunksMap =
-            SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>();
-
-        for (const auto& chunkMapEntry : cm->chunkMap()) {
-            const auto& chunk = chunkMapEntry.second;
-
-            if (chunk->getShardId() != shardId)
-                continue;
-
-            shardChunksMap.emplace(chunk->getMin(),
-                                   CachedChunkInfo(chunk->getMax(), chunk->getLastmod()));
-        }
-
-        return stdx::make_unique<CollectionMetadata>(cm->getShardKeyPattern().toBSON(),
-                                                     cm->getVersion(),
-                                                     cm->getVersion(shardId),
-                                                     std::move(shardChunksMap));
+        return stdx::make_unique<CollectionMetadata>(cm, shardId);
     }();
 
     // Exclusive collection lock needed since we're now changing the metadata

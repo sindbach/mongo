@@ -30,7 +30,7 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/s/catalog/sharding_catalog_manager_impl.h"
+#include "mongo/s/catalog/sharding_catalog_manager.h"
 
 #include <iomanip>
 #include <set>
@@ -167,7 +167,7 @@ ChunkVersion createFirstChunks(OperationContext* opCtx,
         chunk.setShard(shardIds[i % shardIds.size()]);
         chunk.setVersion(version);
 
-        uassertStatusOK(Grid::get(opCtx)->catalogClient(opCtx)->insertConfigDocument(
+        uassertStatusOK(Grid::get(opCtx)->catalogClient()->insertConfigDocument(
             opCtx,
             ChunkType::ConfigNS,
             chunk.toConfigBSON(),
@@ -214,21 +214,15 @@ void checkForExistingChunks(OperationContext* opCtx, const string& ns) {
 
 }  // namespace
 
-void ShardingCatalogManagerImpl::shardCollection(OperationContext* opCtx,
-                                                 const string& ns,
-                                                 const ShardKeyPattern& fieldsAndOrder,
-                                                 const BSONObj& defaultCollation,
-                                                 bool unique,
-                                                 const vector<BSONObj>& initPoints,
-                                                 const bool distributeInitialChunks) {
-    const auto catalogClient = Grid::get(opCtx)->catalogClient(opCtx);
+void ShardingCatalogManager::shardCollection(OperationContext* opCtx,
+                                             const string& ns,
+                                             const ShardKeyPattern& fieldsAndOrder,
+                                             const BSONObj& defaultCollation,
+                                             bool unique,
+                                             const vector<BSONObj>& initPoints,
+                                             const bool distributeInitialChunks) {
+    const auto catalogClient = Grid::get(opCtx)->catalogClient();
     const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-
-    // Lock the collection globally so that no other mongos can try to shard or drop the collection
-    // at the same time. Store the returned ScopedDistLock in a local variable so that the lock is
-    // held for the duration of this function.
-    auto scopedDistLock = uassertStatusOK(catalogClient->getDistLockManager()->lock(
-        opCtx, ns, "shardCollection", DistLockManager::kDefaultLockTimeout));
 
     auto dbEntry = uassertStatusOK(catalogClient->getDatabase(opCtx, nsToDatabase(ns))).value;
     auto dbPrimaryShardId = dbEntry.getPrimary();

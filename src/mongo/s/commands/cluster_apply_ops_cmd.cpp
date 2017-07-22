@@ -34,9 +34,9 @@
 namespace mongo {
 namespace {
 
-class ApplyOpsCmd : public Command {
+class ApplyOpsCmd : public BasicCommand {
 public:
-    ApplyOpsCmd() : Command("applyOps") {}
+    ApplyOpsCmd() : BasicCommand("applyOps") {}
 
     bool slaveOk() const override {
         return true;
@@ -59,7 +59,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         uasserted(ErrorCodes::CommandNotSupported, "applyOps not allowed through mongos");
     }

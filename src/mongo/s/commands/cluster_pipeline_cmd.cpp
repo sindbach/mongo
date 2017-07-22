@@ -38,9 +38,9 @@
 namespace mongo {
 namespace {
 
-class ClusterPipelineCommand : public Command {
+class ClusterPipelineCommand : public BasicCommand {
 public:
-    ClusterPipelineCommand() : Command("aggregate") {}
+    ClusterPipelineCommand() : BasicCommand("aggregate") {}
 
     void help(std::stringstream& help) const {
         help << "Runs the sharded aggregation command. See "
@@ -69,7 +69,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         return appendCommandStatus(result,
                                    _runAggCommand(opCtx, dbname, cmdObj, boost::none, &result));

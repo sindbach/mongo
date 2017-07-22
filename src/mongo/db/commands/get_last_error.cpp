@@ -55,7 +55,7 @@ using std::stringstream;
    see if any of the operations triggered an error, but don't want to check
    after each op as that woudl be a client/server turnaround.
 */
-class CmdResetError : public Command {
+class CmdResetError : public BasicCommand {
 public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -69,20 +69,19 @@ public:
     virtual void help(stringstream& help) const {
         help << "reset error state (used with getpreverror)";
     }
-    CmdResetError() : Command("resetError", "reseterror") {}
+    CmdResetError() : BasicCommand("resetError", "reseterror") {}
     bool run(OperationContext* opCtx,
              const string& db,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         LastError::get(opCtx->getClient()).reset();
         return true;
     }
 } cmdResetError;
 
-class CmdGetLastError : public Command {
+class CmdGetLastError : public ErrmsgCommandDeprecated {
 public:
-    CmdGetLastError() : Command("getLastError", "getlasterror") {}
+    CmdGetLastError() : ErrmsgCommandDeprecated("getLastError", "getlasterror") {}
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
@@ -103,11 +102,11 @@ public:
              << "  { wtimeout:m} - timeout for w in m milliseconds";
     }
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& cmdObj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         //
         // Correct behavior here is very finicky.
         //
@@ -296,7 +295,7 @@ public:
 
 } cmdGetLastError;
 
-class CmdGetPrevError : public Command {
+class CmdGetPrevError : public BasicCommand {
 public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -310,11 +309,10 @@ public:
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
                                        std::vector<Privilege>* out) {}  // No auth required
-    CmdGetPrevError() : Command("getPrevError", "getpreverror") {}
+    CmdGetPrevError() : BasicCommand("getPrevError", "getpreverror") {}
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         LastError* le = &LastError::get(opCtx->getClient());
         le->disable();

@@ -61,9 +61,9 @@ using std::string;
  *   writeConcern: <BSONObj>
  * }
  */
-class ConfigSvrSplitChunkCommand : public Command {
+class ConfigSvrSplitChunkCommand : public BasicCommand {
 public:
-    ConfigSvrSplitChunkCommand() : Command("_configsvrCommitChunkSplit") {}
+    ConfigSvrSplitChunkCommand() : BasicCommand("_configsvrCommitChunkSplit") {}
 
     void help(std::stringstream& help) const override {
         help << "Internal command, which is sent by a shard to the sharding config server. Do "
@@ -99,7 +99,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
             uasserted(ErrorCodes::IllegalOperation,
@@ -109,7 +108,7 @@ public:
         auto parsedRequest = uassertStatusOK(SplitChunkRequest::parseFromConfigCommand(cmdObj));
 
         Status splitChunkResult =
-            Grid::get(opCtx)->catalogManager()->commitChunkSplit(opCtx,
+            ShardingCatalogManager::get(opCtx)->commitChunkSplit(opCtx,
                                                                  parsedRequest.getNamespace(),
                                                                  parsedRequest.getEpoch(),
                                                                  parsedRequest.getChunkRange(),

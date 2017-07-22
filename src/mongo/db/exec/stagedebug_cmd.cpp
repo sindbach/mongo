@@ -115,9 +115,9 @@ BSONObj stripFieldNames(const BSONObj& obj) {
  * node -> {dedup: {filter: {filter}, args: {node: node, field: field}}}
  * node -> {unwind: {filter: filter}, args: {node: node, field: field}}
  */
-class StageDebugCmd : public Command {
+class StageDebugCmd : public BasicCommand {
 public:
-    StageDebugCmd() : Command("stageDebug") {}
+    StageDebugCmd() : BasicCommand("stageDebug") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -140,7 +140,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         BSONElement argElt = cmdObj["stageDebug"];
         if (argElt.eoo() || !argElt.isABSONObj()) {
@@ -479,7 +478,6 @@ public:
             // that can only be checked for equality.  We ignore this now.
             Status s = fam->getSpec().getIndexPrefix(BSONObj(), &params.indexPrefix);
             if (!s.isOK()) {
-                // errmsg = s.toString();
                 return NULL;
             }
 

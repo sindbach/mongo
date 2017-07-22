@@ -65,9 +65,7 @@
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/asio_message_port.h"
 #include "mongo/util/net/message_port.h"
-#include "mongo/util/net/message_port_startup_param.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
@@ -171,11 +169,6 @@ const rpc::ReplyMetadataReader& DBClientWithCommands::getReplyMetadataReader() {
 
 std::pair<rpc::UniqueReply, DBClientWithCommands*> DBClientWithCommands::runCommandWithTarget(
     OpMsgRequest request) {
-    uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Database name '" << request.getDatabase() << "' is not valid.",
-            NamespaceString::validDBName(request.getDatabase(),
-                                         NamespaceString::DollarInDbNameBehavior::Allow));
-
     // Make sure to reconnect if needed before building our request, since the request depends on
     // the negotiated protocol which can change due to a reconnect.
     checkConnection();
@@ -183,10 +176,10 @@ std::pair<rpc::UniqueReply, DBClientWithCommands*> DBClientWithCommands::runComm
     // call() oddly takes this by pointer, so we need to put it on the stack.
     auto host = getServerAddress();
 
+    auto opCtx = haveClient() ? cc().getOperationContext() : nullptr;
     if (_metadataWriter) {
         BSONObjBuilder metadataBob(std::move(request.body));
-        uassertStatusOK(
-            _metadataWriter((haveClient() ? cc().getOperationContext() : nullptr), &metadataBob));
+        uassertStatusOK(_metadataWriter(opCtx, &metadataBob));
         request.body = metadataBob.obj();
     }
 
@@ -220,7 +213,7 @@ std::pair<rpc::UniqueReply, DBClientWithCommands*> DBClientWithCommands::runComm
             rpc::protocolForMessage(requestMsg) == commandReply->getProtocol());
 
     if (_metadataReader) {
-        uassertStatusOK(_metadataReader(commandReply->getMetadata(), host));
+        uassertStatusOK(_metadataReader(opCtx, commandReply->getMetadata(), host));
     }
 
     if (ErrorCodes::SendStaleConfig ==
@@ -234,17 +227,10 @@ std::pair<rpc::UniqueReply, DBClientWithCommands*> DBClientWithCommands::runComm
 
 std::tuple<bool, DBClientWithCommands*> DBClientWithCommands::runCommandWithTarget(
     const string& dbname, BSONObj cmd, BSONObj& info, int options) {
-    BSONObj upconvertedCmd;
-    BSONObj upconvertedMetadata;
-
     // TODO: This will be downconverted immediately if the underlying
     // requestBuilder is a legacyRequest builder. Not sure what the best
     // way to get around that is without breaking the abstraction.
-    std::tie(upconvertedCmd, upconvertedMetadata) =
-        rpc::upconvertRequestMetadata(std::move(cmd), options);
-
-    auto result = runCommandWithTarget(
-        OpMsgRequest::fromDBAndBody(dbname, std::move(upconvertedCmd), upconvertedMetadata));
+    auto result = runCommandWithTarget(rpc::upconvertRequest(dbname, std::move(cmd), options));
 
     info = result.first->getCommandReply().getOwned();
     return std::make_tuple(isOk(info), result.second);
@@ -837,14 +823,7 @@ Status DBClientConnection::connectSocketOnly(const HostAndPort& serverAddress) {
                                     << ", address is invalid");
     }
 
-    if (isMessagePortImplASIO()) {
-        // `_so_timeout` is in seconds.
-        auto ms = representAs<int64_t>(std::floor(_so_timeout * 1000)).value_or(kMaxMillisCount);
-        _port.reset(new ASIOMessagingPort(
-            ms > kMaxMillisCount ? Milliseconds::max() : Milliseconds(ms), _logLevel));
-    } else {
-        _port.reset(new MessagingPort(_so_timeout, _logLevel));
-    }
+    _port.reset(new MessagingPort(_so_timeout, _logLevel));
 
     if (serverAddress.host().empty()) {
         return Status(ErrorCodes::InvalidOptions,

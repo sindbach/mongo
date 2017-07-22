@@ -43,11 +43,6 @@ namespace mongo {
 
 const size_t MaxDatabaseNameLen = 128;  // max str len for the db name, including null char
 
-/** @return true if a client can modify this namespace even though it is under ".system."
-    For example <dbname>.system.users is ok for regular clients to update.
-*/
-bool legalClientSystemNS(StringData ns);
-
 /* e.g.
    NamespaceString ns("acme.orders");
    cout << ns.coll; // "orders"
@@ -81,6 +76,9 @@ public:
 
     // Namespace for storing the transaction information for each session
     static const NamespaceString kSessionTransactionsTableNamespace;
+
+    // Namespace of the the oplog collection.
+    static const NamespaceString kRsOplogNamespace;
 
     /**
      * Constructs an empty NamespaceString.
@@ -225,6 +223,12 @@ public:
     bool isCollectionlessAggregateNS() const;
     bool isListCollectionsCursorNS() const;
     bool isListIndexesCursorNS() const;
+
+    /**
+     * Returns true if a client can modify this namespace even though it is under ".system."
+     * For example <dbname>.system.users is ok for regular clients to update.
+     */
+    bool isLegalClientSystemNS() const;
 
     /**
      * Given a NamespaceString for which isGloballyManagedNamespace() returns true, returns the

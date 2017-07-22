@@ -69,9 +69,9 @@ using std::string;
 using std::stringstream;
 using std::vector;
 
-class CmdBuildInfo : public Command {
+class CmdBuildInfo : public BasicCommand {
 public:
-    CmdBuildInfo() : Command("buildInfo", "buildinfo") {}
+    CmdBuildInfo() : BasicCommand("buildInfo", "buildinfo") {}
     virtual bool slaveOk() const {
         return true;
     }
@@ -92,7 +92,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& jsobj,
-             std::string& errmsg,
              BSONObjBuilder& result) {
         VersionInfoInterface::instance().appendBuildInfo(&result);
         appendStorageEngineList(&result);
@@ -102,9 +101,9 @@ public:
 } cmdBuildInfo;
 
 
-class PingCommand : public Command {
+class PingCommand : public BasicCommand {
 public:
-    PingCommand() : Command("ping") {}
+    PingCommand() : BasicCommand("ping") {}
     virtual bool slaveOk() const {
         return true;
     }
@@ -121,16 +120,15 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& badns,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         // IMPORTANT: Don't put anything in here that might lock db - including authentication
         return true;
     }
 } pingCmd;
 
-class FeaturesCmd : public Command {
+class FeaturesCmd : public BasicCommand {
 public:
-    FeaturesCmd() : Command("features") {}
+    FeaturesCmd() : BasicCommand("features") {}
     void help(stringstream& h) const {
         h << "return build level feature settings";
     }
@@ -146,7 +144,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& ns,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         if (getGlobalScriptEngine()) {
             BSONObjBuilder bb(result.subobjStart("js"));
@@ -163,9 +160,9 @@ public:
 
 } featuresCmd;
 
-class HostInfoCmd : public Command {
+class HostInfoCmd : public BasicCommand {
 public:
-    HostInfoCmd() : Command("hostInfo") {}
+    HostInfoCmd() : BasicCommand("hostInfo") {}
     virtual bool slaveOk() const {
         return true;
     }
@@ -188,7 +185,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         ProcessInfo p;
         BSONObjBuilder bSys, bOs;
@@ -213,9 +209,9 @@ public:
 
 } hostInfoCmd;
 
-class LogRotateCmd : public Command {
+class LogRotateCmd : public BasicCommand {
 public:
-    LogRotateCmd() : Command("logRotate") {}
+    LogRotateCmd() : BasicCommand("logRotate") {}
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
@@ -235,7 +231,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& ns,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         bool didRotate = rotateLogs(serverGlobalParams.logRenameOnRotate);
         if (didRotate)
@@ -245,12 +240,12 @@ public:
 
 } logRotateCmd;
 
-class ListCommandsCmd : public Command {
+class ListCommandsCmd : public BasicCommand {
 public:
     virtual void help(stringstream& help) const {
         help << "get a list of all db commands";
     }
-    ListCommandsCmd() : Command("listCommands") {}
+    ListCommandsCmd() : BasicCommand("listCommands") {}
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
@@ -266,7 +261,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& ns,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         // sort the commands before building the result BSON
         std::vector<Command*> commands;
@@ -346,7 +340,7 @@ void CmdShutdown::shutdownHelper() {
 }
 
 /* for testing purposes only */
-class CmdForceError : public Command {
+class CmdForceError : public BasicCommand {
 public:
     virtual void help(stringstream& help) const {
         help << "for testing purposes only.  forces a user assertion exception";
@@ -360,20 +354,19 @@ public:
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
                                        std::vector<Privilege>* out) {}  // No auth required
-    CmdForceError() : Command("forceerror") {}
+    CmdForceError() : BasicCommand("forceerror") {}
     bool run(OperationContext* opCtx,
              const string& dbnamne,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         LastError::get(cc()).setLastError(10038, "forced error");
         return false;
     }
 } cmdForceError;
 
-class GetLogCmd : public Command {
+class GetLogCmd : public ErrmsgCommandDeprecated {
 public:
-    GetLogCmd() : Command("getLog") {}
+    GetLogCmd() : ErrmsgCommandDeprecated("getLog") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -395,11 +388,11 @@ public:
         help << "{ getLog : '*' }  OR { getLog : 'global' }";
     }
 
-    virtual bool run(OperationContext* opCtx,
-                     const string& dbname,
-                     const BSONObj& cmdObj,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& dbname,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
         BSONElement val = cmdObj.firstElement();
         if (val.type() != String) {
             return appendCommandStatus(
@@ -442,9 +435,9 @@ public:
 
 } getLogCmd;
 
-class ClearLogCmd : public Command {
+class ClearLogCmd : public BasicCommand {
 public:
-    ClearLogCmd() : Command("clearLog") {}
+    ClearLogCmd() : BasicCommand("clearLog") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -469,7 +462,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         std::string logName;
         Status status = bsonExtractStringField(cmdObj, "clearLog", &logName);
@@ -496,9 +488,9 @@ MONGO_INITIALIZER(RegisterClearLogCmd)(InitializerContext* context) {
     return Status::OK();
 }
 
-class CmdGetCmdLineOpts : Command {
+class CmdGetCmdLineOpts : public BasicCommand {
 public:
-    CmdGetCmdLineOpts() : Command("getCmdLineOpts") {}
+    CmdGetCmdLineOpts() : BasicCommand("getCmdLineOpts") {}
     void help(stringstream& h) const {
         h << "get argv";
     }
@@ -521,7 +513,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string&,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         result.append("argv", serverGlobalParams.argvArray);
         result.append("parsed", serverGlobalParams.parsedOpts);

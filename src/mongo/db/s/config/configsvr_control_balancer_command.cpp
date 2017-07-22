@@ -41,9 +41,9 @@
 namespace mongo {
 namespace {
 
-class ConfigSvrBalancerControlCommand : public Command {
+class ConfigSvrBalancerControlCommand : public BasicCommand {
 public:
-    ConfigSvrBalancerControlCommand(StringData name) : Command(name) {}
+    ConfigSvrBalancerControlCommand(StringData name) : BasicCommand(name) {}
 
     void help(std::stringstream& help) const override {
         help << "Internal command, which is exported by the sharding config server. Do not call "
@@ -75,7 +75,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& unusedDbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) final {
         uassert(ErrorCodes::InternalError,
                 str::stream() << "Expected to find a " << getName() << " command, but found "

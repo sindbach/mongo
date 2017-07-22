@@ -44,6 +44,7 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/namespace_uuid_cache.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/clientcursor.h"
@@ -218,8 +219,10 @@ Collection* DatabaseImpl::_getOrCreateCollectionInstance(OperationContext* opCtx
     invariant(rs.get());  // if cce exists, so should this
 
     // Not registering AddCollectionChange since this is for collections that already exist.
-    Collection* c = new Collection(opCtx, nss.ns(), uuid, cce.release(), rs.release(), _dbEntry);
-    return c;
+    Collection* coll = new Collection(opCtx, nss.ns(), uuid, cce.release(), rs.release(), _dbEntry);
+    if (uuid)
+        UUIDCatalog::get(opCtx).registerUUIDCatalogEntry(uuid.get(), coll);
+    return coll;
 }
 
 DatabaseImpl::DatabaseImpl(Database* const this_,
@@ -511,17 +514,40 @@ Status DatabaseImpl::dropCollectionEvenIfSystem(OperationContext* opCtx,
         }
     }
 
-    // Check if drop-pending namespace is too long for the index names in the collection.
     auto dpns = fullns.makeDropPendingNamespace(dropOpTime);
-    auto status =
-        dpns.checkLengthForRename(collection->getIndexCatalog()->getLongestIndexNameLength(opCtx));
-    if (!status.isOK()) {
-        log() << "dropCollection: " << fullns
-              << " - cannot proceed with collection rename for pending-drop: " << status
-              << ". Dropping collection immediately.";
-        fassertStatusOK(40463, _finishDropCollection(opCtx, fullns, collection));
-        return Status::OK();
+
+    // MMAPv1 requires that index namespaces are subject to the same length constraints as indexes
+    // in collections that are not in a drop-pending state. Therefore, we check if the drop-pending
+    // namespace is too long for any index names in the collection.
+    if (opCtx->getServiceContext()->getGlobalStorageEngine()->isMmapV1()) {
+
+        // Compile a list of any indexes that would become too long following the drop-pending
+        // rename. In the case that this collection drop gets rolled back, this will incur a
+        // performance hit, since those indexes will have to be rebuilt from scratch, but data
+        // integrity is maintained.
+        std::vector<IndexDescriptor*> indexesToDrop;
+        auto indexIter = collection->getIndexCatalog()->getIndexIterator(opCtx, true);
+
+        // Determine which index names are too long.
+        while (indexIter.more()) {
+            auto index = indexIter.next();
+            auto status = dpns.checkLengthForRename(index->indexName().size());
+            if (!status.isOK()) {
+                indexesToDrop.push_back(index);
+            }
+        }
+
+        // Drop the offending indexes.
+        for (auto&& index : indexesToDrop) {
+            log() << "dropCollection: " << fullns << " - index namespace '"
+                  << index->indexNamespace()
+                  << "' would be too long after drop-pending rename. Dropping index immediately.";
+            fassertStatusOK(40463, collection->getIndexCatalog()->dropIndex(opCtx, index));
+            opObserver->onDropIndex(
+                opCtx, fullns, collection->uuid(), index->indexName(), index->infoObj());
+        }
     }
+
 
     // Rename collection using drop-pending namespace generated from drop optime.
     const bool stayTemp = true;
@@ -764,13 +790,12 @@ void DatabaseImpl::dropDatabase(OperationContext* opCtx, Database* db) {
 
     dbHolder().close(opCtx, name, "database dropped");
 
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+    writeConflictRetry(opCtx, "dropDatabase", name, [&] {
         getGlobalServiceContext()
             ->getGlobalStorageEngine()
             ->dropDatabase(opCtx, name)
             .transitional_ignore();
-    }
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "dropDatabase", name);
+    });
 }
 
 namespace {
@@ -803,20 +828,19 @@ void mongo::dropAllDatabasesExceptLocalImpl(OperationContext* opCtx) {
 
     repl::getGlobalReplicationCoordinator()->dropAllSnapshots();
 
-    for (vector<string>::iterator i = n.begin(); i != n.end(); i++) {
-        if (*i != "local") {
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-                Database* db = dbHolder().get(opCtx, *i);
+    for (const auto& dbName : n) {
+        if (dbName != "local") {
+            writeConflictRetry(opCtx, "dropAllDatabasesExceptLocal", dbName, [&opCtx, &dbName] {
+                Database* db = dbHolder().get(opCtx, dbName);
 
                 // This is needed since dropDatabase can't be rolled back.
                 // This is safe be replaced by "invariant(db);dropDatabase(opCtx, db);" once fixed
                 if (db == nullptr) {
-                    log() << "database disappeared after listDatabases but before drop: " << *i;
+                    log() << "database disappeared after listDatabases but before drop: " << dbName;
                 } else {
                     DatabaseImpl::dropDatabase(opCtx, db);
                 }
-            }
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "dropAllDatabasesExceptLocal", *i);
+            });
         }
     }
 }

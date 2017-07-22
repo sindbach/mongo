@@ -30,12 +30,20 @@
 
 #include "mongo/db/update/pop_node.h"
 
-#include "mongo/db/update/path_support.h"
+#include "mongo/db/matcher/expression_parser.h"
 
 namespace mongo {
 
 Status PopNode::init(BSONElement modExpr, const CollatorInterface* collator) {
-    _popFromFront = modExpr.isNumber() && modExpr.number() < 0;
+    auto popVal = MatchExpressionParser::parseIntegerElementToLong(modExpr);
+    if (!popVal.isOK()) {
+        return popVal.getStatus();
+    }
+    if (popVal.getValue() != 1LL && popVal.getValue() != -1LL) {
+        return {ErrorCodes::FailedToParse,
+                str::stream() << "$pop expects 1 or -1, found: " << popVal.getValue()};
+    }
+    _popFromFront = (popVal.getValue() == -1LL);
     return Status::OK();
 }
 
@@ -44,6 +52,8 @@ void PopNode::apply(mutablebson::Element element,
                     FieldRef* pathTaken,
                     StringData matchedField,
                     bool fromReplication,
+                    bool validateForStorage,
+                    const FieldRefSet& immutablePaths,
                     const UpdateIndexData* indexData,
                     LogBuilder* logBuilder,
                     bool* indexesAffected,
@@ -58,34 +68,13 @@ void PopNode::apply(mutablebson::Element element,
     }
 
     if (!pathToCreate->empty()) {
-        // There were path components which we could not traverse. If 'element' is a nested object
-        // which does not contain 'pathToCreate', then this is a no-op (e.g. {$pop: {"a.b.c": 1}}
-        // for document {a: {b: {}}}).
-        //
-        // If the element is an array, but the numeric path does not exist, then this is also a
-        // no-op (e.g. {$pop: {"a.2.b": 1}} for document {a: [{b: 0}, {b: 1}]}).
-        //
-        // Otherwise, this the path contains a blocking leaf or array element, which is an error.
-        if (element.getType() == BSONType::Object) {
-            *noop = true;
-            return;
-        }
+        // There were path components we could not traverse. We treat this as a no-op, unless it
+        // would have been impossible to create those elements, which we check with
+        // checkViability().
+        UpdateLeafNode::checkViability(element, *pathToCreate, *pathTaken);
 
-        size_t arrayIndex;
-        if (element.getType() == BSONType::Array &&
-            pathsupport::isNumericPathComponent(pathToCreate->getPart(0), &arrayIndex)) {
-            *noop = true;
-            return;
-        }
-
-        uasserted(ErrorCodes::PathNotViable,
-                  str::stream() << "Cannot use the part (" << pathToCreate->getPart(0) << ") of ("
-                                << pathTaken->dottedField()
-                                << "."
-                                << pathToCreate->dottedField()
-                                << ") to traverse the element ({"
-                                << element.toString()
-                                << "})");
+        *noop = true;
+        return;
     }
 
     invariant(!pathTaken->empty());
@@ -112,6 +101,21 @@ void PopNode::apply(mutablebson::Element element,
 
     auto elementToRemove = _popFromFront ? element.leftChild() : element.rightChild();
     invariantOK(elementToRemove.remove());
+
+    // No need to validate for storage, since we cannot have increased the BSON depth or interfered
+    // with a DBRef.
+
+    // Ensure we are not changing any immutable paths.
+    for (auto immutablePath = immutablePaths.begin(); immutablePath != immutablePaths.end();
+         ++immutablePath) {
+        uassert(ErrorCodes::ImmutableField,
+                str::stream() << "Performing a $pop on the path '" << pathTaken->dottedField()
+                              << "' would modify the immutable field '"
+                              << (*immutablePath)->dottedField()
+                              << "'",
+                pathTaken->commonPrefixSize(**immutablePath) <
+                    std::min(pathTaken->numParts(), (*immutablePath)->numParts()));
+    }
 
     if (logBuilder) {
         uassertStatusOK(logBuilder->addToSetsWithNewFieldName(pathTaken->dottedField(), element));

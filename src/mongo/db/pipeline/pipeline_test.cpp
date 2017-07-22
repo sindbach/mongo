@@ -928,6 +928,40 @@ TEST(PipelineOptimizationTest, MatchCannotSwapWithSortLimit) {
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, inputPipe);
 }
 
+TEST(PipelineOptimizationTest, MatchOnMinItemsShouldNotMoveAcrossRename) {
+    string pipeline =
+        "[{$project: {_id: true, a: '$b'}}, "
+        "{$match: {a: {$_internalSchemaMinItems: 1}}}]";
+    assertPipelineOptimizesTo(pipeline, pipeline);
+}
+
+TEST(PipelineOptimizationTest, MatchOnMaxItemsShouldNotMoveAcrossRename) {
+    string pipeline =
+        "[{$project: {_id: true, a: '$b'}}, "
+        "{$match: {a: {$_internalSchemaMaxItems: 1}}}]";
+    assertPipelineOptimizesTo(pipeline, pipeline);
+}
+
+TEST(PipelineOptimizationTest, MatchOnMinLengthShouldMoveAcrossRename) {
+    string inputPipe =
+        "[{$project: {_id: true, a: '$b'}}, "
+        "{$match: {a: {$_internalSchemaMinLength: 1}}}]";
+    string outputPipe =
+        "[{$match: {b: {$_internalSchemaMinLength: 1}}},"
+        "{$project: {_id: true, a: '$b'}}]";
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+TEST(PipelineOptimizationTest, MatchOnMaxLengthShouldMoveAcrossRename) {
+    string inputPipe =
+        "[{$project: {_id: true, a: '$b'}}, "
+        "{$match: {a: {$_internalSchemaMaxLength: 1}}}]";
+    string outputPipe =
+        "[{$match: {b: {$_internalSchemaMaxLength: 1}}},"
+        "{$project: {_id: true, a: '$b'}}]";
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
 }  // namespace Local
 
 namespace Sharded {

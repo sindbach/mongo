@@ -32,6 +32,7 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/util/net/op_msg.h"
 
 namespace mongo {
 class BSONObj;
@@ -56,21 +57,15 @@ BSONObj makeEmptyMetadata();
 void readRequestMetadata(OperationContext* opCtx, const BSONObj& metadataObj);
 
 /**
- * A command object and a corresponding metadata object.
- */
-using CommandAndMetadata = std::tuple<BSONObj, BSONObj>;
-
-/**
  * A legacy command object and a corresponding query flags bitfield. The legacy command object
  * may contain metadata fields, so it cannot safely be passed to a command's run method.
  */
 using LegacyCommandAndFlags = std::tuple<BSONObj, int>;
 
 /**
- * Given a legacy command object and a query flags bitfield, attempts to parse and remove
- * the metadata from the command object and construct a corresponding metadata object.
+ * Upconverts a legacy command request into an OpMessageRequest.
  */
-CommandAndMetadata upconvertRequestMetadata(BSONObj legacyCmdObj, int queryFlags);
+OpMsgRequest upconvertRequest(StringData db, BSONObj legacyCmdObj, int queryFlags);
 
 /**
  * A function type for writing request metadata. The function takes a pointer to an optional
@@ -89,8 +84,8 @@ using RequestMetadataWriter =
  *
  * TODO: would it be a layering violation if this hook took an OperationContext* ?
  */
-using ReplyMetadataReader =
-    stdx::function<Status(const BSONObj& replyMetadata, StringData sourceHost)>;
+using ReplyMetadataReader = stdx::function<Status(
+    OperationContext* opCtx, const BSONObj& replyMetadata, StringData sourceHost)>;
 
 }  // namespace rpc
 }  // namespace mongo

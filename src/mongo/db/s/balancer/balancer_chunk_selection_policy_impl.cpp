@@ -71,9 +71,7 @@ StatusWith<DistributionStatus> createCollectionDistributionStatus(
         shardToChunksMap[stat.shardId];
     }
 
-    for (const auto& entry : chunkMgr->chunkMap()) {
-        const auto& chunkEntry = entry.second;
-
+    for (const auto& chunkEntry : chunkMgr->chunks()) {
         ChunkType chunk;
         chunk.setNS(chunkMgr->getns());
         chunk.setMin(chunkEntry->getMin());
@@ -86,7 +84,7 @@ StatusWith<DistributionStatus> createCollectionDistributionStatus(
     }
 
     vector<TagsType> collectionTags;
-    Status tagsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getTagsForCollection(
+    Status tagsStatus = Grid::get(opCtx)->catalogClient()->getTagsForCollection(
         opCtx, chunkMgr->getns(), &collectionTags);
     if (!tagsStatus.isOK()) {
         return {tagsStatus.code(),
@@ -195,8 +193,8 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToSpli
 
     vector<CollectionType> collections;
 
-    Status collsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getCollections(
-        opCtx, nullptr, &collections, nullptr);
+    Status collsStatus =
+        Grid::get(opCtx)->catalogClient()->getCollections(opCtx, nullptr, &collections, nullptr);
     if (!collsStatus.isOK()) {
         return collsStatus;
     }
@@ -247,8 +245,8 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
 
     vector<CollectionType> collections;
 
-    Status collsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getCollections(
-        opCtx, nullptr, &collections, nullptr);
+    Status collsStatus =
+        Grid::get(opCtx)->catalogClient()->getCollections(opCtx, nullptr, &collections, nullptr);
     if (!collsStatus.isOK()) {
         return collsStatus;
     }

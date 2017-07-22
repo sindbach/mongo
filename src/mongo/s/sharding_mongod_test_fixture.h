@@ -34,7 +34,6 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/net/message_port_mock.h"
 
 namespace mongo {
 
@@ -48,7 +47,6 @@ class DistLockManager;
 class NamespaceString;
 class RemoteCommandTargeterFactoryMock;
 class ShardingCatalogClient;
-class ShardingCatalogManager;
 class ShardRegistry;
 
 namespace executor {
@@ -98,7 +96,6 @@ public:
     // Syntactic sugar for getting sharding components off the Grid, if they have been initialized.
 
     ShardingCatalogClient* catalogClient() const;
-    ShardingCatalogManager* catalogManager() const;
     CatalogCache* catalogCache() const;
     ShardRegistry* shardRegistry() const;
     ClusterCursorManager* clusterCursorManager() const;
@@ -201,7 +198,7 @@ protected:
     /**
      * Base class returns nullptr.
      */
-    virtual std::unique_ptr<DistLockCatalog> makeDistLockCatalog(ShardRegistry* shardRegistry);
+    virtual std::unique_ptr<DistLockCatalog> makeDistLockCatalog();
 
     /**
      * Base class returns nullptr.
@@ -220,12 +217,6 @@ protected:
      */
     virtual std::unique_ptr<ShardingCatalogClient> makeShardingCatalogClient(
         std::unique_ptr<DistLockManager> distLockManager);
-
-    /**
-     * Base class returns nullptr.
-     */
-    virtual std::unique_ptr<ShardingCatalogManager> makeShardingCatalogManager(
-        ShardingCatalogClient* catalogClient);
 
     /**
      * Base class returns nullptr.

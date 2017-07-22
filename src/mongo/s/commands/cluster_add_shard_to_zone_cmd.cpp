@@ -65,9 +65,9 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
  *   zone: <string zoneName>
  * }
  */
-class AddShardToZoneCmd : public Command {
+class AddShardToZoneCmd : public BasicCommand {
 public:
-    AddShardToZoneCmd() : Command("addShardToZone", "addshardtozone") {}
+    AddShardToZoneCmd() : BasicCommand("addShardToZone", "addshardtozone") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -99,7 +99,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         auto parsedRequest = uassertStatusOK(AddShardToZoneRequest::parseFromMongosCommand(cmdObj));
 

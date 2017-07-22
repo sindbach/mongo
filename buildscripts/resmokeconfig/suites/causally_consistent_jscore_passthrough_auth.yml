@@ -19,9 +19,6 @@ selector:
   - jstests/core/copydatabase_no_id_index.js
   - jstests/core/copydb.js
   - jstests/core/system_profile.js
-  # TODO SERVER-29700: findAndModify returns an operationTime prior to when its write took place.
-  - jstests/core/find_and_modify_*.js
-  - jstests/core/update_find_and_modify_id.js
   # The following tests fail because a certain command or functionality is not supported on
   # mongos. This command or functionality is placed in a comment next to the failing test.
   - jstests/core/apitest_db.js  # profiling.
@@ -83,7 +80,6 @@ selector:
   - jstests/core/eval7.js # db.eval() used
   - jstests/core/eval9.js # db.eval() used
   - jstests/core/evala.js # db.eval() used
-  - jstests/core/evalc.js # db.eval() used
   - jstests/core/evald.js # db.eval() used
   - jstests/core/evale.js # db.eval() used
   - jstests/core/evalg.js # db.eval() used

@@ -51,9 +51,9 @@ using std::vector;
 
 namespace {
 
-class ListDatabasesCmd : public Command {
+class ListDatabasesCmd : public BasicCommand {
 public:
-    ListDatabasesCmd() : Command("listDatabases", "listdatabases") {}
+    ListDatabasesCmd() : BasicCommand("listDatabases", "listdatabases") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -87,7 +87,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname_unused,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         const bool nameOnly = cmdObj["nameOnly"].trueValue();
 
@@ -166,7 +165,7 @@ public:
         }
 
         // Get information for config and admin dbs from the config servers.
-        auto catalogClient = grid.catalogClient(opCtx);
+        auto catalogClient = grid.catalogClient();
         auto appendStatus = catalogClient->appendInfoForConfigServerDatabases(
             opCtx, filterCommandRequestForPassthrough(cmdObj), &dbListBuilder);
         dbListBuilder.doneFast();

@@ -111,9 +111,9 @@ private:
     MigrationChunkClonerSourceLegacy* _chunkCloner;
 };
 
-class InitialCloneCommand : public Command {
+class InitialCloneCommand : public BasicCommand {
 public:
-    InitialCloneCommand() : Command("_migrateClone") {}
+    InitialCloneCommand() : BasicCommand("_migrateClone") {}
 
     void help(std::stringstream& h) const {
         h << "internal";
@@ -142,7 +142,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string&,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) {
         const MigrationSessionId migrationSessionId(
             uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj)));
@@ -174,9 +173,9 @@ public:
 
 } initialCloneCommand;
 
-class TransferModsCommand : public Command {
+class TransferModsCommand : public BasicCommand {
 public:
-    TransferModsCommand() : Command("_transferMods") {}
+    TransferModsCommand() : BasicCommand("_transferMods") {}
 
     void help(std::stringstream& h) const {
         h << "internal";
@@ -205,7 +204,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string&,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) {
         const MigrationSessionId migrationSessionId(
             uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj)));

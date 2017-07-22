@@ -33,9 +33,9 @@
 namespace mongo {
 namespace {
 
-class CompactCmd : public Command {
+class CompactCmd : public BasicCommand {
 public:
-    CompactCmd() : Command("compact") {}
+    CompactCmd() : BasicCommand("compact") {}
 
     bool slaveOk() const override {
         return true;
@@ -60,7 +60,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         uasserted(ErrorCodes::CommandNotSupported, "compact not allowed through mongos");
     }

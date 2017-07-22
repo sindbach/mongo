@@ -41,6 +41,7 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
@@ -69,12 +70,11 @@ Status _performNoopWrite(OperationContext* opCtx, BSONObj msgObj, StringData not
         return {ErrorCodes::NotMaster, "Not a primary"};
     }
 
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+    writeConflictRetry(opCtx, note, NamespaceString::kRsOplogNamespace.ns(), [&opCtx, &msgObj] {
         WriteUnitOfWork uow(opCtx);
         opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(opCtx, msgObj);
         uow.commit();
-    }
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, note, repl::rsOplogName);
+    });
 
     return Status::OK();
 }
@@ -83,9 +83,9 @@ Status _performNoopWrite(OperationContext* opCtx, BSONObj msgObj, StringData not
 using std::string;
 using std::stringstream;
 
-class AppendOplogNoteCmd : public Command {
+class AppendOplogNoteCmd : public BasicCommand {
 public:
-    AppendOplogNoteCmd() : Command("appendOplogNote") {}
+    AppendOplogNoteCmd() : BasicCommand("appendOplogNote") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -116,7 +116,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         if (!replCoord->isReplEnabled()) {

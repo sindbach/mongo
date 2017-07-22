@@ -47,6 +47,7 @@
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/address_restriction.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -594,9 +595,9 @@ Status requireAuthSchemaVersion26UpgradeOrFinal(OperationContext* opCtx,
 }  // namespace
 
 
-class CmdCreateUser : public Command {
+class CmdCreateUser : public BasicCommand {
 public:
-    CmdCreateUser() : Command("createUser") {}
+    CmdCreateUser() : BasicCommand("createUser") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -619,7 +620,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::CreateOrUpdateUserArgs args;
         Status status = auth::parseCreateOrUpdateUserCommands(cmdObj, "createUser", dbname, &args);
@@ -696,9 +696,15 @@ public:
         }
         credentialsBuilder.done();
 
+        if (args.authenticationRestrictions && !args.authenticationRestrictions->isEmpty()) {
+            credentialsBuilder.append("authenticationRestrictions",
+                                      *args.authenticationRestrictions);
+        }
+
         if (args.hasCustomData) {
             userObjBuilder.append("customData", args.customData);
         }
+
         userObjBuilder.append("roles", rolesVectorToBSONArray(args.roles));
 
         BSONObj userObj = userObjBuilder.obj();
@@ -740,9 +746,9 @@ public:
 
 } cmdCreateUser;
 
-class CmdUpdateUser : public Command {
+class CmdUpdateUser : public BasicCommand {
 public:
-    CmdUpdateUser() : Command("updateUser") {}
+    CmdUpdateUser() : BasicCommand("updateUser") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -765,7 +771,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::CreateOrUpdateUserArgs args;
         Status status = auth::parseCreateOrUpdateUserCommands(cmdObj, "updateUser", dbname, &args);
@@ -773,7 +778,8 @@ public:
             return appendCommandStatus(result, status);
         }
 
-        if (!args.hasHashedPassword && !args.hasCustomData && !args.hasRoles) {
+        if (!args.hasHashedPassword && !args.hasCustomData && !args.hasRoles &&
+            !args.authenticationRestrictions) {
             return appendCommandStatus(
                 result,
                 Status(ErrorCodes::BadValue,
@@ -789,6 +795,7 @@ public:
         }
 
         BSONObjBuilder updateSetBuilder;
+        BSONObjBuilder updateUnsetBuilder;
         if (args.hasHashedPassword) {
             BSONObjBuilder credentialsBuilder(updateSetBuilder.subobjStart("credentials"));
 
@@ -809,11 +816,38 @@ public:
             }
             credentialsBuilder.done();
         }
+
         if (args.hasCustomData) {
             updateSetBuilder.append("customData", args.customData);
         }
+
+        if (args.authenticationRestrictions) {
+            if (args.authenticationRestrictions->isEmpty()) {
+                updateUnsetBuilder.append("authenticationRestrictions", "");
+            } else {
+                auto swParsedRestrictions =
+                    parseAuthenticationRestriction(*args.authenticationRestrictions);
+                if (!swParsedRestrictions.isOK()) {
+                    return appendCommandStatus(result, swParsedRestrictions.getStatus());
+                }
+
+                updateSetBuilder.append("authenticationRestrictions",
+                                        *args.authenticationRestrictions);
+            }
+        }
+
         if (args.hasRoles) {
             updateSetBuilder.append("roles", rolesVectorToBSONArray(args.roles));
+        }
+
+        BSONObj updateSet = updateSetBuilder.done();
+        BSONObj updateUnset = updateUnsetBuilder.done();
+        BSONObjBuilder updateDocumentBuilder;
+        if (!updateSet.isEmpty()) {
+            updateDocumentBuilder << "$set" << updateSet;
+        }
+        if (!updateUnset.isEmpty()) {
+            updateDocumentBuilder << "$unset" << updateUnset;
         }
 
         ServiceContext* serviceContext = opCtx->getClient()->getServiceContext();
@@ -824,7 +858,6 @@ public:
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
-
 
         // Role existence has to be checked after acquiring the update lock
         if (args.hasRoles) {
@@ -844,8 +877,7 @@ public:
                              args.hasCustomData ? &args.customData : NULL,
                              args.hasRoles ? &args.roles : NULL);
 
-        status =
-            updatePrivilegeDocument(opCtx, args.userName, BSON("$set" << updateSetBuilder.done()));
+        status = updatePrivilegeDocument(opCtx, args.userName, updateDocumentBuilder.done());
         // Must invalidate even on bad status - what if the write succeeded but the GLE failed?
         authzManager->invalidateUserByName(args.userName);
         return appendCommandStatus(result, status);
@@ -857,9 +889,9 @@ public:
 
 } cmdUpdateUser;
 
-class CmdDropUser : public Command {
+class CmdDropUser : public BasicCommand {
 public:
-    CmdDropUser() : Command("dropUser") {}
+    CmdDropUser() : BasicCommand("dropUser") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -882,7 +914,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         UserName userName;
         Status status = auth::parseAndValidateDropUserCommand(cmdObj, dbname, &userName);
@@ -925,9 +956,9 @@ public:
 
 } cmdDropUser;
 
-class CmdDropAllUsersFromDatabase : public Command {
+class CmdDropAllUsersFromDatabase : public BasicCommand {
 public:
-    CmdDropAllUsersFromDatabase() : Command("dropAllUsersFromDatabase") {}
+    CmdDropAllUsersFromDatabase() : BasicCommand("dropAllUsersFromDatabase") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -950,7 +981,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         Status status = auth::parseAndValidateDropAllUsersFromDatabaseCommand(cmdObj, dbname);
         if (!status.isOK()) {
@@ -982,9 +1012,9 @@ public:
 
 } cmdDropAllUsersFromDatabase;
 
-class CmdGrantRolesToUser : public Command {
+class CmdGrantRolesToUser : public BasicCommand {
 public:
-    CmdGrantRolesToUser() : Command("grantRolesToUser") {}
+    CmdGrantRolesToUser() : BasicCommand("grantRolesToUser") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1007,7 +1037,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         std::string userNameString;
         std::vector<RoleName> roles;
@@ -1056,9 +1085,9 @@ public:
 
 } cmdGrantRolesToUser;
 
-class CmdRevokeRolesFromUser : public Command {
+class CmdRevokeRolesFromUser : public BasicCommand {
 public:
-    CmdRevokeRolesFromUser() : Command("revokeRolesFromUser") {}
+    CmdRevokeRolesFromUser() : BasicCommand("revokeRolesFromUser") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1081,7 +1110,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         std::string userNameString;
         std::vector<RoleName> roles;
@@ -1130,7 +1158,7 @@ public:
 
 } cmdRevokeRolesFromUser;
 
-class CmdUsersInfo : public Command {
+class CmdUsersInfo : public BasicCommand {
 public:
     virtual bool slaveOk() const {
         return false;
@@ -1144,7 +1172,7 @@ public:
         return false;
     }
 
-    CmdUsersInfo() : Command("usersInfo") {}
+    CmdUsersInfo() : BasicCommand("usersInfo") {}
 
     virtual void help(stringstream& ss) const {
         ss << "Returns information about users." << endl;
@@ -1159,7 +1187,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::UsersInfoArgs args;
         Status status = auth::parseUsersInfoCommand(cmdObj, dbname, &args);
@@ -1247,9 +1274,9 @@ public:
 
 } cmdUsersInfo;
 
-class CmdCreateRole : public Command {
+class CmdCreateRole : public BasicCommand {
 public:
-    CmdCreateRole() : Command("createRole") {}
+    CmdCreateRole() : BasicCommand("createRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1272,7 +1299,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::CreateOrUpdateRoleArgs args;
         Status status = auth::parseCreateOrUpdateRoleCommands(cmdObj, "createRole", dbname, &args);
@@ -1360,9 +1386,9 @@ public:
 
 } cmdCreateRole;
 
-class CmdUpdateRole : public Command {
+class CmdUpdateRole : public BasicCommand {
 public:
-    CmdUpdateRole() : Command("updateRole") {}
+    CmdUpdateRole() : BasicCommand("updateRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1385,7 +1411,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::CreateOrUpdateRoleArgs args;
         Status status = auth::parseCreateOrUpdateRoleCommands(cmdObj, "updateRole", dbname, &args);
@@ -1458,9 +1483,9 @@ public:
     }
 } cmdUpdateRole;
 
-class CmdGrantPrivilegesToRole : public Command {
+class CmdGrantPrivilegesToRole : public BasicCommand {
 public:
-    CmdGrantPrivilegesToRole() : Command("grantPrivilegesToRole") {}
+    CmdGrantPrivilegesToRole() : BasicCommand("grantPrivilegesToRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1483,7 +1508,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
 
         RoleName roleName;
@@ -1566,9 +1590,9 @@ public:
 
 } cmdGrantPrivilegesToRole;
 
-class CmdRevokePrivilegesFromRole : public Command {
+class CmdRevokePrivilegesFromRole : public BasicCommand {
 public:
-    CmdRevokePrivilegesFromRole() : Command("revokePrivilegesFromRole") {}
+    CmdRevokePrivilegesFromRole() : BasicCommand("revokePrivilegesFromRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1591,7 +1615,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         RoleName roleName;
         PrivilegeVector privilegesToRemove;
@@ -1676,9 +1699,9 @@ public:
 
 } cmdRevokePrivilegesFromRole;
 
-class CmdGrantRolesToRole : public Command {
+class CmdGrantRolesToRole : public BasicCommand {
 public:
-    CmdGrantRolesToRole() : Command("grantRolesToRole") {}
+    CmdGrantRolesToRole() : BasicCommand("grantRolesToRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1701,7 +1724,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         std::string roleNameString;
         std::vector<RoleName> rolesToAdd;
@@ -1767,9 +1789,9 @@ public:
 
 } cmdGrantRolesToRole;
 
-class CmdRevokeRolesFromRole : public Command {
+class CmdRevokeRolesFromRole : public BasicCommand {
 public:
-    CmdRevokeRolesFromRole() : Command("revokeRolesFromRole") {}
+    CmdRevokeRolesFromRole() : BasicCommand("revokeRolesFromRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1792,7 +1814,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         std::string roleNameString;
         std::vector<RoleName> rolesToRemove;
@@ -1853,9 +1874,9 @@ public:
 
 } cmdRevokeRolesFromRole;
 
-class CmdDropRole : public Command {
+class CmdDropRole : public BasicCommand {
 public:
-    CmdDropRole() : Command("dropRole") {}
+    CmdDropRole() : BasicCommand("dropRole") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1882,7 +1903,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         RoleName roleName;
         Status status = auth::parseDropRoleCommand(cmdObj, dbname, &roleName);
@@ -2006,9 +2026,9 @@ public:
 
 } cmdDropRole;
 
-class CmdDropAllRolesFromDatabase : public Command {
+class CmdDropAllRolesFromDatabase : public BasicCommand {
 public:
-    CmdDropAllRolesFromDatabase() : Command("dropAllRolesFromDatabase") {}
+    CmdDropAllRolesFromDatabase() : BasicCommand("dropAllRolesFromDatabase") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -2036,7 +2056,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         Status status = auth::parseDropAllRolesFromDatabaseCommand(cmdObj, dbname);
         if (!status.isOK()) {
@@ -2150,7 +2169,7 @@ public:
  *                    schema.
  */
 
-class CmdRolesInfo : public Command {
+class CmdRolesInfo : public BasicCommand {
 public:
     virtual bool slaveOk() const {
         return false;
@@ -2164,7 +2183,7 @@ public:
         return false;
     }
 
-    CmdRolesInfo() : Command("rolesInfo") {}
+    CmdRolesInfo() : BasicCommand("rolesInfo") {}
 
     virtual void help(stringstream& ss) const {
         ss << "Returns information about roles." << endl;
@@ -2179,7 +2198,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::RolesInfoArgs args;
         Status status = auth::parseRolesInfoCommand(cmdObj, dbname, &args);
@@ -2231,7 +2249,7 @@ public:
 
 } cmdRolesInfo;
 
-class CmdInvalidateUserCache : public Command {
+class CmdInvalidateUserCache : public BasicCommand {
 public:
     virtual bool slaveOk() const {
         return true;
@@ -2245,7 +2263,7 @@ public:
         return false;
     }
 
-    CmdInvalidateUserCache() : Command("invalidateUserCache") {}
+    CmdInvalidateUserCache() : BasicCommand("invalidateUserCache") {}
 
     virtual void help(stringstream& ss) const {
         ss << "Invalidates the in-memory cache of user information" << endl;
@@ -2260,7 +2278,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         AuthorizationManager* authzManager = getGlobalAuthorizationManager();
         authzManager->invalidateUserCache();
@@ -2269,7 +2286,7 @@ public:
 
 } cmdInvalidateUserCache;
 
-class CmdGetCacheGeneration : public Command {
+class CmdGetCacheGeneration : public BasicCommand {
 public:
     virtual bool slaveOk() const {
         return true;
@@ -2283,7 +2300,7 @@ public:
         return false;
     }
 
-    CmdGetCacheGeneration() : Command("_getUserCacheGeneration") {}
+    CmdGetCacheGeneration() : BasicCommand("_getUserCacheGeneration") {}
 
     virtual void help(stringstream& ss) const {
         ss << "internal" << endl;
@@ -2298,7 +2315,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         AuthorizationManager* authzManager = getGlobalAuthorizationManager();
         result.append("cacheGeneration", authzManager->getCacheGeneration());
@@ -2317,9 +2333,9 @@ public:
  * It either adds the users/roles to the existing ones or replaces the existing ones, depending
  * on whether the "drop" argument is true or false.
  */
-class CmdMergeAuthzCollections : public Command {
+class CmdMergeAuthzCollections : public BasicCommand {
 public:
-    CmdMergeAuthzCollections() : Command("_mergeAuthzCollections") {}
+    CmdMergeAuthzCollections() : BasicCommand("_mergeAuthzCollections") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -2675,7 +2691,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         auth::MergeAuthzCollectionsArgs args;
         Status status = auth::parseMergeAuthzCollectionsCommand(cmdObj, &args);
@@ -2887,9 +2902,9 @@ Status upgradeAuthSchema(OperationContext* opCtx,
                                             << " successful steps.");
 }
 
-class CmdAuthSchemaUpgrade : public Command {
+class CmdAuthSchemaUpgrade : public BasicCommand {
 public:
-    CmdAuthSchemaUpgrade() : Command("authSchemaUpgrade") {}
+    CmdAuthSchemaUpgrade() : BasicCommand("authSchemaUpgrade") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -2916,7 +2931,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         auth::AuthSchemaUpgradeArgs parsedArgs;
         Status status = auth::parseAuthSchemaUpgradeCommand(cmdObj, dbname, &parsedArgs);

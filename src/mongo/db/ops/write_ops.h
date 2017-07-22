@@ -28,89 +28,56 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <vector>
-
-#include "mongo/db/jsobj.h"
-#include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/util/net/message.h"
+#include "mongo/util/net/op_msg.h"
 
 namespace mongo {
 
-/**
- * The base structure for all fields that are common for all write operations.
- *
- * Unlike ParsedUpdate and UpdateRequest (and the Delete counterparts), types deriving from this are
- * intended to represent entire operations that may consist of multiple sub-operations.
- */
-struct ParsedWriteOp {
-    NamespaceString ns;
-    bool bypassDocumentValidation = false;
-    bool continueOnError = false;
+class InsertOp {
+public:
+    static write_ops::Insert parse(const OpMsgRequest& request);
+    static write_ops::Insert parseLegacy(const Message& msg);
 };
 
-/**
- * A parsed insert insert operation.
- */
-struct InsertOp : ParsedWriteOp {
-    std::vector<BSONObj> documents;
+class UpdateOp {
+public:
+    static write_ops::Update parse(const OpMsgRequest& request);
+    static write_ops::Update parseLegacy(const Message& msg);
 };
 
-/**
- * A parsed update operation.
- */
-struct UpdateOp : ParsedWriteOp {
-    struct SingleUpdate {
-        BSONObj toBSON() const {
-            BSONObjBuilder builder;
-            builder << "q" << query;
-            builder << "u" << update;
-            builder << "multi" << multi;
-            builder << "upsert" << upsert;
-            if (!collation.isEmpty()) {
-                builder << "collation" << collation;
-            }
-            if (!arrayFilters.empty()) {
-                BSONArrayBuilder arrayBuilder(builder.subarrayStart("arrayFilters"));
-                for (auto arrayFilter : arrayFilters) {
-                    arrayBuilder.append(arrayFilter);
-                }
-                arrayBuilder.doneFast();
-            }
-            return builder.obj();
-        }
-
-        BSONObj query;
-        BSONObj update;
-        BSONObj collation;
-        std::vector<BSONObj> arrayFilters;
-        bool multi = false;
-        bool upsert = false;
-    };
-
-    std::vector<SingleUpdate> updates;
+class DeleteOp {
+public:
+    static write_ops::Delete parse(const OpMsgRequest& request);
+    static write_ops::Delete parseLegacy(const Message& msg);
 };
 
+namespace write_ops {
+
 /**
- * A parsed Delete operation.
+ * Retrieves the statement id for the write at the specified position in the write batch entries
+ * array.
  */
-struct DeleteOp : ParsedWriteOp {
-    struct SingleDelete {
-        BSONObj toBSON() const {
-            BSONObjBuilder builder;
-            builder << "q" << query;
-            builder << "limit" << (multi ? 0 : 1);
-            if (!collation.isEmpty()) {
-                builder << "collation" << collation;
-            }
-            return builder.obj();
-        }
+int32_t getStmtIdForWriteAt(const WriteCommandBase& writeCommandBase, size_t writePos);
 
-        BSONObj query;
-        BSONObj collation;
-        bool multi = true;
-    };
+template <class T>
+int32_t getStmtIdForWriteAt(const T& op, size_t writePos) {
+    return getStmtIdForWriteAt(op.getWriteCommandBase(), writePos);
+}
 
-    std::vector<SingleDelete> deletes;
-};
+// TODO: Delete this getter once IDL supports defaults for object and array fields
+template <class T>
+const BSONObj& collationOf(const T& opEntry) {
+    static const BSONObj emptyBSON{};
+    return opEntry.getCollation().get_value_or(emptyBSON);
+}
 
+// TODO: Delete this getter once IDL supports defaults for object and array fields
+template <class T>
+const std::vector<BSONObj>& arrayFiltersOf(const T& opEntry) {
+    static const std::vector<BSONObj> emptyBSONArray{};
+    return opEntry.getArrayFilters().get_value_or(emptyBSONArray);
+}
+
+}  // namespace write_ops
 }  // namespace mongo

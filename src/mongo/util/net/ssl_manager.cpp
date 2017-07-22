@@ -53,9 +53,9 @@
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/private/ssl_expiration.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/net/socket_exception.h"
-#include "mongo/util/net/ssl_expiration.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/scopeguard.h"
@@ -929,8 +929,11 @@ inline Status checkX509_STORE_error() {
 Status importCertStoreToX509_STORE(const wchar_t* storeName,
                                    DWORD storeLocation,
                                    X509_STORE* verifyStore) {
-    HCERTSTORE systemStore = CertOpenStore(
-        CERT_STORE_PROV_SYSTEM_W, 0, NULL, storeLocation, const_cast<LPWSTR>(storeName));
+    HCERTSTORE systemStore = CertOpenStore(CERT_STORE_PROV_SYSTEM_W,
+                                           0,
+                                           NULL,
+                                           storeLocation | CERT_STORE_READONLY_FLAG,
+                                           const_cast<LPWSTR>(storeName));
     if (systemStore == NULL) {
         return {ErrorCodes::InvalidSSLConfiguration,
                 str::stream() << "error opening system CA store: " << errnoWithDescription()};

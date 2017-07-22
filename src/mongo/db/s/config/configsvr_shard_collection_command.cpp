@@ -124,9 +124,9 @@ BSONObj makeCreateIndexesCmd(const NamespaceString& nss,
 /**
  * Internal sharding command run on config servers to add a shard to the cluster.
  */
-class ConfigSvrShardCollectionCommand : public Command {
+class ConfigSvrShardCollectionCommand : public BasicCommand {
 public:
-    ConfigSvrShardCollectionCommand() : Command("_configsvrShardCollection") {}
+    ConfigSvrShardCollectionCommand() : BasicCommand("_configsvrShardCollection") {}
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
@@ -163,7 +163,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
 
         uassert(ErrorCodes::IllegalOperation,
@@ -174,10 +173,16 @@ public:
         auto shardCollRequest = ConfigsvrShardCollection::parse(
             IDLParserErrorContext("ConfigsvrShardCollection"), cmdObj);
 
-        auto const catalogClient = Grid::get(opCtx)->catalogClient(opCtx);
-        auto const catalogManager = Grid::get(opCtx)->catalogManager();
+        auto const catalogClient = Grid::get(opCtx)->catalogClient();
+        auto const catalogManager = ShardingCatalogManager::get(opCtx);
         auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
         auto const catalogCache = Grid::get(opCtx)->catalogCache();
+
+        // Lock the collection to prevent older mongos instances from trying to shard or drop it at
+        // the same time
+        boost::optional<DistLockManager::ScopedDistLock> scopedDistLock(
+            uassertStatusOK(catalogClient->getDistLockManager()->lock(
+                opCtx, nss.ns(), "shardCollection", DistLockManager::kDefaultLockTimeout)));
 
         // Ensure sharding is allowed on the database
         auto dbType = uassertStatusOK(catalogClient->getDatabase(opCtx, nss.db().toString())).value;
@@ -192,42 +197,24 @@ public:
         catalogCache->invalidateShardedCollection(nss);
         auto routingInfo = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
 
-        // If the collection is already sharded, fail if the options in this request do not match
-        // the options the collection was originally sharded with.
-        if (routingInfo.cm()) {
-            auto existingColl =
-                uassertStatusOK(catalogClient->getCollection(opCtx, nss.ns())).value;
-
-            CollectionType requestedOptions;
-            requestedOptions.setNs(nss);
-            requestedOptions.setKeyPattern(KeyPattern(shardCollRequest.getKey()));
-            if (shardCollRequest.getCollation()) {
-                requestedOptions.setDefaultCollation(*shardCollRequest.getCollation());
-            }
-            requestedOptions.setUnique(shardCollRequest.getUnique());
-
-            uassert(ErrorCodes::AlreadyInitialized,
-                    str::stream() << "sharding already enabled for collection " << nss.ns()
-                                  << " with options "
-                                  << existingColl.toString(),
-                    requestedOptions.hasSameOptions(existingColl));
-
-            // If the options do match, we can immediately return success.
-            return true;
+        if (shardCollRequest.getKey().isEmpty()) {
+            return appendCommandStatus(
+                result,
+                {ErrorCodes::InvalidOptions, str::stream() << "Cannot have an empty shard key"});
         }
 
         auto proposedKey(shardCollRequest.getKey().getOwned());
-        ShardKeyPattern proposedKeyPattern(proposedKey);
-        if (!proposedKeyPattern.isValid()) {
+        ShardKeyPattern shardKeyPattern(proposedKey);
+        if (!shardKeyPattern.isValid()) {
             return appendCommandStatus(result,
                                        {ErrorCodes::InvalidOptions,
                                         str::stream() << "Unsupported shard key pattern "
-                                                      << proposedKeyPattern.toString()
+                                                      << shardKeyPattern.toString()
                                                       << ". Pattern must either be a single hashed "
                                                          "field, or a list of ascending fields"});
         }
 
-        bool isHashedShardKey = proposedKeyPattern.isHashedPattern();
+        bool isHashedShardKey = shardKeyPattern.isHashedPattern();
         bool careAboutUnique = shardCollRequest.getUnique();
 
         if (isHashedShardKey && careAboutUnique) {
@@ -364,6 +351,28 @@ public:
             }
         }
 
+        // If the collection is already sharded, fail if the deduced options in this request do not
+        // match the options the collection was originally sharded with.
+        if (routingInfo.cm()) {
+            auto existingColl =
+                uassertStatusOK(catalogClient->getCollection(opCtx, nss.ns())).value;
+
+            CollectionType requestedOptions;
+            requestedOptions.setNs(nss);
+            requestedOptions.setKeyPattern(KeyPattern(proposedKey));
+            requestedOptions.setDefaultCollation(defaultCollation);
+            requestedOptions.setUnique(careAboutUnique);
+
+            uassert(ErrorCodes::AlreadyInitialized,
+                    str::stream() << "sharding already enabled for collection " << nss.ns()
+                                  << " with options "
+                                  << existingColl.toString(),
+                    requestedOptions.hasSameOptions(existingColl));
+
+            // If the options do match, we can immediately return success.
+            return true;
+        }
+
         // The proposed shard key must be validated against the set of existing indexes.
         // In particular, we must ensure the following constraints
         //
@@ -393,12 +402,11 @@ public:
         std::list<BSONObj> indexes = conn->getIndexSpecs(nss.ns());
 
         // 1.  Verify consistency with existing unique indexes
-        ShardKeyPattern proposedShardKey(proposedKey);
 
         for (const auto& idx : indexes) {
             BSONObj currentKey = idx["key"].embeddedObject();
             bool isUnique = idx["unique"].trueValue();
-            if (isUnique && !proposedShardKey.isUniqueIndexCompatible(currentKey)) {
+            if (isUnique && !shardKeyPattern.isUniqueIndexCompatible(currentKey)) {
                 return appendCommandStatus(
                     result,
                     {ErrorCodes::InvalidOptions,
@@ -595,19 +603,23 @@ public:
         // were specified in the request, i.e., by mapReduce. Otherwise, all the initial chunks are
         // placed on the primary shard, and may be distributed across shards through migrations
         // (below) if using a hashed shard key.
-        bool distributeInitialChunks = false;
-        if (shardCollRequest.getInitialSplitPoints()) {
-            distributeInitialChunks = true;
-        }
+        const bool distributeInitialChunks =
+            shardCollRequest.getInitialSplitPoints().is_initialized();
+
         catalogManager->shardCollection(opCtx,
                                         nss.ns(),
-                                        proposedShardKey,
+                                        shardKeyPattern,
                                         defaultCollation,
                                         careAboutUnique,
                                         initSplits,
                                         distributeInitialChunks);
 
+        // Free the collection dist lock in order to allow the initial splits and moves below to
+        // proceed
+        scopedDistLock.reset();
+
         result << "collectionsharded" << nss.ns();
+
         // Make sure the cached metadata for the collection knows that we are now sharded
         catalogCache->invalidateShardedCollection(nss);
 
@@ -618,21 +630,18 @@ public:
                     "Collection was successfully written as sharded but got dropped before it "
                     "could be evenly distributed",
                     routingInfo.cm());
-            auto chunkManager = routingInfo.cm();
 
-            const auto chunkMap = chunkManager->chunkMap();
+            auto chunkManager = routingInfo.cm();
 
             // 2. Move and commit each "big chunk" to a different shard.
             int i = 0;
-            for (ChunkMap::const_iterator c = chunkMap.begin(); c != chunkMap.end(); ++c, ++i) {
-                const ShardId& shardId = shardIds[i % numShards];
+            for (auto chunk : chunkManager->chunks()) {
+                const ShardId& shardId = shardIds[i++ % numShards];
                 const auto toStatus = shardRegistry->getShard(opCtx, shardId);
                 if (!toStatus.isOK()) {
                     continue;
                 }
                 const auto to = toStatus.getValue();
-
-                auto chunk = c->second;
 
                 // Can't move chunk to shard it's already on
                 if (to->getId() == chunk->getShardId()) {
@@ -716,6 +725,7 @@ public:
                 }
             }
         }
+
         return true;
     }
 

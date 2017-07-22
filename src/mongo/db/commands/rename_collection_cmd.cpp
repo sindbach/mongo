@@ -56,9 +56,9 @@ using std::stringstream;
 
 namespace {
 
-class CmdRenameCollection : public Command {
+class CmdRenameCollection : public ErrmsgCommandDeprecated {
 public:
-    CmdRenameCollection() : Command("renameCollection") {}
+    CmdRenameCollection() : ErrmsgCommandDeprecated("renameCollection") {}
     virtual bool adminOnly() const {
         return true;
     }
@@ -85,11 +85,11 @@ public:
         }
     }
 
-    virtual bool run(OperationContext* opCtx,
-                     const string& dbname,
-                     const BSONObj& cmdObj,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& dbname,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
         const auto sourceNsElt = cmdObj[getName()];
         const auto targetNsElt = cmdObj["to"];
 

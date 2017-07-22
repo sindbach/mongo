@@ -48,11 +48,11 @@ namespace {
  * support a new-style explain, then the entire explain will fail (i.e. new-style
  * explains cannot be used in multiversion clusters).
  */
-class ClusterExplainCmd : public Command {
+class ClusterExplainCmd : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterExplainCmd);
 
 public:
-    ClusterExplainCmd() : Command("explain") {}
+    ClusterExplainCmd() : BasicCommand("explain") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -102,13 +102,13 @@ public:
             return Status(ErrorCodes::CommandNotFound, ss);
         }
 
-        return commToExplain->checkAuthForOperation(opCtx, dbname, explainObj);
+        return commToExplain->checkAuthForRequest(
+            opCtx, OpMsgRequest::fromDBAndBody(dbname, std::move(explainObj)));
     }
 
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbName,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         auto verbosity = ExplainOptions::parseCmdBSON(cmdObj);
         if (!verbosity.isOK()) {

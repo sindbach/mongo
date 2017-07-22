@@ -58,10 +58,10 @@ namespace {
  *   _configsvrSetFeatureCompatibilityVersion: <string version>
  * }
  */
-class ConfigSvrSetFeatureCompatibilityVersionCommand : public Command {
+class ConfigSvrSetFeatureCompatibilityVersionCommand : public BasicCommand {
 public:
     ConfigSvrSetFeatureCompatibilityVersionCommand()
-        : Command("_configsvrSetFeatureCompatibilityVersion") {}
+        : BasicCommand("_configsvrSetFeatureCompatibilityVersion") {}
 
     void help(std::stringstream& help) const override {
         help << "Internal command, which is exported by the sharding config server. Do not call "
@@ -94,7 +94,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& unusedDbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         const auto version = uassertStatusOK(
             FeatureCompatibilityVersionCommandParser::extractVersionFromCommand(getName(), cmdObj));
@@ -111,7 +110,7 @@ public:
         }
 
         // Forward to all shards.
-        uassertStatusOK(Grid::get(opCtx)->catalogManager()->setFeatureCompatibilityVersionOnShards(
+        uassertStatusOK(ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
             opCtx, version));
 
         // On success, set featureCompatibilityVersion on self.

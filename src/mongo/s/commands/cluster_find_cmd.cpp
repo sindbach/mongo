@@ -54,11 +54,11 @@ const char kTermField[] = "term";
 /**
  * Implements the find command on mongos.
  */
-class ClusterFindCmd : public Command {
+class ClusterFindCmd : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterFindCmd);
 
 public:
-    ClusterFindCmd() : Command("find") {}
+    ClusterFindCmd() : BasicCommand("find") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -152,7 +152,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) final {
         // We count find command as a query op.
         globalOpCounters.gotQuery();

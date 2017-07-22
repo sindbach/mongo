@@ -45,9 +45,9 @@ namespace mongo {
 
 using std::string;
 
-class RepairCursorCmd : public Command {
+class RepairCursorCmd : public BasicCommand {
 public:
-    RepairCursorCmd() : Command("repairCursor") {}
+    RepairCursorCmd() : BasicCommand("repairCursor") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -70,7 +70,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         NamespaceString ns(parseNs(dbname, cmdObj));
 

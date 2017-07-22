@@ -39,9 +39,9 @@
 namespace mongo {
 namespace {
 
-class ListShardsCmd : public Command {
+class ListShardsCmd : public BasicCommand {
 public:
-    ListShardsCmd() : Command("listShards", "listshards") {}
+    ListShardsCmd() : BasicCommand("listShards", "listshards") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -71,10 +71,9 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
-        auto shardsStatus = grid.catalogClient(opCtx)->getAllShards(
-            opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
+        auto shardsStatus =
+            grid.catalogClient()->getAllShards(opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
         if (!shardsStatus.isOK()) {
             return appendCommandStatus(result, shardsStatus.getStatus());
         }

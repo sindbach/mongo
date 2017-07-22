@@ -54,9 +54,7 @@ TEST(BatchedUpdateRequest, Basic) {
                            << BatchedUpdateDocument::upsert(false)));
 
     BSONObj origUpdateRequestObj = BSON(
-        BatchedUpdateRequest::collName("test") << BatchedUpdateRequest::updates() << updateArray
-                                               << BatchedUpdateRequest::writeConcern(BSON("w" << 1))
-                                               << BatchedUpdateRequest::ordered(true));
+        BatchedUpdateRequest::collName("test") << BatchedUpdateRequest::updates() << updateArray);
 
     for (auto docSeq : {false, true}) {
         BatchedUpdateRequest request;
@@ -146,6 +144,8 @@ TEST(BatchedUpdateRequest, CollationFieldParsesFromBSONCorrectly) {
     BSONArray updateArray =
         BSON_ARRAY(BSON(BatchedUpdateDocument::query(BSON("a" << 1))
                         << BatchedUpdateDocument::updateExpr(BSON("$set" << BSON("a" << 2)))
+                        << BatchedUpdateDocument::multi(false)
+                        << BatchedUpdateDocument::upsert(false)
                         << BatchedUpdateDocument::collation(BSON("locale"
                                                                  << "en_US"))));
 
@@ -212,6 +212,8 @@ TEST(BatchedUpdateRequest, ArrayFiltersFieldParsesFromBSONCorrectly) {
     BSONArray updateArray =
         BSON_ARRAY(BSON(BatchedUpdateDocument::query(BSON("a" << 1))
                         << BatchedUpdateDocument::updateExpr(BSON("$set" << BSON("a" << 2)))
+                        << BatchedUpdateDocument::multi(false)
+                        << BatchedUpdateDocument::upsert(false)
                         << BatchedUpdateDocument::arrayFilters(BSON_ARRAY(BSON("i" << 5)))));
 
     BSONObj origUpdateRequestObj = BSON(

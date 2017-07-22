@@ -41,6 +41,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_request.h"
 #include "mongo/db/repl/oplog.h"
@@ -56,7 +57,7 @@
 #include "mongo/s/catalog/dist_lock_catalog_impl.h"
 #include "mongo/s/catalog/replset_dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
-#include "mongo/s/catalog/sharding_catalog_manager_impl.h"
+#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
@@ -73,7 +74,6 @@
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/set_shard_version_request.h"
 #include "mongo/s/shard_id.h"
-#include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/clock_source_mock.h"
@@ -101,19 +101,43 @@ ConfigServerTestFixture::~ConfigServerTestFixture() = default;
 
 void ConfigServerTestFixture::setUp() {
     ShardingMongodTestFixture::setUp();
+
     // TODO: SERVER-26919 set the flag on the mock repl coordinator just for the window where it
     // actually needs to bypass the op observer.
     replicationCoordinator()->alwaysAllowWrites(true);
 
     // Initialize sharding components as a config server.
     serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+
+    {
+        // The catalog manager requires a special executor used for operations during addShard.
+        auto specialNet(stdx::make_unique<executor::NetworkInterfaceMock>());
+        _mockNetworkForAddShard = specialNet.get();
+
+        auto specialExec(makeThreadPoolTestExecutor(std::move(specialNet)));
+        _executorForAddShard = specialExec.get();
+
+        ShardingCatalogManager::create(getServiceContext(), std::move(specialExec));
+    }
+
+    _addShardNetworkTestEnv =
+        stdx::make_unique<NetworkTestEnv>(_executorForAddShard, _mockNetworkForAddShard);
+
     uassertStatusOK(initializeGlobalShardingStateForMongodForTest(ConnectionString::forLocal()));
 }
 
-std::unique_ptr<DistLockCatalog> ConfigServerTestFixture::makeDistLockCatalog(
-    ShardRegistry* shardRegistry) {
-    invariant(shardRegistry);
-    return stdx::make_unique<DistLockCatalogImpl>(shardRegistry);
+void ConfigServerTestFixture::tearDown() {
+    _addShardNetworkTestEnv = nullptr;
+    _executorForAddShard = nullptr;
+    _mockNetworkForAddShard = nullptr;
+
+    ShardingCatalogManager::clearForTests(getServiceContext());
+
+    ShardingMongodTestFixture::tearDown();
+}
+
+std::unique_ptr<DistLockCatalog> ConfigServerTestFixture::makeDistLockCatalog() {
+    return stdx::make_unique<DistLockCatalogImpl>();
 }
 
 std::unique_ptr<DistLockManager> ConfigServerTestFixture::makeDistLockManager(
@@ -131,21 +155,6 @@ std::unique_ptr<ShardingCatalogClient> ConfigServerTestFixture::makeShardingCata
     std::unique_ptr<DistLockManager> distLockManager) {
     invariant(distLockManager);
     return stdx::make_unique<ShardingCatalogClientImpl>(std::move(distLockManager));
-}
-
-std::unique_ptr<ShardingCatalogManager> ConfigServerTestFixture::makeShardingCatalogManager(
-    ShardingCatalogClient* catalogClient) {
-    invariant(catalogClient);
-
-    // The catalog manager requires a special executor used for operations during addShard.
-    auto specialNet(stdx::make_unique<executor::NetworkInterfaceMock>());
-    _mockNetworkForAddShard = specialNet.get();
-    auto specialExec = makeThreadPoolTestExecutor(std::move(specialNet));
-    _executorForAddShard = specialExec.get();
-    _addShardNetworkTestEnv =
-        stdx::make_unique<NetworkTestEnv>(specialExec.get(), _mockNetworkForAddShard);
-
-    return stdx::make_unique<ShardingCatalogManagerImpl>(std::move(specialExec));
 }
 
 std::unique_ptr<CatalogCacheLoader> ConfigServerTestFixture::makeCatalogCacheLoader() {
@@ -187,21 +196,16 @@ std::shared_ptr<Shard> ConfigServerTestFixture::getConfigShard() const {
 Status ConfigServerTestFixture::insertToConfigCollection(OperationContext* opCtx,
                                                          const NamespaceString& ns,
                                                          const BSONObj& doc) {
-    auto insert(stdx::make_unique<BatchedInsertRequest>());
-    insert->addToDocuments(doc);
-
-    BatchedCommandRequest request(insert.release());
-    request.setNS(ns);
-
-    auto config = getConfigShard();
-    invariant(config);
-
-    auto insertResponse = config->runCommand(opCtx,
-                                             kReadPref,
-                                             ns.db().toString(),
-                                             request.toBSON(),
-                                             Shard::kDefaultConfigCommandTimeout,
-                                             Shard::RetryPolicy::kNoRetry);
+    auto insertResponse = getConfigShard()->runCommand(opCtx,
+                                                       kReadPref,
+                                                       ns.db().toString(),
+                                                       [&]() {
+                                                           write_ops::Insert insertOp(ns);
+                                                           insertOp.setDocuments({doc});
+                                                           return insertOp.toBSON({});
+                                                       }(),
+                                                       Shard::kDefaultConfigCommandTimeout,
+                                                       Shard::RetryPolicy::kNoRetry);
 
     BatchedCommandResponse batchResponse;
     auto status = Shard::CommandResponse::processBatchWriteResponse(insertResponse, &batchResponse);

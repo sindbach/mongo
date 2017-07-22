@@ -21,40 +21,28 @@ global:
   cpp_namespace: "mongo"
   cpp_includes:
     - "mongo/db/logical_session_id.h"
+    - "mongo/db/signed_logical_session_id.h"
 
 imports:
   - "mongo/idl/basic_types.idl"
-  - "mongo/db/logical_session_id.idl"
+  - "mongo/db/signed_logical_session_id.idl"
 
 types:
-
-  LogicalSessionIdIDL:
-    description: "IDL representation of the LogicalSessionId cpp type"
+  SignedLogicalSessionIdIDL:
+    description: "IDL representation of the SignedLogicalSessionId cpp type"
     bson_serialization_type: object
-    cpp_type: "mongo::LogicalSessionId"
-    deserializer: "mongo::LogicalSessionId::parse"
-    serializer: "mongo::LogicalSessionId::toBSON"
+    cpp_type: "mongo::SignedLogicalSessionId"
+    deserializer: "mongo::SignedLogicalSessionId::parse"
+    serializer: "mongo::SignedLogicalSessionId::toBSON"
 
 structs:
-
-  session_owner:
-    description: "A sub-document of a session record with owner info"
-    fields:
-      userName: string
-      dbName: string
-      userId:
-        type: objectid
-        optional: true
 
   logical_session_record:
     description: "A struct representing a LogicalSessionRecord"
     fields:
-      lsid:
+      signedLsid:
         description: "The id for this session record"
-        type: LogicalSessionIdIDL
+        type: SignedLogicalSessionIdIDL
       lastUse:
         description: "The time at which this record was last used. Note: the date expressed in this in-memory record object may not match the date on the authoritative record for this session, which is stored in the sessions collection."
         type: date
-      owner:
-        description: "The username and id of the User who owns this session."
-        type: session_owner

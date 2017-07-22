@@ -44,6 +44,7 @@
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/move_timing_helper.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/migration_secondary_throttle_options.h"
@@ -78,9 +79,9 @@ MONGO_FP_DECLARE(moveChunkHangAtStep5);
 MONGO_FP_DECLARE(moveChunkHangAtStep6);
 MONGO_FP_DECLARE(moveChunkHangAtStep7);
 
-class MoveChunkCommand : public Command {
+class MoveChunkCommand : public BasicCommand {
 public:
-    MoveChunkCommand() : Command("moveChunk") {}
+    MoveChunkCommand() : BasicCommand("moveChunk") {}
 
     void help(std::stringstream& help) const override {
         help << "should not be calling this directly";
@@ -115,7 +116,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) override {
         auto shardingState = ShardingState::get(opCtx);
         uassertStatusOK(shardingState->canAcceptShardedCommands());
@@ -162,6 +162,17 @@ public:
         }
 
         uassertStatusOK(status);
+
+        if (moveChunkRequest.getWaitForDelete()) {
+            // Ensure we capture the latest opTime in the system, since range deletion happens
+            // asynchronously with a different OperationContext. This must be done after the above
+            // join, because each caller must set the opTime to wait for writeConcern for on its own
+            // OperationContext.
+            // TODO (SERVER-30183): If this moveChunk joined an active moveChunk that did not have
+            // waitForDelete=true, the captured opTime may not reflect all the deletes.
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+        }
+
         return true;
     }
 
@@ -228,18 +239,52 @@ private:
         moveTimingHelper.done(6);
         MONGO_FAIL_POINT_PAUSE_WHILE_SET(moveChunkHangAtStep6);
 
-        auto range = ChunkRange(moveChunkRequest.getMinKey(), moveChunkRequest.getMaxKey());
-        if (moveChunkRequest.getWaitForDelete()) {
-            CollectionShardingState::waitForClean(
-                opCtx, moveChunkRequest.getNss(), moveChunkRequest.getVersionEpoch(), range)
-                .transitional_ignore();
-            // Ensure that wait for write concern for the chunk cleanup will include
-            // the deletes performed by the range deleter thread.
-            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
-        } else {
-            log() << "Leaving cleanup of " << moveChunkRequest.getNss().ns() << " range "
-                  << redact(range.toString()) << " to complete in background";
+        auto nss = moveChunkRequest.getNss();
+        const auto range = ChunkRange(moveChunkRequest.getMinKey(), moveChunkRequest.getMaxKey());
+
+        // Wait for the metadata update to be persisted before scheduling the range deletion.
+        //
+        // This is necessary to prevent a race on the secondary because both metadata persistence
+        // and range deletion is done asynchronously and we must prevent the data deletion from
+        // being propagated before the metadata update.
+        ChunkVersion collectionVersion = [&]() {
+            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+            auto metadata = CollectionShardingState::get(opCtx, nss)->getMetadata();
+            uassert(ErrorCodes::NamespaceNotSharded,
+                    str::stream() << "Chunk move failed because collection '" << nss.ns()
+                                  << "' is no longer sharded.",
+                    metadata);
+            return metadata->getCollVersion();
+        }();
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->waitForCollectionVersion(
+            opCtx, nss, collectionVersion));
+
+        // Now schedule the range deletion clean up.
+        CollectionShardingState::CleanupNotification notification;
+        {
+            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+
+            auto const now = CollectionShardingState::kNow,
+                       later = CollectionShardingState::kDelayed;
+            auto whenToClean = moveChunkRequest.getWaitForDelete() ? now : later;
+            notification =
+                CollectionShardingState::get(opCtx, nss)->cleanUpRange(range, whenToClean);
         }
+
+        // Check for immediate failure on scheduling range deletion.
+        if (notification.ready() && !notification.waitStatus(opCtx).isOK()) {
+            warning() << "Failed to initiate cleanup of " << nss.ns() << " range "
+                      << redact(range.toString())
+                      << " due to: " << redact(notification.waitStatus(opCtx));
+        } else if (moveChunkRequest.getWaitForDelete()) {
+            log() << "Waiting for cleanup of " << nss.ns() << " range " << redact(range.toString());
+            uassertStatusOK(notification.waitStatus(opCtx));
+        } else {
+            log() << "Leaving cleanup of " << nss.ns() << " range " << redact(range.toString())
+                  << " to complete in background";
+            notification.abandon();
+        }
+
         moveTimingHelper.done(7);
         MONGO_FAIL_POINT_PAUSE_WHILE_SET(moveChunkHangAtStep7);
     }

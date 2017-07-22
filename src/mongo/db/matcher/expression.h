@@ -98,8 +98,16 @@ public:
         INTERNAL_2D_POINT_IN_ANNULUS,
 
         // JSON Schema expressions.
-        INTERNAL_SCHEMA_MIN_ITEMS,
+        INTERNAL_SCHEMA_COND,
         INTERNAL_SCHEMA_MAX_ITEMS,
+        INTERNAL_SCHEMA_MIN_ITEMS,
+        INTERNAL_SCHEMA_MAX_PROPERTIES,
+        INTERNAL_SCHEMA_MIN_PROPERTIES,
+        INTERNAL_SCHEMA_OBJECT_MATCH,
+        INTERNAL_SCHEMA_UNIQUE_ITEMS,
+        INTERNAL_SCHEMA_XOR,
+        INTERNAL_SCHEMA_MIN_LENGTH,
+        INTERNAL_SCHEMA_MAX_LENGTH,
     };
 
     MatchExpression(MatchType type);
@@ -149,47 +157,19 @@ public:
         return StringData();
     }
 
-    /**
-     * Notes on structure:
-     * isLogical, isArray, and isLeaf define three partitions of all possible operators.
-     *
-     * isLogical can have children and its children can be arbitrary operators.
-     *
-     * isArray can have children and its children are predicates over one field.
-     *
-     * isLeaf is a predicate over one field.
-     */
+    enum class MatchCategory {
+        // Expressions that are leaves on the AST, these do not have any children.
+        kLeaf,
+        // Logical Expressions such as $and, $or, etc. that do not have a path and may have
+        // one or more children.
+        kLogical,
+        // Expressions that operate on arrays only.
+        kArrayMatching,
+        // Expressions that don't fall into any particular bucket.
+        kOther,
+    };
 
-    /**
-     * Is this node a logical operator?  All of these inherit from ListOfMatchExpression.
-     * AND, OR, NOT, NOR.
-     */
-    bool isLogical() const {
-        return AND == _matchType || OR == _matchType || NOT == _matchType || NOR == _matchType;
-    }
-
-    /**
-     * Is this node an array operator?  Array operators have multiple clauses but operate on one
-     * field.
-     *
-     * ELEM_MATCH_VALUE, ELEM_MATCH_OBJECT, SIZE (ArrayMatchingMatchExpression)
-     */
-    bool isArray() const {
-        return SIZE == _matchType || ELEM_MATCH_VALUE == _matchType ||
-            ELEM_MATCH_OBJECT == _matchType;
-    }
-
-    /**
-     * Not-internal nodes, predicates over one field.  Almost all of these inherit from
-     * LeafMatchExpression.
-     *
-     * Exceptions: WHERE, which doesn't have a field.
-     *             TYPE_OPERATOR, which inherits from MatchExpression due to unique array
-     *                            semantics.
-     */
-    bool isLeaf() const {
-        return !isArray() && !isLogical();
-    }
+    virtual MatchCategory getCategory() const = 0;
 
     // XXX: document
     virtual std::unique_ptr<MatchExpression> shallowClone() const = 0;
@@ -307,6 +287,10 @@ public:
 
     virtual bool equivalent(const MatchExpression* other) const {
         return other->matchType() == ALWAYS_FALSE;
+    }
+
+    MatchCategory getCategory() const final {
+        return MatchCategory::kOther;
     }
 
 private:

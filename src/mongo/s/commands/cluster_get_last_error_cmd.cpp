@@ -184,9 +184,9 @@ Status enforceLegacyWriteConcern(OperationContext* opCtx,
 }
 
 
-class GetLastErrorCmd : public Command {
+class GetLastErrorCmd : public BasicCommand {
 public:
-    GetLastErrorCmd() : Command("getLastError", "getlasterror") {}
+    GetLastErrorCmd() : BasicCommand("getLastError", "getlasterror") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -209,7 +209,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         // Mongos GLE - finicky.
         //

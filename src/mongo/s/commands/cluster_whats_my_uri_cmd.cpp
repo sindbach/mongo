@@ -34,9 +34,9 @@
 namespace mongo {
 namespace {
 
-class WhatsMyUriCmd : public Command {
+class WhatsMyUriCmd : public BasicCommand {
 public:
-    WhatsMyUriCmd() : Command("whatsmyuri") {}
+    WhatsMyUriCmd() : BasicCommand("whatsmyuri") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -60,7 +60,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         result << "you" << cc().getRemote().toString();
         return true;

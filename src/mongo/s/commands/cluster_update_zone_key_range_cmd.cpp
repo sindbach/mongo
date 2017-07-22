@@ -68,9 +68,9 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
  *   zone: <string zone|null>,
  * }
  */
-class UpdateZoneKeyRangeCmd : public Command {
+class UpdateZoneKeyRangeCmd : public BasicCommand {
 public:
-    UpdateZoneKeyRangeCmd() : Command("updateZoneKeyRange", "updatezonekeyRange") {}
+    UpdateZoneKeyRangeCmd() : BasicCommand("updateZoneKeyRange", "updatezonekeyRange") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -121,7 +121,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         auto parsedRequest =
             uassertStatusOK(UpdateZoneKeyRangeRequest::parseFromMongosCommand(cmdObj));

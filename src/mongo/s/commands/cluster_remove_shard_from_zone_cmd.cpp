@@ -65,9 +65,9 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
  *   zone: <string zoneName>
  * }
  */
-class RemoveShardFromZoneCmd : public Command {
+class RemoveShardFromZoneCmd : public BasicCommand {
 public:
-    RemoveShardFromZoneCmd() : Command("removeShardFromZone", "removeshardfromzone") {}
+    RemoveShardFromZoneCmd() : BasicCommand("removeShardFromZone", "removeshardfromzone") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -106,7 +106,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         auto parsedRequest =
             uassertStatusOK(RemoveShardFromZoneRequest::parseFromMongosCommand(cmdObj));

@@ -16,11 +16,11 @@ env.Library(
         'batched_update_request.cpp',
         'batched_upsert_detail.cpp',
         'write_error_detail.cpp',
-        env.Idlc('write_ops.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/common',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
         '$BUILD_DIR/mongo/db/repl/optime',
         '$BUILD_DIR/mongo/s/common',
     ],
@@ -45,7 +45,6 @@ env.Library(
 env.Library(
     target='cluster_write_op_conversion',
     source=[
-        'batch_upconvert.cpp',
         'batch_downconvert.cpp',
     ],
     LIBDEPS=[
@@ -88,7 +87,6 @@ env.CppUnitTest(
 env.CppUnitTest(
     target='cluster_write_op_conversion_test',
     source=[
-        'batch_upconvert_test.cpp',
         'batch_downconvert_test.cpp',
     ],
     LIBDEPS=[

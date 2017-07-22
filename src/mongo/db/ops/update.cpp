@@ -86,7 +86,7 @@ UpdateResult update(OperationContext* opCtx, Database* db, const UpdateRequest& 
         invariant(locker->isW() ||
                   locker->isLockHeldForMode(ResourceId(RESOURCE_DATABASE, nsString.db()), MODE_X));
 
-        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+        writeConflictRetry(opCtx, "createCollection", nsString.ns(), [&] {
             Lock::DBLock lk(opCtx, nsString.db(), MODE_X);
 
             const bool userInitiatedWritesAndNotPrimary = opCtx->writesAreReplicated() &&
@@ -102,8 +102,7 @@ UpdateResult update(OperationContext* opCtx, Database* db, const UpdateRequest& 
             collection = db->createCollection(opCtx, nsString.ns(), CollectionOptions());
             invariant(collection);
             wuow.commit();
-        }
-        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "createCollection", nsString.ns());
+        });
     }
 
     // Parse the update, get an executor for it, run the executor, get stats out.
@@ -136,7 +135,14 @@ BSONObj applyUpdateOperators(const BSONObj& from, const BSONObj& operators) {
     }
 
     mutablebson::Document doc(from, mutablebson::Document::kInPlaceDisabled);
-    status = driver.update(StringData(), &doc);
+
+    // The original document can be empty because it is only needed for validation of immutable
+    // paths.
+    const BSONObj emptyOriginal;
+    const bool validateForStorage = false;
+    const FieldRefSet emptyImmutablePaths;
+    status =
+        driver.update(StringData(), emptyOriginal, &doc, validateForStorage, emptyImmutablePaths);
     if (!status.isOK()) {
         uasserted(16839, status.reason());
     }

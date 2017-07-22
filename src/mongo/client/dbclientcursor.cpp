@@ -62,23 +62,17 @@ Message assembleCommandRequest(DBClientWithCommands* cli,
                                StringData database,
                                int legacyQueryOptions,
                                BSONObj legacyQuery) {
-    BSONObj upconvertedCommand;
-    BSONObj upconvertedMetadata;
-
-    std::tie(upconvertedCommand, upconvertedMetadata) =
-        rpc::upconvertRequestMetadata(std::move(legacyQuery), legacyQueryOptions);
+    auto request = rpc::upconvertRequest(database, std::move(legacyQuery), legacyQueryOptions);
 
     if (cli->getRequestMetadataWriter()) {
-        BSONObjBuilder metadataBob(std::move(upconvertedMetadata));
-        uassertStatusOK(cli->getRequestMetadataWriter()(
-            (haveClient() ? cc().getOperationContext() : nullptr), &metadataBob));
-        upconvertedMetadata = metadataBob.obj();
+        BSONObjBuilder bodyBob(std::move(request.body));
+        auto opCtx = (haveClient() ? cc().getOperationContext() : nullptr);
+        uassertStatusOK(cli->getRequestMetadataWriter()(opCtx, &bodyBob));
+        request.body = bodyBob.obj();
     }
 
     return rpc::messageFromOpMsgRequest(
-        cli->getClientRPCProtocols(),
-        cli->getServerRPCProtocols(),
-        OpMsgRequest::fromDBAndBody(database, std::move(upconvertedCommand), upconvertedMetadata));
+        cli->getClientRPCProtocols(), cli->getServerRPCProtocols(), std::move(request));
 }
 
 }  // namespace
@@ -234,9 +228,10 @@ void DBClientCursor::commandDataReceived(const Message& reply) {
         wasError = true;
     }
 
+    auto opCtx = haveClient() ? cc().getOperationContext() : nullptr;
     if (_client->getReplyMetadataReader()) {
-        uassertStatusOK(_client->getReplyMetadataReader()(commandReply->getMetadata(),
-                                                          _client->getServerAddress()));
+        uassertStatusOK(_client->getReplyMetadataReader()(
+            opCtx, commandReply->getMetadata(), _client->getServerAddress()));
     }
 
     batch.objs.push_back(commandReply->getCommandReply().getOwned());

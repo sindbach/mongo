@@ -54,9 +54,9 @@ using std::stringstream;
 /**
  * Implements the MongoD side of the count command.
  */
-class CmdCount : public Command {
+class CmdCount : public BasicCommand {
 public:
-    CmdCount() : Command("count") {}
+    CmdCount() : BasicCommand("count") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -158,7 +158,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         const bool isExplain = false;
         auto request = CountRequest::parseFromBSON(dbname, cmdObj, isExplain);
@@ -177,16 +176,15 @@ public:
                 return appendCommandStatus(result, viewAggregation.getStatus());
             }
 
-            BSONObjBuilder aggResult;
-            (void)Command::findCommand("aggregate")
-                ->run(opCtx, dbname, viewAggregation.getValue(), errmsg, aggResult);
+            BSONObj aggResult = Command::runCommandDirectly(
+                opCtx, OpMsgRequest::fromDBAndBody(dbname, std::move(viewAggregation.getValue())));
 
-            if (ResolvedView::isResolvedViewErrorResponse(aggResult.asTempObj())) {
-                result.appendElements(aggResult.obj());
+            if (ResolvedView::isResolvedViewErrorResponse(aggResult)) {
+                result.appendElements(aggResult);
                 return false;
             }
 
-            ViewResponseFormatter formatter(aggResult.obj());
+            ViewResponseFormatter formatter(aggResult);
             Status formatStatus = formatter.appendAsCountResponse(&result);
             if (!formatStatus.isOK()) {
                 return appendCommandStatus(result, formatStatus);

@@ -41,6 +41,7 @@
 #include "mongo/rpc/metadata/logical_time_metadata.h"
 #include "mongo/rpc/metadata/sharding_metadata.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
+#include "mongo/util/string_map.h"
 
 namespace mongo {
 namespace rpc {
@@ -95,10 +96,10 @@ void readRequestMetadata(OperationContext* opCtx, const BSONObj& metadataObj) {
             uassertStatusOK(rpc::LogicalTimeMetadata::readFromMetadata(logicalTimeElem));
 
         auto& signedTime = logicalTimeMetadata.getSignedTime();
-        // LogicalTimeMetadata is default constructed if no logical time metadata was sent, so a
+        // LogicalTimeMetadata is default constructed if no cluster time metadata was sent, so a
         // default constructed SignedLogicalTime should be ignored.
         if (signedTime.getTime() != LogicalTime::kUninitialized) {
-            // Logical times are only sent by sharding aware mongod servers, so this point is only
+            // Cluster times are only sent by sharding aware mongod servers, so this point is only
             // reached in sharded clusters.
             if (serverGlobalParams.featureCompatibility.version.load() !=
                 ServerGlobalParams::FeatureCompatibility::Version::k34) {
@@ -119,15 +120,31 @@ void readRequestMetadata(OperationContext* opCtx, const BSONObj& metadataObj) {
     }
 }
 
-CommandAndMetadata upconvertRequestMetadata(BSONObj legacyCmdObj, int queryFlags) {
-    // We can reuse the same metadata BOB for every upconvert call, but we need to keep
-    // making new command BOBs as each metadata bob will need to remove fields. We can not use
-    // mutablebson here because the ReadPreference upconvert routine performs
-    // manipulations (replacing a root with its child) that mutablebson doesn't
-    // support.
+namespace {
+const auto docSequenceFieldsForCommands = StringMap<std::string>{
+    {"insert", "documents"},  //
+    {"update", "updates"},
+    {"delete", "deletes"},
+};
+
+bool isArrayOfObjects(BSONElement array) {
+    if (array.type() != Array)
+        return false;
+
+    for (auto elem : array.Obj()) {
+        if (elem.type() != Object)
+            return false;
+    }
+
+    return true;
+}
+}
+
+OpMsgRequest upconvertRequest(StringData db, BSONObj cmdObj, int queryFlags) {
+    cmdObj = cmdObj.getOwned();  // Usually this is a no-op since it is already owned.
 
     auto readPrefContainer = BSONObj();
-    const StringData firstFieldName = legacyCmdObj.firstElementFieldName();
+    const StringData firstFieldName = cmdObj.firstElementFieldName();
     if (firstFieldName == "$query" || firstFieldName == "query") {
         // Commands sent over OP_QUERY specify read preference by putting it at the top level and
         // putting the command in a nested field called either query or $query.
@@ -136,35 +153,47 @@ CommandAndMetadata upconvertRequestMetadata(BSONObj legacyCmdObj, int queryFlags
         uassert(ErrorCodes::InvalidOptions,
                 "cannot use $maxTimeMS query option with commands; use maxTimeMS command option "
                 "instead",
-                !legacyCmdObj.hasField("$maxTimeMS"));
-        readPrefContainer = legacyCmdObj;
-        legacyCmdObj = legacyCmdObj.firstElement().Obj().getOwned();
-    } else if (auto queryOptions = legacyCmdObj["$queryOptions"]) {
+                !cmdObj.hasField("$maxTimeMS"));
+
+        if (auto readPref = cmdObj["$readPreference"])
+            readPrefContainer = readPref.wrap();
+
+        cmdObj = cmdObj.firstElement().Obj().shareOwnershipWith(cmdObj);
+    } else if (auto queryOptions = cmdObj["$queryOptions"]) {
         // Mongos rewrites commands with $readPreference to put it in a field nested inside of
         // $queryOptions. Its command implementations often forward commands in that format to
         // shards. This function is responsible for rewriting it to a format that the shards
         // understand.
-        readPrefContainer = queryOptions.Obj().getOwned();
-        legacyCmdObj = legacyCmdObj.removeField("$queryOptions");
+        readPrefContainer = queryOptions.Obj().shareOwnershipWith(cmdObj);
+        cmdObj = cmdObj.removeField("$queryOptions");
     }
 
-    BSONObjBuilder metadataBob;
-    if (auto readPref = readPrefContainer["$readPreference"]) {
-        metadataBob.append(readPref);
-    } else if (queryFlags & QueryOption_SlaveOk) {
-        ReadPreferenceSetting(ReadPreference::SecondaryPreferred).toContainingBSON(&metadataBob);
+    if (!readPrefContainer.isEmpty()) {
+        cmdObj = BSONObjBuilder(std::move(cmdObj)).appendElements(readPrefContainer).obj();
+    } else if (!cmdObj.hasField("$readPreference") && (queryFlags & QueryOption_SlaveOk)) {
+        BSONObjBuilder bodyBuilder(std::move(cmdObj));
+        ReadPreferenceSetting(ReadPreference::SecondaryPreferred).toContainingBSON(&bodyBuilder);
+        cmdObj = bodyBuilder.obj();
     }
 
-    BSONObjBuilder logicalTimeCommandBob;
-    for (auto elem : legacyCmdObj) {
-        if (elem.fieldNameStringData() == LogicalTimeMetadata::fieldName()) {
-            metadataBob.append(elem);
-        } else {
-            logicalTimeCommandBob.append(elem);
-        }
-    }
+    // Try to move supported array fields into document sequences.
+    auto docSequenceIt = docSequenceFieldsForCommands.find(cmdObj.firstElementFieldName());
+    auto docSequenceElem = docSequenceIt == docSequenceFieldsForCommands.end()
+        ? BSONElement()
+        : cmdObj[docSequenceIt->second];
+    if (!isArrayOfObjects(docSequenceElem))
+        return OpMsgRequest::fromDBAndBody(db, std::move(cmdObj));
 
-    return std::make_tuple(logicalTimeCommandBob.obj(), metadataBob.obj());
+    auto docSequenceName = docSequenceElem.fieldNameStringData();
+
+    // Note: removing field before adding "$db" to avoid the need to copy the potentially large
+    // array.
+    auto out = OpMsgRequest::fromDBAndBody(db, cmdObj.removeField(docSequenceName));
+    out.sequences.push_back({docSequenceName.toString()});
+    for (auto elem : docSequenceElem.Obj()) {
+        out.sequences[0].objs.push_back(elem.Obj().shareOwnershipWith(cmdObj));
+    }
+    return out;
 }
 
 }  // namespace rpc

@@ -171,11 +171,34 @@ const char* encodeMatchType(MatchExpression::MatchType mt) {
         case MatchExpression::BITS_ANY_CLEAR:
             return "yc";
             break;
+        case MatchExpression::INTERNAL_SCHEMA_COND:
+            return "internalSchemaCond";
+            break;
         case MatchExpression::INTERNAL_SCHEMA_MIN_ITEMS:
             return "internalSchemaMinItems";
             break;
         case MatchExpression::INTERNAL_SCHEMA_MAX_ITEMS:
             return "internalSchemaMaxItems";
+            break;
+        case MatchExpression::INTERNAL_SCHEMA_UNIQUE_ITEMS:
+            return "internalSchemaUniqueItems";
+            break;
+        case MatchExpression::INTERNAL_SCHEMA_XOR:
+            return "internalSchemaXor";
+            break;
+        case MatchExpression::INTERNAL_SCHEMA_OBJECT_MATCH:
+            return "internalSchemaObjectMatch";
+        case MatchExpression::INTERNAL_SCHEMA_MIN_LENGTH:
+            return "internalSchemaMinLength";
+            break;
+        case MatchExpression::INTERNAL_SCHEMA_MAX_LENGTH:
+            return "internalSchemaMaxLength";
+            break;
+        case MatchExpression::INTERNAL_SCHEMA_MIN_PROPERTIES:
+            return "internalSchemaMinProperties";
+            break;
+        case MatchExpression::INTERNAL_SCHEMA_MAX_PROPERTIES:
+            return "internalSchemaMaxProperties";
             break;
         default:
             MONGO_UNREACHABLE;

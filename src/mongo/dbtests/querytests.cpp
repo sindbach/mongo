@@ -109,9 +109,11 @@ protected:
             oid.init();
             b.appendOID("_id", &oid);
             b.appendElements(o);
-            _collection->insertDocument(&_opCtx, b.obj(), nullOpDebug, false).transitional_ignore();
+            _collection->insertDocument(&_opCtx, InsertStatement(b.obj()), nullOpDebug, false)
+                .transitional_ignore();
         } else {
-            _collection->insertDocument(&_opCtx, o, nullOpDebug, false).transitional_ignore();
+            _collection->insertDocument(&_opCtx, InsertStatement(o), nullOpDebug, false)
+                .transitional_ignore();
         }
         wunit.commit();
     }
@@ -163,10 +165,9 @@ public:
                 .value());
 
         // Check findOne() returning object, requiring indexed scan without index.
-        ASSERT_THROWS(Helpers::findOne(&_opCtx, _collection, query, ret, true),
-                      MsgAssertionException);
+        ASSERT_THROWS(Helpers::findOne(&_opCtx, _collection, query, ret, true), UserException);
         // Check findOne() returning location, requiring indexed scan without index.
-        ASSERT_THROWS(Helpers::findOne(&_opCtx, _collection, query, true), MsgAssertionException);
+        ASSERT_THROWS(Helpers::findOne(&_opCtx, _collection, query, true), UserException);
 
         addIndex(IndexSpec().addKey("b").unique(false));
 

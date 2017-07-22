@@ -1,5 +1,3 @@
-// expression_leaf.h
-
 /**
  *    Copyright (C) 2013 10gen Inc.
  *
@@ -33,6 +31,7 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_path.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/unordered_map.h"
 
@@ -44,38 +43,15 @@ namespace mongo {
 
 class CollatorInterface;
 
-/**
- * This file contains leaves in the parse tree that are not array-based.
- *
- * LeafMatchExpression: REGEX MOD EXISTS MATCH_IN
- * ComparisonMatchExpression: EQ LTE LT GT GTE
- * MatchExpression: TYPE_OPERATOR
- */
-
-/**
- * Many operators subclass from this:
- * REGEX, MOD, EXISTS, IN
- * Everything that inherits from ComparisonMatchExpression.
- */
-class LeafMatchExpression : public MatchExpression {
+class LeafMatchExpression : public PathMatchExpression {
 public:
-    LeafMatchExpression(MatchType matchType) : MatchExpression(matchType) {}
+    LeafMatchExpression(MatchType matchType) : PathMatchExpression(matchType) {}
 
     virtual ~LeafMatchExpression() {}
 
-    virtual bool matches(const MatchableDocument* doc, MatchDetails* details = 0) const;
-
-    virtual bool matchesSingleElement(const BSONElement& e) const = 0;
-
-    virtual const StringData path() const {
-        return _path;
+    MatchCategory getCategory() const final {
+        return MatchCategory::kLeaf;
     }
-
-    Status setPath(StringData path);
-
-private:
-    StringData _path;
-    ElementPath _elementPath;
 };
 
 /**
@@ -134,10 +110,6 @@ protected:
     // Collator used to compare elements. By default, simple binary comparison will be used.
     const CollatorInterface* _collator = nullptr;
 };
-
-//
-// ComparisonMatchExpression inheritors
-//
 
 class EqualityMatchExpression : public ComparisonMatchExpression {
 public:
@@ -208,10 +180,6 @@ public:
         return std::move(e);
     }
 };
-
-//
-// LeafMatchExpression inheritors
-//
 
 class RegexMatchExpression : public LeafMatchExpression {
 public:
@@ -399,27 +367,25 @@ public:
     static const std::string kMatchesAllNumbersAlias;
     static const stdx::unordered_map<std::string, BSONType> typeAliasMap;
 
+    /**
+     * Represents either a particular BSON type, or the "number" type, which is an alias for all
+     * numeric BSON types.
+     */
+    struct Type {
+        Type() = default;
+        /* implicit */ Type(BSONType bsonType) : bsonType(bsonType) {}
+
+        bool allNumbers = false;
+        BSONType bsonType = BSONType::EOO;
+    };
+
     TypeMatchExpression() : LeafMatchExpression(TYPE_OPERATOR) {}
 
-    /**
-     * Initialize as matching against a specific BSONType.
-     *
-     * Returns a non-OK status if 'type' cannot be converted to a valid BSONType.
-     */
-    Status initWithBSONType(StringData path, int type);
-
-    /**
-     * Initialize as matching against all number types (NumberDouble, NumberLong, and NumberInt).
-     */
-    Status initAsMatchingAllNumbers(StringData path);
+    Status init(StringData path, Type type);
 
     std::unique_ptr<MatchExpression> shallowClone() const override {
         std::unique_ptr<TypeMatchExpression> e = stdx::make_unique<TypeMatchExpression>();
-        if (_matchesAllNumbers) {
-            invariantOK(e->initAsMatchingAllNumbers(path()));
-        } else {
-            invariantOK(e->initWithBSONType(path(), _type));
-        }
+        invariantOK(e->init(path(), _type));
         if (getTag()) {
             e->setTag(getTag()->clone());
         }
@@ -434,10 +400,11 @@ public:
 
     bool equivalent(const MatchExpression* other) const override;
 
-    /**
-     * What is the type we're matching against?
-     */
-    BSONType getType() const {
+    BSONType getBSONType() const {
+        return _type.bsonType;
+    }
+
+    Type getType() const {
         return _type;
     }
 
@@ -446,14 +413,13 @@ public:
      * Defaults to false. If this is true, _type is EOO.
      */
     bool matchesAllNumbers() const {
-        return _matchesAllNumbers;
+        return _type.allNumbers;
     }
 
 private:
     bool _matches(StringData path, const MatchableDocument* doc, MatchDetails* details = 0) const;
 
-    bool _matchesAllNumbers = false;
-    BSONType _type = BSONType::EOO;
+    Type _type;
 };
 
 /**

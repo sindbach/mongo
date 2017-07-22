@@ -160,7 +160,7 @@ Mongo.prototype._gossipLogicalTime = function(obj) {
     obj = Object.assign({}, obj);
     const clusterTime = this.getClusterTime();
     if (clusterTime) {
-        obj["$logicalTime"] = clusterTime;
+        obj["$clusterTime"] = clusterTime;
     }
     return obj;
 };
@@ -173,8 +173,8 @@ Mongo.prototype._setLogicalTimeFromReply = function(res) {
     if (res.hasOwnProperty("operationTime")) {
         this.setOperationTime(res["operationTime"]);
     }
-    if (res.hasOwnProperty("$logicalTime")) {
-        this.setClusterTime(res["$logicalTime"]);
+    if (res.hasOwnProperty("$clusterTime")) {
+        this.setClusterTime(res["$clusterTime"]);
     }
 };
 
@@ -534,6 +534,9 @@ Mongo.prototype.unsetWriteConcern = function() {
  * Sets the operationTime.
  */
 Mongo.prototype.setOperationTime = function(operationTime) {
+    if (operationTime === Timestamp(0, 0)) {
+        throw Error("Attempt to set an uninitiated operationTime");
+    }
     if (this._operationTime === undefined || this._operationTime === null ||
         (typeof operationTime === "object" &&
          bsonWoCompare(operationTime, this._operationTime) === 1)) {

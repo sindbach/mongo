@@ -44,11 +44,11 @@ namespace {
  * corresponding to the cursor id passed from the application. In order to generate these results,
  * may issue getMore commands to remote nodes in one or more shards.
  */
-class ClusterGetMoreCmd final : public Command {
+class ClusterGetMoreCmd final : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterGetMoreCmd);
 
 public:
-    ClusterGetMoreCmd() : Command("getMore") {}
+    ClusterGetMoreCmd() : BasicCommand("getMore") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -94,7 +94,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) final {
         // Counted as a getMore, not as a command.
         globalOpCounters.gotGetMore();

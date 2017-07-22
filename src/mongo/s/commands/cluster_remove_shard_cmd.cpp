@@ -50,9 +50,9 @@ using std::vector;
 
 namespace {
 
-class RemoveShardCmd : public Command {
+class RemoveShardCmd : public BasicCommand {
 public:
-    RemoveShardCmd() : Command("removeShard", "removeshard") {}
+    RemoveShardCmd() : BasicCommand("removeShard", "removeshard") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -82,7 +82,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         uassert(ErrorCodes::TypeMismatch,
                 str::stream() << "Field '" << cmdObj.firstElement().fieldName()
@@ -99,7 +98,7 @@ public:
         }
         const auto s = shardStatus.getValue();
 
-        auto catalogClient = grid.catalogClient(opCtx);
+        auto catalogClient = grid.catalogClient();
         StatusWith<ShardDrainingStatus> removeShardResult =
             catalogClient->removeShard(opCtx, s->getId());
         if (!removeShardResult.isOK()) {

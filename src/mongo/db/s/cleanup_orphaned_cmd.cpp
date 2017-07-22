@@ -121,7 +121,7 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
 
         targetRange.emplace(
             ChunkRange(orphanRange->minKey.getOwned(), orphanRange->maxKey.getOwned()));
-        notifn = css->cleanUpRange(*targetRange);
+        notifn = css->cleanUpRange(*targetRange, CollectionShardingState::kNow);
     }
 
     // Sleep waiting for our own deletion. We don't actually care about any others, so there is no
@@ -168,18 +168,15 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
  *      writeConcern: { <writeConcern options> }
  * }
  */
-class CleanupOrphanedCommand : public Command {
+class CleanupOrphanedCommand : public ErrmsgCommandDeprecated {
 public:
-    CleanupOrphanedCommand() : Command("cleanupOrphaned") {}
+    CleanupOrphanedCommand() : ErrmsgCommandDeprecated("cleanupOrphaned") {}
 
     virtual bool slaveOk() const {
         return false;
     }
     virtual bool adminOnly() const {
         return true;
-    }
-    virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) {
-        return false;
     }
 
     virtual Status checkAuthForCommand(Client* client,
@@ -203,11 +200,11 @@ public:
     // Output
     static BSONField<BSONObj> stoppedAtKeyField;
 
-    bool run(OperationContext* opCtx,
-             string const& db,
-             const BSONObj& cmdObj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   string const& db,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         string ns;
         if (!FieldParser::extract(cmdObj, nsField, &ns, &errmsg)) {
             return false;

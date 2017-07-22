@@ -30,7 +30,7 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/s/catalog/sharding_catalog_manager_impl.h"
+#include "mongo/s/catalog/sharding_catalog_manager.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -228,12 +228,12 @@ BSONObj makeCommitChunkApplyOpsCommand(const NamespaceString& nss,
 
 }  // namespace
 
-Status ShardingCatalogManagerImpl::commitChunkSplit(OperationContext* opCtx,
-                                                    const NamespaceString& ns,
-                                                    const OID& requestEpoch,
-                                                    const ChunkRange& range,
-                                                    const std::vector<BSONObj>& splitPoints,
-                                                    const std::string& shardName) {
+Status ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
+                                                const NamespaceString& ns,
+                                                const OID& requestEpoch,
+                                                const ChunkRange& range,
+                                                const std::vector<BSONObj>& splitPoints,
+                                                const std::string& shardName) {
     // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
     // migrations
     // TODO(SERVER-25359): Replace with a collection-specific lock map to allow splits/merges/
@@ -368,7 +368,7 @@ Status ShardingCatalogManagerImpl::commitChunkSplit(OperationContext* opCtx,
     }
 
     // apply the batch of updates to remote and local metadata
-    Status applyOpsStatus = Grid::get(opCtx)->catalogClient(opCtx)->applyChunkOpsDeprecated(
+    Status applyOpsStatus = Grid::get(opCtx)->catalogClient()->applyChunkOpsDeprecated(
         opCtx,
         updates.arr(),
         preCond.arr(),
@@ -394,7 +394,7 @@ Status ShardingCatalogManagerImpl::commitChunkSplit(OperationContext* opCtx,
         appendShortVersion(&logDetail.subobjStart("right"), newChunks[1]);
 
         Grid::get(opCtx)
-            ->catalogClient(opCtx)
+            ->catalogClient()
             ->logChange(opCtx, "split", ns.ns(), logDetail.obj(), WriteConcernOptions())
             .transitional_ignore();
     } else {
@@ -410,7 +410,7 @@ Status ShardingCatalogManagerImpl::commitChunkSplit(OperationContext* opCtx,
             appendShortVersion(&chunkDetail.subobjStart("chunk"), newChunks[i]);
 
             Grid::get(opCtx)
-                ->catalogClient(opCtx)
+                ->catalogClient()
                 ->logChange(opCtx, "multi-split", ns.ns(), chunkDetail.obj(), WriteConcernOptions())
                 .transitional_ignore();
         }
@@ -419,11 +419,11 @@ Status ShardingCatalogManagerImpl::commitChunkSplit(OperationContext* opCtx,
     return applyOpsStatus;
 }
 
-Status ShardingCatalogManagerImpl::commitChunkMerge(OperationContext* opCtx,
-                                                    const NamespaceString& ns,
-                                                    const OID& requestEpoch,
-                                                    const std::vector<BSONObj>& chunkBoundaries,
-                                                    const std::string& shardName) {
+Status ShardingCatalogManager::commitChunkMerge(OperationContext* opCtx,
+                                                const NamespaceString& ns,
+                                                const OID& requestEpoch,
+                                                const std::vector<BSONObj>& chunkBoundaries,
+                                                const std::string& shardName) {
     // This method must never be called with empty chunks to merge
     invariant(!chunkBoundaries.empty());
 
@@ -496,7 +496,7 @@ Status ShardingCatalogManagerImpl::commitChunkMerge(OperationContext* opCtx,
     auto preCond = buildMergeChunksApplyOpsPrecond(chunksToMerge, collVersion);
 
     // apply the batch of updates to remote and local metadata
-    Status applyOpsStatus = Grid::get(opCtx)->catalogClient(opCtx)->applyChunkOpsDeprecated(
+    Status applyOpsStatus = Grid::get(opCtx)->catalogClient()->applyChunkOpsDeprecated(
         opCtx,
         updates,
         preCond,
@@ -520,14 +520,14 @@ Status ShardingCatalogManagerImpl::commitChunkMerge(OperationContext* opCtx,
     mergeVersion.addToBSON(logDetail, "mergedVersion");
 
     Grid::get(opCtx)
-        ->catalogClient(opCtx)
+        ->catalogClient()
         ->logChange(opCtx, "merge", ns.ns(), logDetail.obj(), WriteConcernOptions())
         .transitional_ignore();
 
     return applyOpsStatus;
 }
 
-StatusWith<BSONObj> ShardingCatalogManagerImpl::commitChunkMigration(
+StatusWith<BSONObj> ShardingCatalogManager::commitChunkMigration(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const ChunkType& migratedChunk,

@@ -38,6 +38,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/fsync.h"
+#include "mongo/db/concurrency/global_lock_acquisition_tracker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/cursor_manager.h"
@@ -49,16 +50,18 @@
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/logical_time_validator.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_exec.h"
-#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/read_concern.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/session_catalog.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/rpc/factory.h"
@@ -259,7 +262,7 @@ void appendReplyMetadata(OperationContext* opCtx,
             if (serverGlobalParams.featureCompatibility.version.load() ==
                 ServerGlobalParams::FeatureCompatibility::Version::k36) {
                 if (LogicalTimeValidator::isAuthorizedToAdvanceClock(opCtx)) {
-                    // No need to sign logical times for internal clients.
+                    // No need to sign cluster times for internal clients.
                     SignedLogicalTime currentTime(LogicalClock::get(opCtx)->getClusterTime(),
                                                   TimeProofService::TimeProof(),
                                                   0);
@@ -306,13 +309,21 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(const BSONObj& cmdObj,
 
 void _waitForWriteConcernAndAddToCommandResponse(OperationContext* opCtx,
                                                  const std::string& commandName,
+                                                 const repl::OpTime& lastOpBeforeRun,
                                                  BSONObjBuilder* commandResponseBuilder) {
+    auto lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+
+    // Ensures that if we tried to do a write, we wait for write concern, even if that write was
+    // a noop.
+    if ((lastOpAfterRun == lastOpBeforeRun) &&
+        GlobalLockAcquisitionTracker::get(opCtx).getGlobalExclusiveLockTaken()) {
+        repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+        lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    }
+
     WriteConcernResult res;
     auto waitForWCStatus =
-        waitForWriteConcern(opCtx,
-                            repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp(),
-                            opCtx->getWriteConcern(),
-                            &res);
+        waitForWriteConcern(opCtx, lastOpAfterRun, opCtx->getWriteConcern(), &res);
     Command::appendCommandWCStatus(*commandResponseBuilder, waitForWCStatus, res);
 
     // SERVER-22421: This code is to ensure error response backwards compatibility with the
@@ -327,7 +338,7 @@ void _waitForWriteConcernAndAddToCommandResponse(OperationContext* opCtx,
 
 /**
  * For replica set members it returns the last known op time from opCtx. Otherwise will return
- * uninitialized logical time.
+ * uninitialized cluster time.
  */
 LogicalTime getClientOperationTime(OperationContext* opCtx) {
     repl::ReplicationCoordinator* replCoord =
@@ -345,7 +356,7 @@ LogicalTime getClientOperationTime(OperationContext* opCtx) {
 /**
  * Returns the proper operationTime for a command. To construct the operationTime for replica set
  * members, it uses the last optime in the oplog for writes, last committed optime for majority
- * reads, and the last applied optime for every other read. An uninitialized logical time is
+ * reads, and the last applied optime for every other read. An uninitialized cluster time is
  * returned for non replica set members.
  */
 LogicalTime computeOperationTime(OperationContext* opCtx,
@@ -424,7 +435,6 @@ bool runCommandImpl(OperationContext* opCtx,
         return result;
     }
 
-    std::string errmsg;
     bool result;
     if (!command->supportsWriteConcern(cmd)) {
         if (commandSpecifiesWriteConcern(cmd)) {
@@ -436,7 +446,7 @@ bool runCommandImpl(OperationContext* opCtx,
             return result;
         }
 
-        result = command->enhancedRun(opCtx, request, errmsg, inPlaceReplyBob);
+        result = command->enhancedRun(opCtx, request, inPlaceReplyBob);
     } else {
         auto wcResult = extractWriteConcern(opCtx, cmd, db);
         if (!wcResult.isOK()) {
@@ -446,16 +456,18 @@ bool runCommandImpl(OperationContext* opCtx,
             return result;
         }
 
+        auto lastOpBeforeRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+
         // Change the write concern while running the command.
         const auto oldWC = opCtx->getWriteConcern();
         ON_BLOCK_EXIT([&] { opCtx->setWriteConcern(oldWC); });
         opCtx->setWriteConcern(wcResult.getValue());
         ON_BLOCK_EXIT([&] {
             _waitForWriteConcernAndAddToCommandResponse(
-                opCtx, command->getName(), &inPlaceReplyBob);
+                opCtx, command->getName(), lastOpBeforeRun, &inPlaceReplyBob);
         });
 
-        result = command->enhancedRun(opCtx, request, errmsg, inPlaceReplyBob);
+        result = command->enhancedRun(opCtx, request, inPlaceReplyBob);
 
         // Nothing in run() should change the writeConcern.
         dassert(SimpleBSONObjComparator::kInstance.evaluate(opCtx->getWriteConcern().toBSON() ==
@@ -480,7 +492,7 @@ bool runCommandImpl(OperationContext* opCtx,
         }
     }
 
-    Command::appendCommandStatus(inPlaceReplyBob, result, errmsg);
+    Command::appendCommandStatus(inPlaceReplyBob, result);
 
     auto operationTime = computeOperationTime(
         opCtx, startOperationTime, readConcernArgsStatus.getValue().getLevel());
@@ -570,8 +582,10 @@ void execCommandDatabase(OperationContext* opCtx,
             return;
         }
 
+        OperationContextSession sessionTxnState(opCtx);
+
         ImpersonationSessionGuard guard(opCtx);
-        uassertStatusOK(Command::checkAuthorization(command, opCtx, dbname, request.body));
+        uassertStatusOK(Command::checkAuthorization(command, opCtx, request));
 
         repl::ReplicationCoordinator* replCoord =
             repl::ReplicationCoordinator::get(opCtx->getClient()->getServiceContext());
@@ -639,9 +653,8 @@ void execCommandDatabase(OperationContext* opCtx,
             opCtx->setDeadlineAfterNowBy(Milliseconds{maxTimeMS});
         }
 
-        // Operations are only versioned against the primary. We also make sure not to redo shard
-        // version handling if this command was issued via the direct client.
-        if (iAmPrimary && !opCtx->getClient()->isInDirectClient()) {
+        // We do not redo shard version handling if this command was issued via the direct client.
+        if (!opCtx->getClient()->isInDirectClient()) {
             // Handle a shard version that may have been sent along with the command.
             auto commandNS = NamespaceString(command->parseNs(dbname, request.body));
             auto& oss = OperationShardingState::get(opCtx);
@@ -920,9 +933,10 @@ void receivedKillCursors(OperationContext* opCtx, const Message& m) {
 }
 
 void receivedInsert(OperationContext* opCtx, const NamespaceString& nsString, const Message& m) {
-    auto insertOp = parseLegacyInsert(m);
-    invariant(insertOp.ns == nsString);
-    for (const auto& obj : insertOp.documents) {
+    auto insertOp = InsertOp::parseLegacy(m);
+    invariant(insertOp.getNamespace() == nsString);
+
+    for (const auto& obj : insertOp.getDocuments()) {
         Status status =
             AuthorizationSession::get(opCtx->getClient())->checkAuthForInsert(opCtx, nsString, obj);
         audit::logInsertAuthzCheck(opCtx->getClient(), nsString, obj, status.code());
@@ -932,20 +946,22 @@ void receivedInsert(OperationContext* opCtx, const NamespaceString& nsString, co
 }
 
 void receivedUpdate(OperationContext* opCtx, const NamespaceString& nsString, const Message& m) {
-    auto updateOp = parseLegacyUpdate(m);
-    auto& singleUpdate = updateOp.updates[0];
-    invariant(updateOp.ns == nsString);
+    auto updateOp = UpdateOp::parseLegacy(m);
+    auto& singleUpdate = updateOp.getUpdates()[0];
+    invariant(updateOp.getNamespace() == nsString);
 
-    Status status =
-        AuthorizationSession::get(opCtx->getClient())
-            ->checkAuthForUpdate(
-                opCtx, nsString, singleUpdate.query, singleUpdate.update, singleUpdate.upsert);
+    Status status = AuthorizationSession::get(opCtx->getClient())
+                        ->checkAuthForUpdate(opCtx,
+                                             nsString,
+                                             singleUpdate.getQ(),
+                                             singleUpdate.getU(),
+                                             singleUpdate.getUpsert());
     audit::logUpdateAuthzCheck(opCtx->getClient(),
                                nsString,
-                               singleUpdate.query,
-                               singleUpdate.update,
-                               singleUpdate.upsert,
-                               singleUpdate.multi,
+                               singleUpdate.getQ(),
+                               singleUpdate.getU(),
+                               singleUpdate.getUpsert(),
+                               singleUpdate.getMulti(),
                                status.code());
     uassertStatusOK(status);
 
@@ -953,13 +969,13 @@ void receivedUpdate(OperationContext* opCtx, const NamespaceString& nsString, co
 }
 
 void receivedDelete(OperationContext* opCtx, const NamespaceString& nsString, const Message& m) {
-    auto deleteOp = parseLegacyDelete(m);
-    auto& singleDelete = deleteOp.deletes[0];
-    invariant(deleteOp.ns == nsString);
+    auto deleteOp = DeleteOp::parseLegacy(m);
+    auto& singleDelete = deleteOp.getDeletes()[0];
+    invariant(deleteOp.getNamespace() == nsString);
 
     Status status = AuthorizationSession::get(opCtx->getClient())
-                        ->checkAuthForDelete(opCtx, nsString, singleDelete.query);
-    audit::logDeleteAuthzCheck(opCtx->getClient(), nsString, singleDelete.query, status.code());
+                        ->checkAuthForDelete(opCtx, nsString, singleDelete.getQ());
+    audit::logDeleteAuthzCheck(opCtx->getClient(), nsString, singleDelete.getQ(), status.code());
     uassertStatusOK(status);
 
     performDeletes(opCtx, deleteOp);

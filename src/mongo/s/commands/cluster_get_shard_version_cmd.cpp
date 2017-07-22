@@ -43,9 +43,9 @@
 namespace mongo {
 namespace {
 
-class GetShardVersion : public Command {
+class GetShardVersion : public BasicCommand {
 public:
-    GetShardVersion() : Command("getShardVersion", "getshardversion") {}
+    GetShardVersion() : BasicCommand("getShardVersion", "getshardversion") {}
 
     bool slaveOk() const override {
         return true;
@@ -82,15 +82,14 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         const NamespaceString nss(parseNs(dbname, cmdObj));
 
         auto routingInfo = getShardedCollection(opCtx, nss);
         const auto cm = routingInfo.cm();
 
-        for (const auto& cmEntry : cm->chunkMap()) {
-            log() << redact(cmEntry.second->toString());
+        for (const auto& chunk : cm->chunks()) {
+            log() << redact(chunk->toString());
         }
 
         cm->getVersion().addToBSON(result, "version");

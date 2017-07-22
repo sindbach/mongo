@@ -57,9 +57,9 @@ using std::shared_ptr;
 using std::string;
 using std::vector;
 
-class FindAndModifyCmd : public Command {
+class FindAndModifyCmd : public BasicCommand {
 public:
-    FindAndModifyCmd() : Command("findAndModify", "findandmodify") {}
+    FindAndModifyCmd() : BasicCommand("findAndModify", "findandmodify") {}
 
     bool slaveOk() const override {
         return true;
@@ -156,7 +156,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         const NamespaceString nss = parseNsCollectionRequired(dbName, cmdObj);
 

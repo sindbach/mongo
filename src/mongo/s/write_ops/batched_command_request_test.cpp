@@ -86,22 +86,26 @@ TEST(BatchedCommandRequest, InsertWithShardVersion) {
 
 TEST(BatchedCommandRequest, InsertCloneWithId) {
     auto insertRequest = stdx::make_unique<BatchedInsertRequest>();
-    insertRequest->setOrdered(true);
-    insertRequest->setWriteConcern(BSON("w" << 2));
     insertRequest->addToDocuments(BSON("x" << 4));
-    insertRequest->setShouldBypassValidation(true);
 
     BatchedCommandRequest batchedRequest(insertRequest.release());
     batchedRequest.setNS(NamespaceString("xyz.abc"));
+    {
+        write_ops::WriteCommandBase writeCommandBase;
+        writeCommandBase.setOrdered(true);
+        writeCommandBase.setBypassDocumentValidation(true);
+        batchedRequest.setWriteCommandBase(std::move(writeCommandBase));
+    }
+    batchedRequest.setWriteConcern(BSON("w" << 2));
 
     std::unique_ptr<BatchedCommandRequest> clonedRequest(
         BatchedCommandRequest::cloneWithIds(batchedRequest));
 
     ASSERT_EQ("xyz.abc", clonedRequest->getNS().toString());
     ASSERT_EQ("xyz.abc", clonedRequest->getTargetingNSS().toString());
-    ASSERT_TRUE(clonedRequest->getOrdered());
+    ASSERT_TRUE(clonedRequest->getWriteCommandBase().getOrdered());
     ASSERT_BSONOBJ_EQ(BSON("w" << 2), clonedRequest->getWriteConcern());
-    ASSERT_TRUE(clonedRequest->shouldBypassValidation());
+    ASSERT_TRUE(clonedRequest->getWriteCommandBase().getBypassDocumentValidation());
 
     auto* clonedInsert = clonedRequest->getInsertRequest();
     ASSERT_TRUE(clonedInsert != nullptr);

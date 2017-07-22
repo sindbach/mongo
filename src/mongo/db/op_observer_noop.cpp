@@ -43,8 +43,8 @@ void OpObserverNoop::onCreateIndex(
 void OpObserverNoop::onInserts(OperationContext*,
                                const NamespaceString&,
                                OptionalCollectionUUID,
-                               std::vector<BSONObj>::const_iterator,
-                               std::vector<BSONObj>::const_iterator,
+                               std::vector<InsertStatement>::const_iterator,
+                               std::vector<InsertStatement>::const_iterator,
                                bool) {}
 
 void OpObserverNoop::onUpdate(OperationContext*, const OplogUpdateEntryArgs&) {}
@@ -58,6 +58,7 @@ CollectionShardingState::DeleteState OpObserverNoop::aboutToDelete(OperationCont
 void OpObserverNoop::onDelete(OperationContext*,
                               const NamespaceString&,
                               OptionalCollectionUUID,
+                              StmtId stmtId,
                               CollectionShardingState::DeleteState,
                               bool) {}
 
@@ -134,12 +135,6 @@ void OpObserverNoop::onRenameCollection(OperationContext* opCtx,
 }
 
 void OpObserverNoop::onApplyOps(OperationContext*, const std::string&, const BSONObj&) {}
-
-void OpObserverNoop::onConvertToCapped(OperationContext*,
-                                       const NamespaceString&,
-                                       OptionalCollectionUUID,
-                                       OptionalCollectionUUID,
-                                       double) {}
 
 void OpObserverNoop::onEmptyCapped(OperationContext*,
                                    const NamespaceString&,

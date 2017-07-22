@@ -91,8 +91,9 @@ public:
             const std::vector<BSONObj>& secondaryIndexSpecs)>;
     using InsertDocumentFn = stdx::function<Status(
         OperationContext* opCtx, const NamespaceString& nss, const BSONObj& doc)>;
-    using InsertDocumentsFn = stdx::function<Status(
-        OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& docs)>;
+    using InsertDocumentsFn = stdx::function<Status(OperationContext* opCtx,
+                                                    const NamespaceString& nss,
+                                                    const std::vector<InsertStatement>& docs)>;
     using DropUserDatabasesFn = stdx::function<Status(OperationContext* opCtx)>;
     using CreateOplogFn =
         stdx::function<Status(OperationContext* opCtx, const NamespaceString& nss)>;
@@ -140,7 +141,7 @@ public:
 
     Status insertDocuments(OperationContext* opCtx,
                            const NamespaceString& nss,
-                           const std::vector<BSONObj>& docs) override {
+                           const std::vector<InsertStatement>& docs) override {
         return insertDocumentsFn(opCtx, nss, docs);
     }
 
@@ -243,10 +244,17 @@ public:
         return 0;
     }
 
+    void setStableTimestamp(OperationContext* opCtx, SnapshotName snapshotName) override;
+
+    void setInitialDataTimestamp(OperationContext* opCtx, SnapshotName snapshotName) override;
+
+    SnapshotName getStableTimestamp() const;
+
+    SnapshotName getInitialDataTimestamp() const;
+
     Status isAdminDbValid(OperationContext* opCtx) override {
         return isAdminDbValidFn(opCtx);
     };
-
 
     // Testing functions.
     CreateCollectionForBulkFn createCollectionForBulkFn =
@@ -261,10 +269,11 @@ public:
         [](OperationContext* opCtx, const NamespaceString& nss, const BSONObj& doc) {
             return Status{ErrorCodes::IllegalOperation, "InsertDocumentFn not implemented."};
         };
-    InsertDocumentsFn insertDocumentsFn =
-        [](OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
-            return Status{ErrorCodes::IllegalOperation, "InsertDocumentsFn not implemented."};
-        };
+    InsertDocumentsFn insertDocumentsFn = [](OperationContext* opCtx,
+                                             const NamespaceString& nss,
+                                             const std::vector<InsertStatement>& docs) {
+        return Status{ErrorCodes::IllegalOperation, "InsertDocumentsFn not implemented."};
+    };
     DropUserDatabasesFn dropUserDBsFn = [](OperationContext* opCtx) {
         return Status{ErrorCodes::IllegalOperation, "DropUserDatabasesFn not implemented."};
     };
@@ -301,9 +310,11 @@ public:
     };
 
 private:
-    mutable stdx::mutex _rbidMutex;
+    mutable stdx::mutex _mutex;
     int _rbid;
     bool _rbidInitialized = false;
+    SnapshotName _stableTimestamp = SnapshotName::min();
+    SnapshotName _initialDataTimestamp = SnapshotName::min();
 };
 
 }  // namespace repl

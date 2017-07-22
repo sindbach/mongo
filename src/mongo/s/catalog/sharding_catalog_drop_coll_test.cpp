@@ -42,7 +42,6 @@
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/write_ops/batched_update_request.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -114,6 +113,8 @@ public:
             BSONObj expectedCmd(fromjson(R"({
                 delete: "chunks",
                 deletes: [{ q: { ns: "test.user" }, limit: 0 }],
+                bypassDocumentValidation: false,
+                ordered: true,
                 writeConcern: { w: "majority", wtimeout: 15000 },
                 maxTimeMS: 30000
             })"));

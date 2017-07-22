@@ -866,6 +866,16 @@ functions:
         mkdir -p snmpconf
         cp -f src/mongo/db/modules/enterprise/docs/mongod.conf.master snmpconf/mongod.conf
 
+  "do watchdog setup" :
+    command: shell.exec
+    params:
+      working_dir: src
+      script: |
+        set -o errexit
+        set -o verbose
+
+        bash src/mongo/db/modules/enterprise/jstests/watchdog/charybdefs_setup.sh
+
   "cleanup environment" :
     command: shell.exec
     params:
@@ -975,7 +985,7 @@ functions:
         export KITCHEN_SUBNET="${kitchen_subnet}"
 
         # set expiration tag 2 hours in the future, since no test should take this long
-        export KITCHEN_EXPIRE="$(${python|/opt/mongodbtoolchain/v2/bin/python2} -c 'import datetime; print((datetime.datetime.now() + datetime.timedelta(0, 2*60*60)).strftime("%Y-%m-%d %H:%M:%S"))')"
+        export KITCHEN_EXPIRE="$(${python|/opt/mongodbtoolchain/v2/bin/python2} -c 'import datetime; print((datetime.datetime.utcnow() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"))')"
 
         for i in {1..3}
         do
@@ -1035,7 +1045,7 @@ post:
     params:
       working_dir: src
       script: |
-        ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/combine_reports.py -m -o report.json report_reliable.json report_unreliable.json
+        ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/combine_reports.py -m -x -o report.json report_reliable.json report_unreliable.json
   - command: attach.results
     params:
       file_location: src/report.json
@@ -1065,6 +1075,19 @@ post:
           cat oom.txt
         else
           echo "No OOM (Out of memory) killed processes detected"
+        fi
+
+  # Cleanup after the watchdog FUSE testing
+  - command: shell.exec
+    params:
+      working_dir: src
+      script: |
+        if [ -d /data/thrift ]; then
+          rm -rf /data/thrift
+        fi
+
+        if [ -d /data/charybdefs ]; then
+          rm -rf /data/charybdefs
         fi
 
   # Gather and archive FTDC data.
@@ -1130,7 +1153,7 @@ post:
       working_dir: src
       script: |
         # For Jepsen tasks, archive the mongod log files.
-        if [ -d jepsen ]; then
+        if [ ${distro_id} = "ubuntu1404-jepsen" ]; then
           # Copy mongod.log & stdout.log from each LXC host for archive purposes. Note that
           # stdout.log is also generated as a result of starting mongod.
           # The logs can reside in 1 of 2 places:
@@ -2344,6 +2367,15 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
+  name: jsCore_async
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=core --storageEngine=wiredTiger --serviceExecutor=fixedForTesting
+      run_multiple_jobs: true
+
+- <<: *task_template
   name: jsCore_inMem
   commands:
   - func: "do setup"
@@ -2778,6 +2810,17 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
+  name: sharding_jscore_op_query_passthrough_WT
+  depends_on:
+  - name: jsCore_WT
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=sharding_jscore_op_query_passthrough --storageEngine=wiredTiger
+      run_multiple_jobs: true
+
+- <<: *task_template
   name: sharding_jscore_passthrough_wire_ops_WT
   depends_on:
   - name: jsCore_WT
@@ -2807,6 +2850,16 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=parallel --storageEngine=wiredTiger
+
+- <<: *task_template
+  name: parallel_async
+  depends_on:
+  - name: jsCore_async
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=parallel --storageEngine=wiredTiger --serviceExecutor=fixedForTesting
 
 - <<: *task_template
   name: parallel_compatibility
@@ -3246,6 +3299,26 @@ tasks:
       resmoke_args: --suites=causally_consistent_jscore_passthrough_auth --storageEngine=wiredTiger
       run_multiple_jobs: true
 
+- <<: *task_template
+  name: watchdog
+  commands:
+  - func: "do setup"
+  - func: "do watchdog setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=watchdog --storageEngine=mmapv1
+      run_multiple_jobs: false
+
+- <<: *task_template
+  name: watchdog_WT
+  commands:
+  - func: "do setup"
+  - func: "do watchdog setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=watchdog --storageEngine=wiredTiger
+      run_multiple_jobs: false
+
 - name: idl_tests
   depends_on:
   - name: compile
@@ -3307,10 +3380,10 @@ tasks:
           EOF
 
           cat <<EOF > notary_env.sh
-          export NOTARY_TOKEN=${signing_auth_token_34}
+          export NOTARY_TOKEN=${signing_auth_token_36}
           EOF
 
-          echo "${signing_auth_token_34}" > signing_auth_token
+          echo "${signing_auth_token_36}" > signing_auth_token
 
     - command: shell.exec
       params:
@@ -3327,7 +3400,7 @@ tasks:
           mv distsrc.${ext|tgz} mongodb-src-${src_suffix}.${ext|tar.gz} || true
           /usr/bin/find build/ -type f | grep msi$ | xargs -I original_filename cp original_filename mongodb-win32-${push_arch}-${suffix}.msi || true
 
-          /usr/local/bin/notary-client.py --key-name "server-3.4" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --skip-missing mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} mongodb-win32-${push_arch}-${suffix}.msi mongodb-src-${src_suffix}.${ext|tar.gz}
+          /usr/local/bin/notary-client.py --key-name "server-3.6" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --skip-missing mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} mongodb-win32-${push_arch}-${suffix}.msi mongodb-src-${src_suffix}.${ext|tar.gz}
 
           if [ "${has_packages|}" = "true" ]; then
              CURATOR_RELEASE="88f34a9f1c79db7ea9597b6e85eb5995d03714ba"
@@ -3880,6 +3953,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_last_stable_mongos_and_mixed_shards
   - name: tool
@@ -4003,6 +4077,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: tool
   - name: tool_WT
@@ -4134,6 +4209,7 @@ buildvariants:
   - name: serial_run_WT
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: tool_WT
 
@@ -4887,6 +4963,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_WT
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1_WT
@@ -4981,6 +5058,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: snmp
   - name: snmp_WT
@@ -5108,6 +5186,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: ssl
   - name: sslSpecial
@@ -5280,7 +5359,7 @@ buildvariants:
     platform_decompress: unzip
     tooltags: "-tags 'ssl sasl'"
     exe: ".exe"
-    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH"'
+    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH" CGO_CFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"'
     push_path: win32
     push_bucket: downloads.10gen.com
     push_name: win32
@@ -5351,7 +5430,7 @@ buildvariants:
     platform_decompress: unzip
     tooltags: "-tags 'ssl sasl'"
     exe: ".exe"
-    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH"'
+    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH" CGO_CFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"'
     push_path: win32
     push_bucket: downloads.10gen.com
     push_name: win32
@@ -5411,7 +5490,7 @@ buildvariants:
   expansions:
     platform_decompress: unzip
     exe: ".exe"
-    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH"'
+    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH" CGO_CFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"'
     tooltags: "-tags ssl"
     push_path: win32
     push_bucket: downloads.mongodb.org
@@ -5517,6 +5596,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_last_stable_mongos_and_mixed_shards
   - name: slow1
@@ -5540,7 +5620,7 @@ buildvariants:
     platform_decompress: unzip
     tooltags: "-tags 'ssl sasl'"
     exe: ".exe"
-    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH"'
+    gorootvars: 'PATH="/cygdrive/c/mingw-w64/x86_64-4.9.1-posix-seh-rt_v3-rev1/mingw64/bin:/cygdrive/c/sasl/:$PATH" CGO_CFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"'
     content_type: application/zip
     compile_flags: --dbg=on --opt=off --ssl MONGO_DISTMOD=2008plus CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2
     python: python
@@ -5661,6 +5741,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: slow1
   - name: slow1_WT
@@ -6027,6 +6108,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_last_stable_mongos_and_mixed_shards
     distros:
@@ -6186,6 +6268,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_last_stable_mongos_and_mixed_shards
   - name: sharding_op_query_WT
@@ -6622,6 +6705,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_WT
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1_WT
@@ -6726,6 +6810,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_WT
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1_WT
@@ -6860,6 +6945,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   # - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   # - name: slow1
@@ -7091,6 +7177,8 @@ buildvariants:
   - name: snmp_WT
   - name: ssl
   - name: sslSpecial
+  - name: watchdog
+  - name: watchdog_WT
   - name: package
     distros:
     - ubuntu1604-packer
@@ -7275,6 +7363,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_WT
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1_WT
@@ -7557,6 +7646,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough_WT
   - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1_WT
@@ -7776,6 +7866,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_WT
   - name: slow1
@@ -8034,6 +8125,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: ssl
   - name: sslSpecial
@@ -8161,6 +8253,7 @@ buildvariants:
   - name: sharded_collections_jscore_passthrough_WT
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: ssl
   - name: sslSpecial
@@ -8259,6 +8352,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough
   - name: sharding_gle_auth_basics_passthrough_write_cmd
   - name: sharding_jscore_passthrough
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1
@@ -8341,6 +8435,7 @@ buildvariants:
   - name: serial_run
   - name: sharded_collections_jscore_passthrough
   - name: sharding_jscore_passthrough
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: tool
 
@@ -8417,6 +8512,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough
   - name: sharding_gle_auth_basics_passthrough_write_cmd
   - name: sharding_jscore_passthrough
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1
@@ -8506,6 +8602,7 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough
   - name: sharding_gle_auth_basics_passthrough_write_cmd
   - name: sharding_jscore_passthrough
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1
@@ -8603,7 +8700,7 @@ buildvariants:
     tooltags: "-tags 'ssl'"
     # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
     variant_path_suffix: /opt/mongodbtoolchain/v2/bin
-    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true
+    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
     multiversion_platform_arch: "ubuntu1604"
     multiversion_edition: "targeted"
@@ -8724,6 +8821,7 @@ buildvariants:
   - name: sharding_last_stable_mongos_and_mixed_shards
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1
@@ -8747,7 +8845,7 @@ buildvariants:
     tooltags: "-tags 'ssl'"
     # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
     variant_path_suffix: /opt/mongodbtoolchain/v2/bin
-    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true
+    san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
     num_jobs_available: $(($(grep -c ^processor /proc/cpuinfo) / 3)) # Avoid starting too many mongod's under ASAN build.
     build_mongoreplay: true
@@ -8901,6 +8999,7 @@ buildvariants:
   - name: sharding_last_stable_mongos_and_mixed_shards
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_op_query_WT
   - name: slow1
@@ -8925,7 +9024,7 @@ buildvariants:
     tooltags: "-tags 'ssl'"
     # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
     variant_path_suffix: /opt/mongodbtoolchain/v2/bin
-    san_options: UBSAN_OPTIONS="print_stacktrace=1" LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true
+    san_options: UBSAN_OPTIONS="print_stacktrace=1" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
     num_jobs_available: $(($(grep -c ^processor /proc/cpuinfo) / 3)) # Avoid starting too many mongod's under {A,UB}SAN build.
     build_mongoreplay: true
@@ -8936,6 +9035,28 @@ buildvariants:
   - name: dbtest_WT
   - name: jsCore
   - name: jsCore_WT
+  - name: watchdog
+  - name: watchdog_WT
+
+- name: ubuntu1604-debug-aubsan-async
+  display_name: "~ {A,UB}SAN Enterprise SSL Ubuntu 16.04 async"
+  modules:
+  - enterprise
+  run_on:
+  - ubuntu1604-build
+  stepback: true
+  expansions:
+    tooltags: "-tags 'ssl'"
+    # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
+    variant_path_suffix: /opt/mongodbtoolchain/v2/bin
+    san_options: UBSAN_OPTIONS="print_stacktrace=1" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    num_jobs_available: $(($(grep -c ^processor /proc/cpuinfo) / 3)) # Avoid starting too many mongod's under {A,UB}SAN build.
+    build_mongoreplay: false
+  tasks:
+  - name: compile
+  - name: jsCore_async
+  - name: parallel_async
 
 - name: enterprise-ubuntu-dynamic-1604-64-bit
   display_name: "* Shared Library Enterprise Ubuntu 16.04"
@@ -8973,7 +9094,7 @@ buildvariants:
     # nest curly braces inside. The curly braces "{}" need their own quotes to protect them from
     # being interpreted by bash.
     test_flags: >
-      --mongodSetParameters='{rollbackMethod: rollbackViaRefetch}'
+      --mongodSetParameters='{rollbackMethod: rollbackViaRefetchNoUUID}'
     compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
@@ -9058,6 +9179,7 @@ buildvariants:
     - rhel62-large
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_passthrough_WT
+  - name: sharding_jscore_op_query_passthrough_WT
   - name: sharding_jscore_passthrough_wire_ops_WT
   - name: sharding_last_stable_mongos_and_mixed_shards
     distros:

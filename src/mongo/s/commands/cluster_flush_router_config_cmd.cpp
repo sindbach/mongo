@@ -35,9 +35,9 @@
 namespace mongo {
 namespace {
 
-class FlushRouterConfigCmd : public Command {
+class FlushRouterConfigCmd : public BasicCommand {
 public:
-    FlushRouterConfigCmd() : Command("flushRouterConfig", "flushrouterconfig") {}
+    FlushRouterConfigCmd() : BasicCommand("flushRouterConfig", "flushrouterconfig") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -67,7 +67,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         Grid::get(opCtx)->catalogCache()->purgeAllDatabases();
 

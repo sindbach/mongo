@@ -44,9 +44,9 @@ namespace {
  * getDiagnosticData is a MongoD only command. We implement in MongoS to give users a better error
  * message.
  */
-class GetDiagnosticDataCommand final : public Command {
+class GetDiagnosticDataCommand final : public ErrmsgCommandDeprecated {
 public:
-    GetDiagnosticDataCommand() : Command("getDiagnosticData") {}
+    GetDiagnosticDataCommand() : ErrmsgCommandDeprecated("getDiagnosticData") {}
 
     bool adminOnly() const override {
         return true;
@@ -67,18 +67,42 @@ public:
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) override {
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::serverStatus)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::replSetGetStatus)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::connPoolStats)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forExactNamespace(NamespaceString("local", "oplog.rs")),
+                ActionType::collStats)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
         return Status::OK();
     }
 
-    bool run(OperationContext* opCtx,
-             const std::string& db,
-             const BSONObj& cmdObj,
-             std::string& errmsg,
-             BSONObjBuilder& result) override {
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& db,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
 
-        errmsg = "getDiagnosticData not allowed through mongos";
+        result.append(
+            "data",
+            FTDCController::get(opCtx->getServiceContext())->getMostRecentPeriodicDocument());
 
-        return false;
+        return true;
     }
 };
 

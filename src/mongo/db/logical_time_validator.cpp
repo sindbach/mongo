@@ -35,7 +35,7 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/keys_collection_manager.h"
+#include "mongo/db/keys_collection_manager_sharding.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
@@ -77,15 +77,16 @@ void LogicalTimeValidator::set(ServiceContext* service,
     validator = std::move(newValidator);
 }
 
-LogicalTimeValidator::LogicalTimeValidator(std::unique_ptr<KeysCollectionManager> keyManager)
-    : _keyManager(std::move(keyManager)) {}
+LogicalTimeValidator::LogicalTimeValidator(
+    std::shared_ptr<KeysCollectionManagerSharding> keyManager)
+    : _keyManager(keyManager) {}
 
 SignedLogicalTime LogicalTimeValidator::_getProof(const KeysCollectionDocument& keyDoc,
                                                   LogicalTime newTime) {
     auto key = keyDoc.getKey();
 
     // Compare and calculate HMAC inside mutex to prevent multiple threads computing HMAC for the
-    // same logical time.
+    // same cluster time.
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     // Note: _lastSeenValidTime will initially not have a proof set.
     if (newTime == _lastSeenValidTime.getTime() && _lastSeenValidTime.getProof()) {
@@ -103,7 +104,7 @@ SignedLogicalTime LogicalTimeValidator::_getProof(const KeysCollectionDocument& 
 }
 
 SignedLogicalTime LogicalTimeValidator::trySignLogicalTime(const LogicalTime& newTime) {
-    auto keyStatusWith = _keyManager->getKeyForSigning(newTime);
+    auto keyStatusWith = _keyManager->getKeyForSigning(nullptr, newTime);
     auto keyStatus = keyStatusWith.getStatus();
 
     if (keyStatus == ErrorCodes::KeyNotFound) {
@@ -117,13 +118,13 @@ SignedLogicalTime LogicalTimeValidator::trySignLogicalTime(const LogicalTime& ne
 
 SignedLogicalTime LogicalTimeValidator::signLogicalTime(OperationContext* opCtx,
                                                         const LogicalTime& newTime) {
-    auto keyStatusWith = _keyManager->getKeyForSigning(newTime);
+    auto keyStatusWith = _keyManager->getKeyForSigning(nullptr, newTime);
     auto keyStatus = keyStatusWith.getStatus();
 
     while (keyStatus == ErrorCodes::KeyNotFound) {
         _keyManager->refreshNow(opCtx);
 
-        keyStatusWith = _keyManager->getKeyForSigning(newTime);
+        keyStatusWith = _keyManager->getKeyForSigning(nullptr, newTime);
         keyStatus = keyStatusWith.getStatus();
 
         if (keyStatus == ErrorCodes::KeyNotFound) {
@@ -149,8 +150,8 @@ Status LogicalTimeValidator::validate(OperationContext* opCtx, const SignedLogic
     const auto& key = keyStatus.getValue().getKey();
 
     const auto newProof = newTime.getProof();
-    // Logical time is only sent if a server's clock can verify and sign logical times, so any
-    // received logical times should have proofs.
+    // Cluster time is only sent if a server's clock can verify and sign cluster times, so any
+    // received cluster times should have proofs.
     invariant(newProof);
 
     auto res = _timeProofService.checkProof(newTime.getTime(), newProof.get(), key);

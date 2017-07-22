@@ -36,11 +36,19 @@ def mongod_program(logger, executable=None, process_kwargs=None, **kwargs):
     if "replSet" in kwargs and "logComponentVerbosity" not in suite_set_parameters:
         suite_set_parameters["logComponentVerbosity"] = {"replication": {"heartbeats": 2}}
 
+    # orphanCleanupDelaySecs controls an artificial delay before cleaning up an orphaned chunk
+    # that has migrated off of a shard, meant to allow most dependent queries on secondaries to
+    # complete first. It defaults to 900, or 15 minutes, which is prohibitively long for tests.
+    # Setting it in the .yml file overrides this.
+    if "shardsvr" in kwargs and "orphanCleanupDelaySecs" not in suite_set_parameters:
+        suite_set_parameters["orphanCleanupDelaySecs"] = 0
+
     _apply_set_parameters(args, suite_set_parameters)
 
     shortcut_opts = {
         "nojournal": config.NO_JOURNAL,
         "nopreallocj": config.NO_PREALLOC_JOURNAL,
+        "serviceExecutor": config.SERVICE_EXECUTOR,
         "storageEngine": config.STORAGE_ENGINE,
         "wiredTigerCollectionConfigString": config.WT_COLL_CONFIG,
         "wiredTigerEngineConfigString": config.WT_ENGINE_CONFIG,
@@ -134,6 +142,7 @@ def mongo_shell_program(logger, executable=None, filename=None, process_kwargs=N
     shortcut_opts = {
         "noJournal": (config.NO_JOURNAL, False),
         "noJournalPrealloc": (config.NO_PREALLOC_JOURNAL, False),
+        "serviceExecutor": (config.SERVICE_EXECUTOR, ""),
         "storageEngine": (config.STORAGE_ENGINE, ""),
         "storageEngineCacheSizeGB": (config.STORAGE_ENGINE_CACHE_SIZE, ""),
         "testName": (os.path.splitext(os.path.basename(filename))[0], ""),

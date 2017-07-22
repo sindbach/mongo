@@ -41,12 +41,12 @@ namespace {
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference{ReadPreference::PrimaryOnly};
 
-class BalancerControlCommand : public Command {
+class BalancerControlCommand : public BasicCommand {
 public:
     BalancerControlCommand(StringData name,
                            StringData configsvrCommandName,
                            ActionType authorizationAction)
-        : Command(name),
+        : BasicCommand(name),
           _configsvrCommandName(configsvrCommandName),
           _authorizationAction(authorizationAction) {}
 
@@ -80,7 +80,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto cmdResponse = uassertStatusOK(

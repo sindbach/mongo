@@ -44,12 +44,14 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/logical_session_id.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/update_lifecycle_impl.h"
@@ -66,6 +68,7 @@
 #include "mongo/db/repl/rollback_source.h"
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/s/shard_identity_rollback_notifier.h"
+#include "mongo/db/session_catalog.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -110,20 +113,23 @@ void FixUpInfo::removeAllDocsToRefetchFor(const std::string& collection) {
                         docsToRefetch.upper_bound(DocID::maxFor(collection.c_str())));
 }
 
+// TODO: This function will not be fully functional until the entire
+// rollback via refetch for non-WT project is complete. See SERVER-30171.
 void FixUpInfo::removeRedundantOperations() {
     // These loops and their bodies can be done in any order. The final result of the FixUpInfo
     // members will be the same.
-    for (const auto& collection : collectionsToDrop) {
-        removeAllDocsToRefetchFor(collection);
-        indexesToDrop.erase(collection);
-        collectionsToResyncMetadata.erase(collection);
-    }
+
+    //    for (const auto& collection : collectionsToDrop) {
+    //        removeAllDocsToRefetchFor(collection);
+    //        indexesToDrop.erase(collection);
+    //        collectionsToResyncMetadata.erase(collection);
+    //    }
 
     for (const auto& collection : collectionsToResyncData) {
         removeAllDocsToRefetchFor(collection);
         indexesToDrop.erase(collection);
         collectionsToResyncMetadata.erase(collection);
-        collectionsToDrop.erase(collection);
+        // collectionsToDrop.erase(collection);
     }
 }
 
@@ -160,6 +166,29 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(FixUpInfo& fixUpInf
                                              << redact(oplogEntry.toBSON()));
     }
 
+    // If the operation being rolled back has a txnNumber, then the corresponding entry in the
+    // session transaction table needs to be refetched.
+    auto operationSessionInfo = oplogEntry.getOperationSessionInfo();
+    auto txnNumber = operationSessionInfo.getTxnNumber();
+    if (txnNumber) {
+        auto sessionId = operationSessionInfo.getSessionId();
+        invariant(sessionId);
+        invariant(oplogEntry.getStatementId());
+
+        DocID txnDoc;
+        BSONObjBuilder txnBob;
+        txnBob.append("_id", sessionId->toBSON());
+        txnDoc.ownedObj = txnBob.obj();
+        txnDoc._id = txnDoc.ownedObj.firstElement();
+        // TODO: SERVER-29667
+        // Once collection uuids replace namespace strings for rollback, this will need to be
+        // changed to the uuid of the session transaction table collection.
+        txnDoc.ns = NamespaceString::kSessionTransactionsTableNamespace.ns().c_str();
+
+        fixUpInfo.docsToRefetch.insert(txnDoc);
+        fixUpInfo.refetchTransactionDocs = true;
+    }
+
     if (oplogEntry.getOpType() == OpTypeEnum::kCommand) {
 
         // The first element of the object is the name of the command
@@ -180,8 +209,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(FixUpInfo& fixUpInf
                 //     ...
                 // }
 
-                string ns = nss.db().toString() + '.' + first.valuestr();  // -> foo.abc
-                fixUpInfo.collectionsToDrop.insert(ns);
+                fixUpInfo.collectionsToDrop.insert(*uuid);
                 return Status::OK();
             }
             case OplogEntry::CommandType::kDrop: {
@@ -197,14 +225,13 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(FixUpInfo& fixUpInf
                 //     ...
                 // }
                 // TODO: Delete this when UUIDs are enabled. (SERVER-29815)
+                NamespaceString collectionNamespace(nss.getSisterNS(first.valuestr()));
                 if (!uuid) {
-                    string ns = nss.db().toString() + '.' + first.valuestr();
-                    fixUpInfo.collectionsToResyncData.insert(ns);
+                    fixUpInfo.collectionsToResyncData.insert(collectionNamespace.ns());
                     return Status::OK();
                 }
-                string collName = first.valuestr();
                 fixUpInfo.collectionsToRollBackPendingDrop.emplace(
-                    *uuid, std::make_pair(oplogEntry.getOpTime(), collName));
+                    *uuid, std::make_pair(oplogEntry.getOpTime(), collectionNamespace));
                 return Status::OK();
             }
             case OplogEntry::CommandType::kDropIndexes: {
@@ -465,9 +492,9 @@ void syncFixUp(OperationContext* opCtx,
     // exists when we attempt to resync its metadata or insert documents into it.
     for (const auto& collPair : fixUpInfo.collectionsToRollBackPendingDrop) {
         const auto& optime = collPair.second.first;
-        const auto& collName = collPair.second.second;
+        const auto& collectionNamespace = collPair.second.second;
         DropPendingCollectionReaper::get(opCtx)->rollBackDropPendingCollection(
-            opCtx, optime, collName);
+            opCtx, optime, collectionNamespace);
     }
 
     // Full collection data and metadata resync.
@@ -582,29 +609,31 @@ void syncFixUp(OperationContext* opCtx,
     log() << "Dropping collections to roll back create operations";
 
     // Drops collections before updating individual documents.
-    for (set<string>::iterator it = fixUpInfo.collectionsToDrop.begin();
-         it != fixUpInfo.collectionsToDrop.end();
+    for (auto it = fixUpInfo.collectionsToDrop.begin(); it != fixUpInfo.collectionsToDrop.end();
          it++) {
-        log() << "Dropping collection: " << *it;
 
-        invariant(!fixUpInfo.indexesToDrop.count(*it));
+        // TODO: This invariant will be uncommented once the rollback via refetch for non-WT
+        // project is complete. See SERVER-30171.
+        // invariant(!fixUpInfo.indexesToDrop.count(*it));
 
-        const NamespaceString nss(*it);
+        Collection* collection = UUIDCatalog::get(opCtx).lookupCollectionByUUID(*it);
+        NamespaceString nss = collection->ns();
+
         Lock::DBLock dbLock(opCtx, nss.db(), MODE_X);
-        Database* db = dbHolder().get(opCtx, nsToDatabaseSubstring(*it));
+        Database* db = dbHolder().get(opCtx, nss.db());
         if (db) {
-            Helpers::RemoveSaver removeSaver("rollback", "", *it);
+            Helpers::RemoveSaver removeSaver("rollback", "", nss.ns());
 
             // Performs a collection scan and writes all documents in the collection to disk
             // in order to keep an archive of items that were rolled back.
             auto exec = InternalPlanner::collectionScan(
-                opCtx, *it, db->getCollection(opCtx, *it), PlanExecutor::YIELD_AUTO);
+                opCtx, nss.toString(), collection, PlanExecutor::YIELD_AUTO);
             BSONObj curObj;
             PlanExecutor::ExecState execState;
             while (PlanExecutor::ADVANCED == (execState = exec->getNext(&curObj, NULL))) {
                 auto status = removeSaver.goingToDelete(curObj);
                 if (!status.isOK()) {
-                    severe() << "Rolling back createCollection on " << *it
+                    severe() << "Rolling back createCollection on " << nss
                              << " failed to write document to remove saver file: "
                              << redact(status);
                     throw RSFatalException(
@@ -624,12 +653,12 @@ void syncFixUp(OperationContext* opCtx,
                 if (execState == PlanExecutor::FAILURE &&
                     WorkingSetCommon::isValidStatusMemberObject(curObj)) {
                     Status errorStatus = WorkingSetCommon::getMemberObjectStatus(curObj);
-                    severe() << "Rolling back createCollection on " << *it << " failed with "
+                    severe() << "Rolling back createCollection on " << nss << " failed with "
                              << redact(errorStatus) << ". A full resync is necessary.";
                     throw RSFatalException(
                         "Rolling back createCollection failed. A full resync is necessary.");
                 } else {
-                    severe() << "Rolling back createCollection on " << *it
+                    severe() << "Rolling back createCollection on " << nss
                              << " failed. A full resync is necessary.";
                     throw RSFatalException(
                         "Rolling back createCollection failed. A full resync is necessary.");
@@ -637,8 +666,14 @@ void syncFixUp(OperationContext* opCtx,
             }
 
             WriteUnitOfWork wunit(opCtx);
+
+            // We permanently drop the collection rather than 2-phase drop the collection
+            // here. By not passing in an opTime to dropCollectionEvenIfSystem() the collection
+            // is immediately dropped.
             fassertStatusOK(40504, db->dropCollectionEvenIfSystem(opCtx, nss));
             wunit.commit();
+
+            log() << "Dropped collection with UUID: " << *it << " and nss: " << nss;
         }
     }
 
@@ -697,7 +732,10 @@ void syncFixUp(OperationContext* opCtx,
         // while rolling back createCollection operations.
         const auto& ns = nsAndGoodVersionsByDocID.first;
         unique_ptr<Helpers::RemoveSaver> removeSaver;
-        invariant(!fixUpInfo.collectionsToDrop.count(ns));
+
+        // TODO: This invariant will be uncommented once the
+        // rollback via refetch for non-WT project is complete. See SERVER-30171
+        // invariant(!fixUpInfo.collectionsToDrop.count(ns));
         removeSaver.reset(new Helpers::RemoveSaver("rollback", "", ns));
 
         const auto& goodVersionsByDocID = nsAndGoodVersionsByDocID.second;
@@ -777,13 +815,12 @@ void syncFixUp(OperationContext* opCtx,
                                     } catch (const DBException& e) {
                                         if (e.getCode() == 13415) {
                                             // hack: need to just make cappedTruncate do this...
-                                            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-                                                WriteUnitOfWork wunit(opCtx);
-                                                uassertStatusOK(collection->truncate(opCtx));
-                                                wunit.commit();
-                                            }
-                                            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(
-                                                opCtx, "truncate", collection->ns().ns());
+                                            writeConflictRetry(
+                                                opCtx, "truncate", collection->ns().ns(), [&] {
+                                                    WriteUnitOfWork wunit(opCtx);
+                                                    uassertStatusOK(collection->truncate(opCtx));
+                                                    wunit.commit();
+                                                });
                                         } else {
                                             throw e;
                                         }
@@ -839,15 +876,16 @@ void syncFixUp(OperationContext* opCtx,
 
     // Cleans up the oplog.
     {
-        const NamespaceString oplogNss(rsOplogName);
+        const NamespaceString oplogNss(NamespaceString::kRsOplogNamespace);
         Lock::DBLock oplogDbLock(opCtx, oplogNss.db(), MODE_IX);
         Lock::CollectionLock oplogCollectionLoc(opCtx->lockState(), oplogNss.ns(), MODE_X);
-        OldClientContext ctx(opCtx, rsOplogName);
+        OldClientContext ctx(opCtx, oplogNss.ns());
         Collection* oplogCollection = ctx.db()->getCollection(opCtx, oplogNss);
         if (!oplogCollection) {
-            fassertFailedWithStatusNoTrace(40495,
-                                           Status(ErrorCodes::UnrecoverableRollbackError,
-                                                  str::stream() << "Can't find " << rsOplogName));
+            fassertFailedWithStatusNoTrace(
+                40495,
+                Status(ErrorCodes::UnrecoverableRollbackError,
+                       str::stream() << "Can't find " << NamespaceString::kRsOplogNamespace.ns()));
         }
         // TODO: fatal error if this throws?
         oplogCollection->cappedTruncateAfter(opCtx, fixUpInfo.commonPointOurDiskloc, false);
@@ -857,6 +895,11 @@ void syncFixUp(OperationContext* opCtx,
     if (!status.isOK()) {
         severe() << "Failed to reinitialize auth data after rollback: " << redact(status);
         fassertFailedNoTrace(40496);
+    }
+
+    // If necessary, clear the in-memory session transaction table.
+    if (fixUpInfo.refetchTransactionDocs) {
+        SessionCatalog::get(opCtx)->clearTransactionTable();
     }
 
     // Reload the lastAppliedOpTime and lastDurableOpTime value in the replcoord and the

@@ -48,6 +48,7 @@ void SetNode::updateExistingElement(mutablebson::Element* element, bool* noop) c
     if (element->getValue().binaryEqualValues(_val)) {
         *noop = true;
     } else {
+        *noop = false;
         invariantOK(element->setValueBSONElement(_val));
     }
 }

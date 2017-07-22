@@ -30,12 +30,11 @@
 
 #include <boost/optional.hpp>
 
-#include "mongo/base/disallow_copying.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/write_ops/batched_delete_request.h"
 #include "mongo/s/write_ops/batched_insert_request.h"
 #include "mongo/s/write_ops/batched_update_request.h"
-#include "mongo/s/write_ops/write_ops_gen.h"
 #include "mongo/util/net/op_msg.h"
 
 namespace mongo {
@@ -50,8 +49,6 @@ class NamespaceString;
  * wrapped request object once constructed.
  */
 class BatchedCommandRequest {
-    MONGO_DISALLOW_COPYING(BatchedCommandRequest);
-
 public:
     // Maximum number of write ops supported per batch
     static const size_t kMaxWriteBatchSize;
@@ -78,7 +75,6 @@ public:
     BatchedCommandRequest(BatchedDeleteRequest* deleteReq)
         : _batchType(BatchType_Delete), _deleteReq(deleteReq) {}
 
-    bool isValid(std::string* errMsg) const;
     BSONObj toBSON() const;
     void parseRequest(const OpMsgRequest& request);
     std::string toString() const;
@@ -116,14 +112,8 @@ public:
     std::size_t sizeWriteOps() const;
 
     void setWriteConcern(const BSONObj& writeConcern);
-    void unsetWriteConcern();
     bool isWriteConcernSet() const;
     const BSONObj& getWriteConcern() const;
-
-    void setOrdered(bool ordered);
-    void unsetOrdered();
-    bool isOrderedSet() const;
-    bool getOrdered() const;
 
     void setShardVersion(ChunkVersion shardVersion) {
         _shardVersion = std::move(shardVersion);
@@ -137,23 +127,8 @@ public:
         return _shardVersion.get();
     }
 
-    const boost::optional<std::int64_t> getTxnNum() const&;
-    void setTxnNum(boost::optional<std::int64_t> value);
-
-    const boost::optional<std::vector<std::int32_t>> getStmtIds() const&;
-    void setStmtIds(boost::optional<std::vector<std::int32_t>> value);
-
-    /**
-     * Retrieves the statement id for the write at the specified position in the write batch entries
-     * array.
-     *
-     * This method may only be called if a TxnNumber has been given for the operation, otherwise it
-     * will fassert.
-     */
-    int32_t getStmtIdForWriteAt(size_t writePos) const;
-
-    void setShouldBypassValidation(bool newVal);
-    bool shouldBypassValidation() const;
+    const write_ops::WriteCommandBase& getWriteCommandBase() const;
+    void setWriteCommandBase(write_ops::WriteCommandBase writeCommandBase);
 
     //
     // Helpers for batch pre-processing
@@ -165,42 +140,18 @@ public:
      */
     static BatchedCommandRequest* cloneWithIds(const BatchedCommandRequest& origCmdRequest);
 
-    /**
-     * Whether or not this batch contains an upsert without an _id - these can't be sent
-     * to multiple hosts.
-     */
-    static bool containsNoIDUpsert(const BatchedCommandRequest& request);
-
-    //
-    // Helpers for auth pre-parsing
-    //
-
-    /**
-     * Helper to determine whether or not there are any upserts in the batch
-     */
-    static bool containsUpserts(const BSONObj& writeCmdObj);
-
-    /**
-     * Helper to extract the namespace being indexed from a raw BSON write command.
-     *
-     * Returns false with errMsg if the index write command seems invalid.
-     * TODO: Remove when we have parsing hooked before authorization
-     */
-    static bool getIndexedNS(const BSONObj& writeCmdObj,
-                             std::string* nsToIndex,
-                             std::string* errMsg);
-
 private:
     BatchType _batchType;
 
-    boost::optional<ChunkVersion> _shardVersion;
+    write_ops::WriteCommandBase _writeCommandBase;
 
     std::unique_ptr<BatchedInsertRequest> _insertReq;
     std::unique_ptr<BatchedUpdateRequest> _updateReq;
     std::unique_ptr<BatchedDeleteRequest> _deleteReq;
 
-    // If this write is retriable, contains information about the retriability of the write
-    WriteOpTxnInfo _txnInfo;
+    boost::optional<ChunkVersion> _shardVersion;
+
+    boost::optional<BSONObj> _writeConcern;
 };
 
 /**

@@ -48,7 +48,7 @@ namespace {
  * Cluster index filter commands don't do much more than
  * forwarding the commands to all shards and combining the results.
  */
-class ClusterIndexFilterCmd : public Command {
+class ClusterIndexFilterCmd : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterIndexFilterCmd);
 
 public:
@@ -57,7 +57,7 @@ public:
      * "helpText", and will require privilege "actionType" to run.
      */
     ClusterIndexFilterCmd(const std::string& name, const std::string& helpText)
-        : Command(name), _helpText(helpText) {}
+        : BasicCommand(name), _helpText(helpText) {}
 
     virtual ~ClusterIndexFilterCmd() {}
 
@@ -94,7 +94,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) {
         const NamespaceString nss(parseNs(dbname, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,

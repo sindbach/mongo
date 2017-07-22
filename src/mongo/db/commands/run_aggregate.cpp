@@ -41,6 +41,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/pipeline_proxy.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -99,8 +100,10 @@ bool handleCursorCommand(OperationContext* opCtx,
         // do it when batchSize is 0 since that indicates a desire for a fast return.
         PlanExecutor::ExecState state;
         if ((state = cursor->getExecutor()->getNext(&next, nullptr)) == PlanExecutor::IS_EOF) {
-            // make it an obvious error to use cursor or executor after this point
-            cursor = nullptr;
+            if (!cursor->isTailable()) {
+                // make it an obvious error to use cursor or executor after this point
+                cursor = nullptr;
+            }
             break;
         }
 
@@ -144,6 +147,15 @@ bool handleCursorCommand(OperationContext* opCtx,
 
 StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNamespaces(
     OperationContext* opCtx, const AggregationRequest& request) {
+    const LiteParsedPipeline liteParsedPipeline(request);
+    const auto& pipelineInvolvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
+
+    // If there are no involved namespaces, return before attempting to take any locks. This is
+    // important for collectionless aggregations, which may be expected to run without locking.
+    if (pipelineInvolvedNamespaces.empty()) {
+        return {StringMap<ExpressionContext::ResolvedNamespace>()};
+    }
+
     // We intentionally do not drop and reacquire our DB lock after resolving the view definition in
     // order to prevent the definition for any view namespaces we've already resolved from changing.
     // This is necessary to prevent a cycle from being formed among the view definitions cached in
@@ -152,8 +164,6 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
     Database* const db = autoDb.getDb();
     ViewCatalog* viewCatalog = db ? db->getViewCatalog() : nullptr;
 
-    const LiteParsedPipeline liteParsedPipeline(request);
-    const auto& pipelineInvolvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
     std::deque<NamespaceString> involvedNamespacesQueue(pipelineInvolvedNamespaces.begin(),
                                                         pipelineInvolvedNamespaces.end());
     StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
@@ -286,26 +296,43 @@ Status runAggregate(OperationContext* opCtx,
     {
         const LiteParsedPipeline liteParsedPipeline(request);
         if (liteParsedPipeline.startsWithChangeNotification()) {
-            nss = NamespaceString(repl::rsOplogName);
+            nss = NamespaceString::kRsOplogNamespace;
         }
 
-        // This will throw if the sharding version for this connection is out of date. If the
-        // namespace is a view, the lock will be released before re-running the aggregation.
-        AutoGetCollectionOrViewForReadCommand ctx(opCtx, nss);
-        Collection* collection = ctx.getCollection();
+        const auto& pipelineInvolvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
+
+        // If emplaced, AutoGetCollectionOrViewForReadCommand will throw if the sharding version for
+        // this connection is out of date. If the namespace is a view, the lock will be released
+        // before re-running the expanded aggregation.
+        boost::optional<AutoGetCollectionOrViewForReadCommand> ctx;
+
+        // If this is a collectionless aggregation, we won't create 'ctx' but will still need an
+        // AutoStatsTracker to record CurOp and Top entries.
+        boost::optional<AutoStatsTracker> statsTracker;
+
+        // If this is a collectionless aggregation with no foreign namespaces, we don't want to
+        // acquire any locks. Otherwise, lock the collection or view.
+        if (nss.isCollectionlessAggregateNS() && pipelineInvolvedNamespaces.empty()) {
+            statsTracker.emplace(opCtx, nss, Top::LockType::NotLocked, 0);
+        } else {
+            ctx.emplace(opCtx, nss);
+        }
+
+        Collection* collection = ctx ? ctx->getCollection() : nullptr;
 
         // If this is a view, resolve it by finding the underlying collection and stitching view
         // pipelines and this request's pipeline together. We then release our locks before
         // recursively calling runAggregate(), which will re-acquire locks on the underlying
         // collection.  (The lock must be released because recursively acquiring locks on the
         // database will prohibit yielding.)
-        if (ctx.getView() && !liteParsedPipeline.startsWithCollStats()) {
-            invariant(nss != repl::rsOplogName);
+        if (ctx && ctx->getView() && !liteParsedPipeline.startsWithCollStats()) {
+            invariant(nss != NamespaceString::kRsOplogNamespace);
+            invariant(!nss.isCollectionlessAggregateNS());
             // Check that the default collation of 'view' is compatible with the operation's
             // collation. The check is skipped if the 'request' has the empty collation, which
             // means that no collation was specified.
             if (!request.getCollation().isEmpty()) {
-                if (!CollatorInterface::collatorsMatch(ctx.getView()->defaultCollator(),
+                if (!CollatorInterface::collatorsMatch(ctx->getView()->defaultCollator(),
                                                        userSpecifiedCollator.get())) {
                     return {ErrorCodes::OptionNotSupportedOnView,
                             "Cannot override a view's default collation"};
@@ -313,7 +340,7 @@ Status runAggregate(OperationContext* opCtx,
             }
 
             auto viewDefinition =
-                ViewShardingCheck::getResolvedViewIfSharded(opCtx, ctx.getDb(), ctx.getView());
+                ViewShardingCheck::getResolvedViewIfSharded(opCtx, ctx->getDb(), ctx->getView());
             if (!viewDefinition.isOK()) {
                 return viewDefinition.getStatus();
             }
@@ -323,17 +350,17 @@ Status runAggregate(OperationContext* opCtx,
                                                                     &result);
             }
 
-            auto resolvedView = ctx.getDb()->getViewCatalog()->resolveView(opCtx, nss);
+            auto resolvedView = ctx->getDb()->getViewCatalog()->resolveView(opCtx, nss);
             if (!resolvedView.isOK()) {
                 return resolvedView.getStatus();
             }
 
-            auto collationSpec = ctx.getView()->defaultCollator()
-                ? ctx.getView()->defaultCollator()->getSpec().toBSON().getOwned()
+            auto collationSpec = ctx->getView()->defaultCollator()
+                ? ctx->getView()->defaultCollator()->getSpec().toBSON().getOwned()
                 : CollationSpec::kSimpleSpec;
 
             // With the view & collation resolved, we can relinquish locks.
-            ctx.releaseLocksForView();
+            ctx->releaseLocksForView();
 
             // Parse the resolved view into a new aggregation request.
             auto newRequest = resolvedView.getValue().asExpandedViewAggregation(request);
@@ -369,6 +396,10 @@ Status runAggregate(OperationContext* opCtx,
                                   uassertStatusOK(resolveInvolvedNamespaces(opCtx, request))));
         expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
 
+        if (liteParsedPipeline.startsWithChangeNotification()) {
+            expCtx->tailableMode = ExpressionContext::TailableMode::kTailableAndAwaitData;
+        }
+
         // Parse the pipeline.
         auto statusWithPipeline = Pipeline::parse(request.getPipeline(), expCtx);
         if (!statusWithPipeline.isOK()) {
@@ -378,10 +409,13 @@ Status runAggregate(OperationContext* opCtx,
 
         // Check that the view's collation matches the collation of any views involved
         // in the pipeline.
-        auto pipelineCollationStatus = collatorCompatibleWithPipeline(
-            opCtx, ctx.getDb(), expCtx->getCollator(), pipeline.get());
-        if (!pipelineCollationStatus.isOK()) {
-            return pipelineCollationStatus;
+        if (!pipelineInvolvedNamespaces.empty()) {
+            invariant(ctx);
+            auto pipelineCollationStatus = collatorCompatibleWithPipeline(
+                opCtx, ctx->getDb(), expCtx->getCollator(), pipeline.get());
+            if (!pipelineCollationStatus.isOK()) {
+                return pipelineCollationStatus;
+            }
         }
 
         pipeline->optimizePipeline();
@@ -424,13 +458,20 @@ Status runAggregate(OperationContext* opCtx,
     // cursor manager. The global cursor manager does not deliver invalidations or kill
     // notifications; the underlying PlanExecutor(s) used by the pipeline will be receiving
     // invalidations and kill notifications themselves, not the cursor we create here.
-    auto pin = CursorManager::getGlobalCursorManager()->registerCursor(
-        opCtx,
-        {std::move(exec),
-         origNss,
-         AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
-         opCtx->recoveryUnit()->isReadingFromMajorityCommittedSnapshot(),
-         cmdObj});
+    ClientCursorParams cursorParams(
+        std::move(exec),
+        origNss,
+        AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
+        opCtx->recoveryUnit()->isReadingFromMajorityCommittedSnapshot(),
+        cmdObj);
+    if (expCtx->tailableMode == ExpressionContext::TailableMode::kTailableAndAwaitData) {
+        cursorParams.setTailable(true);
+        cursorParams.setAwaitData(true);
+    }
+
+    auto pin =
+        CursorManager::getGlobalCursorManager()->registerCursor(opCtx, std::move(cursorParams));
+
     ScopeGuard cursorFreer = MakeGuard(&ClientCursorPin::deleteUnderlying, &pin);
 
     // If both explain and cursor are specified, explain wins.

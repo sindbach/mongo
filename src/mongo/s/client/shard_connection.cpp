@@ -89,9 +89,9 @@ private:
 /**
  * Command to allow access to the sharded conn pool information in mongos.
  */
-class ShardedPoolStats : public Command {
+class ShardedPoolStats : public BasicCommand {
 public:
-    ShardedPoolStats() : Command("shardConnPoolStats") {}
+    ShardedPoolStats() : BasicCommand("shardConnPoolStats") {}
     virtual void help(stringstream& help) const {
         help << "stats about the shard connection pool";
     }
@@ -114,7 +114,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const mongo::BSONObj& cmdObj,
-                     std::string& errmsg,
                      mongo::BSONObjBuilder& result) {
         // Connection information
         executor::ConnectionPoolStats stats{};

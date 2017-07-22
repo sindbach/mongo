@@ -44,9 +44,9 @@
 namespace mongo {
 namespace {
 
-class UnsetShardingCommand : public Command {
+class UnsetShardingCommand : public BasicCommand {
 public:
-    UnsetShardingCommand() : Command("unsetSharding") {}
+    UnsetShardingCommand() : BasicCommand("unsetSharding") {}
 
     void help(std::stringstream& help) const override {
         help << "internal";
@@ -75,7 +75,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         ShardedConnectionInfo::reset(opCtx->getClient());
         return true;

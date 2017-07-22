@@ -36,30 +36,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/util/assert_util.h"
 
-// Use of this macro is deprecated.  Prefer the writeConflictRetry template, below, instead.
-
-// clang-format off
-
-#define MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN                           \
-    do {                                                                \
-        int WCR_attempts = 0;                                           \
-        do {                                                            \
-            try
-#define MONGO_WRITE_CONFLICT_RETRY_LOOP_END(PTXN, OPSTR, NSSTR)         \
-            catch (const ::mongo::WriteConflictException& WCR_wce) {    \
-                OperationContext const* WCR_opCtx = (PTXN);             \
-                ++CurOp::get(WCR_opCtx)->debug().writeConflicts;        \
-                WCR_wce.logAndBackoff(WCR_attempts, (OPSTR), (NSSTR));  \
-                ++WCR_attempts;                                         \
-                WCR_opCtx->recoveryUnit()->abandonSnapshot();           \
-                continue;                                               \
-            }                                                           \
-            break;                                                      \
-        } while (true);                                                 \
-    } while (false)
-
-// clang-format on
-
 namespace mongo {
 
 /**
@@ -91,12 +67,6 @@ public:
  * other than WriteConflictException.  For each time f throws a WriteConflictException, logs the
  * error, waits a spell, cleans up, and then tries f again.  Imposes no upper limit on the number
  * of times to re-try f, so any required timeout behavior must be enforced within f.
- *
- * When converting from uses of the deprecated macros MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN/_END,
- * return-statements in the body code (ending up in f) must be converted to redirect control flow
- * by some other means, such as throwing an exception or returning a value for the caller to check.
- * Similarly, any value produced in f must be transported out via returned result or via a captured
- * pointer or reference.
  */
 template <typename F>
 auto writeConflictRetry(OperationContext* opCtx, StringData opStr, StringData ns, F&& f) {
@@ -104,9 +74,9 @@ auto writeConflictRetry(OperationContext* opCtx, StringData opStr, StringData ns
     while (true) {
         try {
             return f();
-        } catch (WriteConflictException const& wce) {
+        } catch (WriteConflictException const&) {
             ++CurOp::get(opCtx)->debug().writeConflicts;
-            wce.logAndBackoff(attempts, opStr, ns);
+            WriteConflictException::logAndBackoff(attempts, opStr, ns);
             ++attempts;
             opCtx->recoveryUnit()->abandonSnapshot();
         }

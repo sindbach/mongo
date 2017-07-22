@@ -51,9 +51,9 @@
 namespace mongo {
 namespace {
 
-class ClusterKillOpCommand : public Command {
+class ClusterKillOpCommand : public BasicCommand {
 public:
-    ClusterKillOpCommand() : Command("killOp") {}
+    ClusterKillOpCommand() : BasicCommand("killOp") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -79,7 +79,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& db,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) final {
         // The format of op is shardid:opid
         // This is different than the format passed to the mongod killOp command.

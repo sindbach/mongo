@@ -28,8 +28,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/optional.hpp>
-#include <cctype>
 #include <vector>
 
 #include "mongo/db/pipeline/document_path_support.h"
@@ -39,29 +37,12 @@
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/value.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 namespace document_path_support {
 
 namespace {
-
-/**
- * Returns the array index that should be used if 'fieldName' represents a positional path
- * specification (as '0' does in 'a.0'), or boost::none if 'fieldName' does not represent a
- * positional path specification.
- */
-boost::optional<size_t> getPositionalPathSpecification(StringData fieldName) {
-    // Do not accept positions like '-4' or '+4'
-    if (!std::isdigit(fieldName[0])) {
-        return boost::none;
-    }
-    unsigned int index;
-    auto status = parseNumberFromStringWithBase<unsigned int>(fieldName, 10, &index);
-    if (status.isOK()) {
-        return static_cast<size_t>(index);
-    }
-    return boost::none;
-}
 
 /**
  * If 'value' is an array, invokes 'callback' once on each element of 'value'. Otherwise, if 'value'
@@ -99,7 +80,7 @@ void visitAllValuesAtPathHelper(Document doc,
     // positional specifications, if applicable. For example, it will consume "0" and "1" from the
     // path "a.0.1.b" if the value at "a" is an array with arrays inside it.
     while (fieldPathIndex < path.getPathLength() && nextValue.isArray()) {
-        if (auto index = getPositionalPathSpecification(path.getFieldName(fieldPathIndex))) {
+        if (auto index = parseUnsignedBase10Integer(path.getFieldName(fieldPathIndex))) {
             nextValue = nextValue[*index];
             ++fieldPathIndex;
         } else {
@@ -136,6 +117,38 @@ void visitAllValuesAtPath(const Document& doc,
                           const FieldPath& path,
                           stdx::function<void(const Value&)> callback) {
     visitAllValuesAtPathHelper(doc, path, 0, callback);
+}
+
+StatusWith<Value> extractElementAlongNonArrayPath(const Document& doc, const FieldPath& path) {
+    invariant(path.getPathLength() > 0);
+    Value curValue = doc.getField(path.getFieldName(0));
+    if (curValue.getType() == BSONType::Array) {
+        return {ErrorCodes::InternalError, "array along path"};
+    }
+
+    for (size_t i = 1; i < path.getPathLength(); i++) {
+        curValue = curValue[path.getFieldName(i)];
+        if (curValue.getType() == BSONType::Array) {
+            return {ErrorCodes::InternalError, "array along path"};
+        }
+    }
+
+    return curValue;
+}
+
+BSONObj documentToBsonWithPaths(const Document& input, const std::set<std::string>& paths) {
+    BSONObjBuilder outputBuilder;
+    for (auto&& path : paths) {
+        // getNestedField does not handle dotted paths correctly, so instead of retrieving the
+        // entire path, we just extract the first element of the path.
+        const auto prefix = FieldPath::extractFirstFieldFromDottedPath(path);
+        if (!outputBuilder.hasField(prefix)) {
+            // Avoid adding the same prefix twice.
+            input.getField(prefix).addToBsonObj(&outputBuilder, prefix);
+        }
+    }
+
+    return outputBuilder.obj();
 }
 
 }  // namespace document_path_support

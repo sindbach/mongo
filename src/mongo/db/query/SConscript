@@ -81,12 +81,13 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/index_catalog_entry',
         "$BUILD_DIR/mongo/db/curop",
         "$BUILD_DIR/mongo/db/exec/exec",
+        "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
         "$BUILD_DIR/mongo/db/s/sharding",
         "$BUILD_DIR/mongo/db/storage/oplog_hack",
         "$BUILD_DIR/mongo/util/elapsed_tracker",
         "$BUILD_DIR/mongo/db/matcher/expressions_mongod_only",
         #'$BUILD_DIR/mongo/db/clientcursor', # CYCLE
-        #'$BUILD_DIR/mongo/db/ops/write_ops', # CYCLE
+        #'$BUILD_DIR/mongo/db/write_ops', # CYCLE
         #'$BUILD_DIR/mongo/db/catalog/catalog', # CYCLE
     ],
     LIBDEPS_TAGS=[
@@ -173,7 +174,7 @@ env.Library(
         "$BUILD_DIR/mongo/base",
         "$BUILD_DIR/mongo/db/index/expression_params",
         "$BUILD_DIR/mongo/db/index_names",
-        "$BUILD_DIR/mongo/db/matcher/expressions_geo",
+        "$BUILD_DIR/mongo/db/matcher/expressions",
         "$BUILD_DIR/mongo/db/mongohasher",
         "$BUILD_DIR/mongo/db/server_parameters",
         "collation/collator_interface",

@@ -36,7 +36,7 @@
 
 namespace mongo {
 
-class CmdAuthenticate : public Command {
+class CmdAuthenticate : public BasicCommand {
 public:
     static void disableAuthMechanism(std::string authMechanism);
 
@@ -54,11 +54,10 @@ public:
                                        std::vector<Privilege>* out) {}  // No auth required
     virtual void redactForLogging(mutablebson::Document* cmdObj);
 
-    CmdAuthenticate() : Command("authenticate") {}
+    CmdAuthenticate() : BasicCommand("authenticate") {}
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result);
 
 private:

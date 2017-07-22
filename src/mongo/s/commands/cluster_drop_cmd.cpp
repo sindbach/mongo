@@ -46,9 +46,9 @@
 namespace mongo {
 namespace {
 
-class DropCmd : public Command {
+class DropCmd : public BasicCommand {
 public:
-    DropCmd() : Command("drop") {}
+    DropCmd() : BasicCommand("drop") {}
 
     bool slaveOk() const override {
         return true;
@@ -73,7 +73,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         const NamespaceString nss(parseNsCollectionRequired(dbname, cmdObj));
 
@@ -89,7 +88,7 @@ public:
         if (!routingInfo.cm()) {
             _dropUnshardedCollectionFromShard(opCtx, routingInfo.primaryId(), nss, &result);
         } else {
-            uassertStatusOK(Grid::get(opCtx)->catalogClient(opCtx)->dropCollection(opCtx, nss));
+            uassertStatusOK(Grid::get(opCtx)->catalogClient()->dropCollection(opCtx, nss));
             catalogCache->invalidateShardedCollection(nss);
         }
 
@@ -105,7 +104,7 @@ private:
                                                   const ShardId& shardId,
                                                   const NamespaceString& nss,
                                                   BSONObjBuilder* result) {
-        const auto catalogClient = Grid::get(opCtx)->catalogClient(opCtx);
+        const auto catalogClient = Grid::get(opCtx)->catalogClient();
         const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
 
         auto scopedDistLock = uassertStatusOK(catalogClient->getDistLockManager()->lock(

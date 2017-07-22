@@ -40,6 +40,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/collation/collator_factory_mock.h"
 #include "mongo/db/query/query_request.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -53,7 +54,6 @@
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/dist_lock_manager_mock.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_shard.h"
@@ -65,7 +65,6 @@
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/set_shard_version_request.h"
 #include "mongo/s/sharding_egress_metadata_hook_for_mongos.h"
-#include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/transport/mock_session.h"
@@ -145,10 +144,11 @@ void ShardingTestFixture::setUp() {
 
     auto uniqueDistLockManager = stdx::make_unique<DistLockManagerMock>(nullptr);
     _distLockManager = uniqueDistLockManager.get();
+
     std::unique_ptr<ShardingCatalogClientImpl> catalogClient(
         stdx::make_unique<ShardingCatalogClientImpl>(std::move(uniqueDistLockManager)));
     _catalogClient = catalogClient.get();
-    catalogClient->startup().transitional_ignore();
+    catalogClient->startup();
 
     ConnectionString configCS = ConnectionString::forReplicaSet(
         "configRS", {HostAndPort{"TestHost1"}, HostAndPort{"TestHost2"}});
@@ -188,7 +188,6 @@ void ShardingTestFixture::setUp() {
     // until we get rid of it.
     Grid::get(operationContext())
         ->init(std::move(catalogClient),
-               nullptr,
                stdx::make_unique<CatalogCache>(),
                std::move(shardRegistry),
                stdx::make_unique<ClusterCursorManager>(serviceContext()->getPreciseClockSource()),
@@ -199,7 +198,7 @@ void ShardingTestFixture::setUp() {
 
 void ShardingTestFixture::tearDown() {
     Grid::get(operationContext())->getExecutorPool()->shutdownAndJoin();
-    Grid::get(operationContext())->catalogClient(_opCtx.get())->shutDown(_opCtx.get());
+    Grid::get(operationContext())->catalogClient()->shutDown(_opCtx.get());
     Grid::get(operationContext())->clearForUnitTests();
 
     _transportSession.reset();
@@ -213,7 +212,7 @@ void ShardingTestFixture::shutdownExecutor() {
 }
 
 ShardingCatalogClient* ShardingTestFixture::catalogClient() const {
-    return Grid::get(operationContext())->catalogClient(_opCtx.get());
+    return Grid::get(operationContext())->catalogClient();
 }
 
 ShardingCatalogClientImpl* ShardingTestFixture::getCatalogClient() const {
@@ -327,13 +326,11 @@ void ShardingTestFixture::expectInserts(const NamespaceString& nss,
     onCommand([&nss, &expected](const RemoteCommandRequest& request) {
         ASSERT_EQUALS(nss.db(), request.dbname);
 
-        BatchedInsertRequest actualBatchedInsert;
-        actualBatchedInsert.parseRequest(
-            OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
+        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+        const auto insertOp = InsertOp::parse(opMsgRequest);
+        ASSERT_EQUALS(nss.ns(), insertOp.getNamespace().ns());
 
-        ASSERT_EQUALS(nss.toString(), actualBatchedInsert.getNS().toString());
-
-        auto inserted = actualBatchedInsert.getDocuments();
+        const auto& inserted = insertOp.getDocuments();
         ASSERT_EQUALS(expected.size(), inserted.size());
 
         auto itInserted = inserted.begin();
@@ -380,16 +377,15 @@ void ShardingTestFixture::expectConfigCollectionInsert(const HostAndPort& config
                                                        const BSONObj& detail) {
     onCommand([&](const RemoteCommandRequest& request) {
         ASSERT_EQUALS(configHost, request.target);
-        ASSERT_EQUALS("config", request.dbname);
+        ASSERT_EQUALS(NamespaceString::kConfigDb, request.dbname);
 
-        BatchedInsertRequest actualBatchedInsert;
-        actualBatchedInsert.parseRequest(
-            OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
+        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+        const auto insertOp = InsertOp::parse(opMsgRequest);
 
-        ASSERT_EQ("config", actualBatchedInsert.getNS().db());
-        ASSERT_EQ(collName, actualBatchedInsert.getNS().coll());
+        ASSERT_EQ(NamespaceString::kConfigDb, insertOp.getNamespace().db());
+        ASSERT_EQ(collName, insertOp.getNamespace().coll());
 
-        auto inserts = actualBatchedInsert.getDocuments();
+        const auto& inserts = insertOp.getDocuments();
         ASSERT_EQUALS(1U, inserts.size());
 
         const ChangeLogType& actualChangeLog = assertGet(ChangeLogType::fromBSON(inserts.front()));
@@ -445,21 +441,20 @@ void ShardingTestFixture::expectUpdateCollection(const HostAndPort& expectedHost
         ASSERT_EQUALS(expectedHost, request.target);
         ASSERT_BSONOBJ_EQ(BSON(rpc::kReplSetMetadataFieldName << 1),
                           rpc::TrackingMetadata::removeTrackingData(request.metadata));
-        ASSERT_EQUALS("config", request.dbname);
+        ASSERT_EQUALS(NamespaceString::kConfigDb, request.dbname);
 
-        BatchedUpdateRequest actualBatchedUpdate;
-        actualBatchedUpdate.parseRequest(
-            OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
-        ASSERT_EQUALS(CollectionType::ConfigNS, actualBatchedUpdate.getNS().ns());
-        auto updates = actualBatchedUpdate.getUpdates();
+        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
+        const auto updateOp = UpdateOp::parse(opMsgRequest);
+        ASSERT_EQUALS(CollectionType::ConfigNS, updateOp.getNamespace().ns());
+
+        const auto& updates = updateOp.getUpdates();
         ASSERT_EQUALS(1U, updates.size());
-        auto update = updates.front();
 
-        ASSERT_EQ(expectUpsert, update->getUpsert());
-        ASSERT_FALSE(update->getMulti());
-        ASSERT_BSONOBJ_EQ(update->getQuery(),
-                          BSON(CollectionType::fullNs(coll.getNs().toString())));
-        ASSERT_BSONOBJ_EQ(update->getUpdateExpr(), coll.toBSON());
+        const auto& update = updates.front();
+        ASSERT_EQ(expectUpsert, update.getUpsert());
+        ASSERT(!update.getMulti());
+        ASSERT_BSONOBJ_EQ(BSON(CollectionType::fullNs(coll.getNs().toString())), update.getQ());
+        ASSERT_BSONOBJ_EQ(coll.toBSON(), update.getU());
 
         BatchedCommandResponse response;
         response.setOk(true);

@@ -64,9 +64,9 @@ using std::map;
 using std::string;
 using std::stringstream;
 
-class CmdServerStatus : public Command {
+class CmdServerStatus : public BasicCommand {
 public:
-    CmdServerStatus() : Command("serverStatus"), _started(Date_t::now()), _runCalled(false) {}
+    CmdServerStatus() : BasicCommand("serverStatus"), _started(Date_t::now()), _runCalled(false) {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -88,7 +88,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         _runCalled = true;
 
@@ -296,6 +295,10 @@ public:
         BSONObjBuilder b;
         networkCounter.append(b);
         appendMessageCompressionStats(&b);
+        auto executor = opCtx->getServiceContext()->getServiceExecutor();
+        if (executor)
+            executor->appendStats(&b);
+
         return b.obj();
     }
 

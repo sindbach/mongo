@@ -31,7 +31,8 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/logical_session_cache.h"
+#include "mongo/db/keys_collection_manager.h"
+#include "mongo/db/logical_session_id.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/unordered_set.h"
@@ -39,6 +40,7 @@
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/transport/service_executor_base.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -266,6 +268,28 @@ public:
     virtual StorageEngine* getGlobalStorageEngine() = 0;
 
     //
+    // Key manager, for HMAC keys.
+    //
+
+    /**
+     * Sets the key manager on this service context.
+     */
+    void setKeyManager(std::shared_ptr<KeysCollectionManager> keyManager) & {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        _keyManager = std::move(keyManager);
+    }
+
+    /**
+     * Returns a pointer to the keys collection manager owned by this service context.
+     */
+    std::shared_ptr<KeysCollectionManager> getKeyManager() & {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        return _keyManager;
+    }
+
+    std::shared_ptr<KeysCollectionManager> getKeyManager() && = delete;
+
+    //
     // Global operation management.  This may not belong here and there may be too many methods
     // here.
     //
@@ -329,21 +353,6 @@ public:
     PeriodicRunner* getPeriodicRunner() const;
 
     //
-    // Logical sessions.
-    //
-
-    /**
-     * Set the logical session cache on this service context.
-     */
-    void setLogicalSessionCache(std::unique_ptr<LogicalSessionCache> cache) &;
-
-    /**
-     * Return a pointer to the logical session cache on this service context.
-     */
-    LogicalSessionCache* getLogicalSessionCache() const&;
-    LogicalSessionCache* getLogicalSessionCache() && = delete;
-
-    //
     // Transport.
     //
 
@@ -361,6 +370,14 @@ public:
      * See ServiceEntryPoint for more details.
      */
     ServiceEntryPoint* getServiceEntryPoint() const;
+
+    /**
+     * Get the service executor for the service context.
+     *
+     * See ServiceStateMachine for how this is used. Some configurations may not have a service
+     * executor registered and this will return a nullptr.
+     */
+    transport::ServiceExecutor* getServiceExecutor() const;
 
     /**
      * Waits for the ServiceContext to be fully initialized and for all TransportLayers to have been
@@ -436,6 +453,11 @@ public:
      */
     void setTransportLayer(std::unique_ptr<transport::TransportLayer> tl);
 
+    /**
+     * Binds the service executor to the service context
+     */
+    void setServiceExecutor(std::unique_ptr<transport::ServiceExecutor> exec);
+
 protected:
     ServiceContext();
 
@@ -459,14 +481,14 @@ private:
     void _killOperation_inlock(OperationContext* opCtx, ErrorCodes::Error killCode);
 
     /**
+     * The key manager.
+     */
+    std::shared_ptr<KeysCollectionManager> _keyManager;
+
+    /**
      * The periodic runner.
      */
     std::unique_ptr<PeriodicRunner> _runner;
-
-    /**
-     * The logical session cache.
-     */
-    std::unique_ptr<LogicalSessionCache> _sessionCache;
 
     /**
      * The TransportLayer.
@@ -477,6 +499,11 @@ private:
      * The service entry point
      */
     std::unique_ptr<ServiceEntryPoint> _serviceEntryPoint;
+
+    /**
+     * The ServiceExecutor
+     */
+    std::unique_ptr<transport::ServiceExecutor> _serviceExecutor;
 
     /**
      * Vector of registered observers.
@@ -523,6 +550,17 @@ bool hasGlobalServiceContext();
  * Caller does not own pointer.
  */
 ServiceContext* getGlobalServiceContext();
+
+/**
+ * Warning - This function is temporary. Do not introduce new uses of this API.
+ *
+ * Returns the singleton ServiceContext for this server process.
+ *
+ * Waits until there is a valid global ServiceContext.
+ *
+ * Caller does not own pointer.
+ */
+ServiceContext* waitAndGetGlobalServiceContext();
 
 /**
  * Sets the global ServiceContext.  If 'serviceContext' is NULL, un-sets and deletes

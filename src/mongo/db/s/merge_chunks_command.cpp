@@ -86,7 +86,8 @@ Status mergeChunks(OperationContext* opCtx,
     // TODO(SERVER-25086): Remove distLock acquisition from merge chunk
     const string whyMessage = stream() << "merging chunks in " << nss.ns() << " from " << minKey
                                        << " to " << maxKey;
-    auto scopedDistLock = grid.catalogClient(opCtx)->getDistLockManager()->lock(
+
+    auto scopedDistLock = Grid::get(opCtx)->catalogClient()->getDistLockManager()->lock(
         opCtx, nss.ns(), whyMessage, DistLockManager::kSingleLockAttemptTimeout);
 
     if (!scopedDistLock.isOK()) {
@@ -318,9 +319,9 @@ Status mergeChunks(OperationContext* opCtx,
     return Status::OK();
 }
 
-class MergeChunksCommand : public Command {
+class MergeChunksCommand : public ErrmsgCommandDeprecated {
 public:
-    MergeChunksCommand() : Command("mergeChunks") {}
+    MergeChunksCommand() : ErrmsgCommandDeprecated("mergeChunks") {}
 
     void help(stringstream& h) const override {
         h << "Merge Chunks command\n"
@@ -360,11 +361,11 @@ public:
     // Optional, if the merge is only valid for a particular epoch
     static BSONField<OID> epochField;
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& cmdObj,
-             string& errmsg,
-             BSONObjBuilder& result) override {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) override {
         uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
         string ns = parseNs(dbname, cmdObj);

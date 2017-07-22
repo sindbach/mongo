@@ -51,9 +51,9 @@ namespace {
  * This command like a dispatcher: it just retrieves a pointer to the nested command and invokes
  * its explain() implementation.
  */
-class CmdExplain : public Command {
+class CmdExplain : public BasicCommand {
 public:
-    CmdExplain() : Command("explain") {}
+    CmdExplain() : BasicCommand("explain") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -117,13 +117,13 @@ public:
             return Status(ErrorCodes::CommandNotFound, ss);
         }
 
-        return commToExplain->checkAuthForOperation(opCtx, dbname, explainObj);
+        return commToExplain->checkAuthForRequest(
+            opCtx, OpMsgRequest::fromDBAndBody(dbname, std::move(explainObj)));
     }
 
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         auto verbosity = ExplainOptions::parseCmdBSON(cmdObj);
         if (!verbosity.isOK()) {

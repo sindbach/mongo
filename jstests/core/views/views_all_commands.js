@@ -210,6 +210,7 @@
         },
         flushRouterConfig: {skip: isUnrelated},
         forceerror: {skip: isUnrelated},
+        forceRoutingTableRefresh: {skip: isUnrelated},
         fsync: {skip: isUnrelated},
         fsyncUnlock: {skip: isUnrelated},
         geoNear: {
@@ -317,7 +318,7 @@
                     ok: 1
                 };
                 delete res.operationTime;
-                delete res.$logicalTime;
+                delete res.$clusterTime;
                 assert.eq(expectedRes, res, "unexpected result for: " + tojson(killCursorsCmd));
             }
         },
@@ -401,6 +402,7 @@
         replSetSyncFrom: {skip: isUnrelated},
         replSetTest: {skip: isUnrelated},
         replSetUpdatePosition: {skip: isUnrelated},
+        replSetResizeOplog: {skip: isUnrelated},
         resetError: {skip: isUnrelated},
         resync: {skip: isUnrelated},
         revokePrivilegesFromRole: {
@@ -470,6 +472,7 @@
             expectFailure: true,
         },
         stageDebug: {skip: isAnInternalCommand},
+        startSession: {skip: isAnInternalCommand},
         top: {skip: "tested in views/views_stats.js"},
         touch: {
             command: {touch: "view", data: true},

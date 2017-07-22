@@ -357,12 +357,12 @@ void ReplSource::forceResyncDead(OperationContext* opCtx, const char* requester)
     replAllDead = 0;
 }
 
-class HandshakeCmd : public Command {
+class HandshakeCmd : public BasicCommand {
 public:
     void help(stringstream& h) const {
         h << "internal";
     }
-    HandshakeCmd() : Command("handshake") {}
+    HandshakeCmd() : BasicCommand("handshake") {}
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
@@ -383,7 +383,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& ns,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         HandshakeArgs handshake;
         Status status = handshake.initialize(cmdObj);
@@ -646,15 +645,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* opCtx,
 void ReplSource::applyCommand(OperationContext* opCtx, const BSONObj& op) {
     try {
         Status status = applyCommand_inlock(opCtx, op, true);
-        if (!status.isOK()) {
-            SyncTail sync(nullptr, SyncTail::MultiSyncApplyFunc());
-            sync.setHostname(hostName);
-            if (sync.shouldRetry(opCtx, op)) {
-                uassert(28639,
-                        "Failure retrying initial sync update",
-                        applyCommand_inlock(opCtx, op, true).isOK());
-            }
-        }
+        uassert(28639, "Failure applying initial sync command", status.isOK());
     } catch (UserException& e) {
         log() << "sync: caught user assertion " << redact(e) << " while applying op: " << redact(op)
               << endl;
@@ -670,13 +661,17 @@ void ReplSource::applyOperation(OperationContext* opCtx, Database* db, const BSO
     try {
         Status status = applyOperation_inlock(opCtx, db, op);
         if (!status.isOK()) {
+            uassert(15914,
+                    "Failure applying initial sync operation",
+                    status == ErrorCodes::UpdateOperationFailed);
+
+            // In initial sync, update operations can cause documents to be missed during
+            // collection cloning. As a result, it is possible that a document that we need to
+            // update is not present locally. In that case we fetch the document from the
+            // sync source.
             SyncTail sync(nullptr, SyncTail::MultiSyncApplyFunc());
             sync.setHostname(hostName);
-            if (sync.shouldRetry(opCtx, op)) {
-                uassert(15914,
-                        "Failure retrying initial sync update",
-                        applyOperation_inlock(opCtx, db, op).isOK());
-            }
+            sync.fetchAndInsertMissingDocument(opCtx, op);
         }
     } catch (UserException& e) {
         log() << "sync: caught user assertion " << redact(e) << " while applying op: " << redact(op)

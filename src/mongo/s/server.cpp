@@ -50,11 +50,11 @@
 #include "mongo/db/auth/authz_manager_external_state_s.h"
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/client.h"
+#include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/initialize_server_global_state.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/logical_clock.h"
-#include "mongo/db/logical_session_cache.h"
 #include "mongo/db/logical_session_cache_factory_mongos.h"
 #include "mongo/db/logical_time_metadata_hook.h"
 #include "mongo/db/logical_time_validator.h"
@@ -69,7 +69,6 @@
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_factory.h"
@@ -171,9 +170,12 @@ static void cleanupTask() {
         if (auto pool = Grid::get(opCtx)->getExecutorPool()) {
             pool->shutdownAndJoin();
         }
-        if (auto catalog = Grid::get(opCtx)->catalogClient(opCtx)) {
+        if (auto catalog = Grid::get(opCtx)->catalogClient()) {
             catalog->shutDown(opCtx);
         }
+
+        // Shutdown Full-Time Data Capture
+        stopMongoSFTDC();
     }
 
     audit::logShutdown(Client::getCurrent());
@@ -219,9 +221,6 @@ static Status initializeSharding(OperationContext* opCtx) {
                 stdx::make_unique<rpc::LogicalTimeMetadataHook>(opCtx->getServiceContext()));
             hookList->addHook(stdx::make_unique<rpc::ShardingEgressMetadataHookForMongos>());
             return hookList;
-        },
-        [](ShardingCatalogClient* catalogClient, std::unique_ptr<executor::TaskExecutor> executor) {
-            return nullptr;  // Only config servers get a real ShardingCatalogManager.
         });
 
     if (!status.isOK()) {
@@ -314,6 +313,8 @@ static ExitCode runMongosServer() {
             .transitional_ignore();
     }
 
+    startMongoSFTDC();
+
     Status status = getGlobalAuthorizationManager()->initialize(NULL);
     if (!status.isOK()) {
         error() << "Initializing authorization data failed: " << status;
@@ -341,11 +342,19 @@ static ExitCode runMongosServer() {
     getGlobalServiceContext()->setPeriodicRunner(std::move(runner));
 
     // Set up the logical session cache
-    getGlobalServiceContext()->setLogicalSessionCache(makeLogicalSessionCacheS());
+    LogicalSessionCache::set(getGlobalServiceContext(), makeLogicalSessionCacheS());
 
     auto start = getGlobalServiceContext()->getTransportLayer()->start();
     if (!start.isOK()) {
         return EXIT_NET_ERROR;
+    }
+
+    if (auto svcExec = getGlobalServiceContext()->getServiceExecutor()) {
+        start = svcExec->start();
+        if (!start.isOK()) {
+            error() << "Failed to start the service executor: " << start;
+            return EXIT_NET_ERROR;
+        }
     }
 
     getGlobalServiceContext()->notifyStartupComplete();

@@ -147,9 +147,9 @@ BSONObj fixForShards(const BSONObj& orig,
  *
  * 11. Inspects the BSONObject size from step #8 and determines if it needs to split.
  */
-class MRCmd : public Command {
+class MRCmd : public ErrmsgCommandDeprecated {
 public:
-    MRCmd() : Command("mapReduce", "mapreduce") {}
+    MRCmd() : ErrmsgCommandDeprecated("mapReduce", "mapreduce") {}
 
     bool slaveOk() const override {
         return true;
@@ -177,11 +177,11 @@ public:
         mr::addPrivilegesRequiredForMapReduce(this, dbname, cmdObj, out);
     }
 
-    bool run(OperationContext* opCtx,
-             const std::string& dbname,
-             const BSONObj& cmdObj,
-             std::string& errmsg,
-             BSONObjBuilder& result) override {
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& dbname,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
         Timer t;
 
         const NamespaceString nss(parseNs(dbname, cmdObj));
@@ -465,9 +465,8 @@ public:
             auto chunkSizes = SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<int>();
             {
                 // Take distributed lock to prevent split / migration.
-                auto scopedDistLock =
-                    Grid::get(opCtx)->catalogClient(opCtx)->getDistLockManager()->lock(
-                        opCtx, outputCollNss.ns(), "mr-post-process", kNoDistLockTimeout);
+                auto scopedDistLock = Grid::get(opCtx)->catalogClient()->getDistLockManager()->lock(
+                    opCtx, outputCollNss.ns(), "mr-post-process", kNoDistLockTimeout);
                 if (!scopedDistLock.isOK()) {
                     return appendCommandStatus(result, scopedDistLock.getStatus());
                 }
@@ -609,7 +608,7 @@ private:
     static CachedCollectionRoutingInfo createShardedOutputCollection(OperationContext* opCtx,
                                                                      const NamespaceString& nss,
                                                                      const BSONObjSet& splitPts) {
-        auto const catalogClient = Grid::get(opCtx)->catalogClient(opCtx);
+        auto const catalogClient = Grid::get(opCtx)->catalogClient();
         auto const catalogCache = Grid::get(opCtx)->catalogCache();
 
         // Enable sharding on the output db

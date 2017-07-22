@@ -31,12 +31,14 @@
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/s/collection_sharding_state.h"
 
 namespace mongo {
 struct CollectionOptions;
+struct InsertStatement;
 class NamespaceString;
 class OperationContext;
 
@@ -52,6 +54,8 @@ struct OplogUpdateEntryArgs {
     NamespaceString nss;
 
     OptionalCollectionUUID uuid;
+
+    StmtId stmtId = kUninitializedStmtId;
 
     // Fully updated document with damages (update modifiers) applied.
     BSONObj updatedDoc;
@@ -87,8 +91,8 @@ public:
     virtual void onInserts(OperationContext* opCtx,
                            const NamespaceString& nss,
                            OptionalCollectionUUID uuid,
-                           std::vector<BSONObj>::const_iterator begin,
-                           std::vector<BSONObj>::const_iterator end,
+                           std::vector<InsertStatement>::const_iterator begin,
+                           std::vector<InsertStatement>::const_iterator end,
                            bool fromMigrate) = 0;
     virtual void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) = 0;
     virtual CollectionShardingState::DeleteState aboutToDelete(OperationContext* opCtx,
@@ -106,6 +110,7 @@ public:
     virtual void onDelete(OperationContext* opCtx,
                           const NamespaceString& nss,
                           OptionalCollectionUUID uuid,
+                          StmtId stmtId,
                           CollectionShardingState::DeleteState deleteState,
                           bool fromMigrate) = 0;
     virtual void onOpMessage(OperationContext* opCtx, const BSONObj& msgObj) = 0;
@@ -190,11 +195,6 @@ public:
     virtual void onEmptyCapped(OperationContext* opCtx,
                                const NamespaceString& collectionName,
                                OptionalCollectionUUID uuid) = 0;
-    virtual void onConvertToCapped(OperationContext* opCtx,
-                                   const NamespaceString& collectionName,
-                                   OptionalCollectionUUID origUUID,
-                                   OptionalCollectionUUID cappedUUID,
-                                   double size) = 0;
 };
 
 }  // namespace mongo

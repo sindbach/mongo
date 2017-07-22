@@ -240,8 +240,9 @@ protected:
                 ++_storageInterfaceWorkDone.documentsInsertedCount;
                 return Status::OK();
             };
-        _storageInterface->insertDocumentsFn = [this](
-            OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& ops) {
+        _storageInterface->insertDocumentsFn = [this](OperationContext* opCtx,
+                                                      const NamespaceString& nss,
+                                                      const std::vector<InsertStatement>& ops) {
             LockGuard lock(_storageInterfaceWorkDoneMutex);
             _storageInterfaceWorkDone.insertedOplogEntries = true;
             ++_storageInterfaceWorkDone.oplogEntriesInserted;
@@ -738,13 +739,15 @@ TEST_F(InitialSyncerTest, InitialSyncerResetsOptimesOnNewAttempt) {
 
     _syncSourceSelector->setChooseNewSyncSourceResult_forTest(HostAndPort());
 
+    // Set the last optime to an arbitrary nonzero value.
+    auto origOptime = OpTime(Timestamp(1000, 1), 1);
+    _setMyLastOptime(origOptime);
+
+    // Start initial sync.
     const std::uint32_t initialSyncMaxAttempts = 1U;
     ASSERT_OK(initialSyncer->startup(opCtx.get(), initialSyncMaxAttempts));
 
     auto net = getNet();
-    auto origOptime = OpTime(Timestamp(1000, 1), 1);
-
-    _setMyLastOptime(origOptime);
 
     // Simulate a failed initial sync attempt
     _simulateChooseSyncSourceFailure(net, _options.syncSourceRetryWait);

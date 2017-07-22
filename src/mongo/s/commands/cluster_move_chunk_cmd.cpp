@@ -55,9 +55,9 @@ using std::string;
 
 namespace {
 
-class MoveChunkCmd : public Command {
+class MoveChunkCmd : public ErrmsgCommandDeprecated {
 public:
-    MoveChunkCmd() : Command("moveChunk", "movechunk") {}
+    MoveChunkCmd() : ErrmsgCommandDeprecated("moveChunk", "movechunk") {}
 
     bool slaveOk() const override {
         return true;
@@ -95,11 +95,11 @@ public:
         return parseNsFullyQualified(dbname, cmdObj);
     }
 
-    bool run(OperationContext* opCtx,
-             const std::string& dbname,
-             const BSONObj& cmdObj,
-             std::string& errmsg,
-             BSONObjBuilder& result) override {
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& dbname,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
         Timer t;
 
         const NamespaceString nss(parseNs(dbname, cmdObj));
@@ -196,7 +196,8 @@ public:
                                                     to->getId(),
                                                     maxChunkSizeBytes,
                                                     secondaryThrottle,
-                                                    cmdObj["_waitForDelete"].trueValue()));
+                                                    cmdObj["_waitForDelete"].trueValue() ||
+                                                        cmdObj["waitForDelete"].trueValue()));
 
         Grid::get(opCtx)->catalogCache()->onStaleConfigError(std::move(routingInfo));
 

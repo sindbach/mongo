@@ -39,25 +39,17 @@ namespace mongo {
 StatusWith<LogicalSessionRecord> LogicalSessionRecord::parse(const BSONObj& bson) {
     try {
         IDLParserErrorContext ctxt("logical session record");
-
         LogicalSessionRecord record;
         record.parseProtected(ctxt, bson);
-
-        auto owner = record.getOwner();
-        UserName user{owner.getUserName(), owner.getDbName()};
-        record._owner = std::make_pair(user, owner.getUserId());
-
         return record;
     } catch (std::exception e) {
         return exceptionToStatus();
     }
 }
 
-LogicalSessionRecord LogicalSessionRecord::makeAuthoritativeRecord(LogicalSessionId id,
-                                                                   UserName user,
-                                                                   boost::optional<OID> userId,
+LogicalSessionRecord LogicalSessionRecord::makeAuthoritativeRecord(SignedLogicalSessionId id,
                                                                    Date_t now) {
-    return LogicalSessionRecord(std::move(id), std::move(user), std::move(userId), std::move(now));
+    return LogicalSessionRecord(std::move(id), std::move(now));
 }
 
 BSONObj LogicalSessionRecord::toBSON() const {
@@ -68,28 +60,13 @@ BSONObj LogicalSessionRecord::toBSON() const {
 
 std::string LogicalSessionRecord::toString() const {
     return str::stream() << "LogicalSessionRecord"
-                         << " Id: '" << getLsid() << "'"
-                         << " Owner name: '" << getOwner().getUserName() << "'"
+                         << " Id: '" << getSignedLsid() << "'"
                          << " Last-use: " << getLastUse().toString();
 }
 
-LogicalSessionRecord::LogicalSessionRecord(LogicalSessionId id,
-                                           UserName user,
-                                           boost::optional<OID> userId,
-                                           Date_t now)
-    : _owner(std::make_pair(std::move(user), std::move(userId))) {
-    setLsid(std::move(id));
+LogicalSessionRecord::LogicalSessionRecord(SignedLogicalSessionId id, Date_t now) {
+    setSignedLsid(std::move(id));
     setLastUse(now);
-
-    Session_owner owner;
-    owner.setUserName(_owner.first.getUser());
-    owner.setDbName(_owner.first.getDB());
-    owner.setUserId(_owner.second);
-    setOwner(std::move(owner));
-}
-
-LogicalSessionRecord::Owner LogicalSessionRecord::getSessionOwner() const {
-    return _owner;
 }
 
 }  // namespace mongo

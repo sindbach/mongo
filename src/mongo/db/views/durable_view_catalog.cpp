@@ -144,8 +144,8 @@ void DurableViewCatalogImpl::upsert(OperationContext* opCtx,
     Snapshotted<BSONObj> oldView;
     if (!id.isNormal() || !systemViews->findDoc(opCtx, id, &oldView)) {
         LOG(2) << "insert view " << view << " into " << _db->getSystemViewsName();
-        uassertStatusOK(
-            systemViews->insertDocument(opCtx, view, &CurOp::get(opCtx)->debug(), enforceQuota));
+        uassertStatusOK(systemViews->insertDocument(
+            opCtx, InsertStatement(view), &CurOp::get(opCtx)->debug(), enforceQuota));
     } else {
         OplogUpdateEntryArgs args;
         args.nss = systemViewsNs;
@@ -177,6 +177,6 @@ void DurableViewCatalogImpl::remove(OperationContext* opCtx, const NamespaceStri
         return;
 
     LOG(2) << "remove view " << name << " from " << _db->getSystemViewsName();
-    systemViews->deleteDocument(opCtx, id, &CurOp::get(opCtx)->debug());
+    systemViews->deleteDocument(opCtx, kUninitializedStmtId, id, &CurOp::get(opCtx)->debug());
 }
 }  // namespace mongo

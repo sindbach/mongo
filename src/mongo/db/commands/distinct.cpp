@@ -71,9 +71,9 @@ using std::stringstream;
 
 namespace dps = ::mongo::dotted_path_support;
 
-class DistinctCommand : public Command {
+class DistinctCommand : public BasicCommand {
 public:
-    DistinctCommand() : Command("distinct") {}
+    DistinctCommand() : BasicCommand("distinct") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -158,7 +158,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         const NamespaceString nss(parseNsCollectionRequired(dbname, cmdObj));
 
@@ -178,17 +177,16 @@ public:
             if (!viewAggregation.isOK()) {
                 return appendCommandStatus(result, viewAggregation.getStatus());
             }
-            BSONObjBuilder aggResult;
 
-            (void)Command::findCommand("aggregate")
-                ->run(opCtx, dbname, viewAggregation.getValue(), errmsg, aggResult);
+            BSONObj aggResult = Command::runCommandDirectly(
+                opCtx, OpMsgRequest::fromDBAndBody(dbname, std::move(viewAggregation.getValue())));
 
-            if (ResolvedView::isResolvedViewErrorResponse(aggResult.asTempObj())) {
-                result.appendElements(aggResult.obj());
+            if (ResolvedView::isResolvedViewErrorResponse(aggResult)) {
+                result.appendElements(aggResult);
                 return false;
             }
 
-            ViewResponseFormatter formatter(aggResult.obj());
+            ViewResponseFormatter formatter(aggResult);
             Status formatStatus = formatter.appendAsDistinctResponse(&result);
             if (!formatStatus.isOK()) {
                 return appendCommandStatus(result, formatStatus);

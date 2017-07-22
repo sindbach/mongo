@@ -31,7 +31,22 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/commands',
-    ]
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/transport/service_executor',
+    ],
+)
+
+env.Library(
+    target="write_commands_common",
+    source=[
+        "write_commands/write_commands_common.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+    ],
 )
 
 env.Library(
@@ -51,8 +66,8 @@ env.Library(
         "mr_common.cpp",
         "parameters.cpp",
         "rename_collection_common.cpp",
+        "start_session_command.cpp",
         "user_management_commands_common.cpp",
-        "write_commands/write_commands_common.cpp",
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/clientdriver',
@@ -69,8 +84,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/index_names',
         '$BUILD_DIR/mongo/db/lasterror',
         '$BUILD_DIR/mongo/db/log_process_details',
+        '$BUILD_DIR/mongo/db/logical_session_cache',
+        '$BUILD_DIR/mongo/db/logical_session_record',
         '$BUILD_DIR/mongo/db/matcher/expressions',
-        '$BUILD_DIR/mongo/db/matcher/expressions_geo',
         '$BUILD_DIR/mongo/db/repl/isself',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_global',
         '$BUILD_DIR/mongo/db/server_options',
@@ -161,6 +177,7 @@ env.Library(
         "plan_cache_commands.cpp",
         "rename_collection_cmd.cpp",
         "repair_cursor.cpp",
+        "resize_oplog.cpp",
         "run_aggregate.cpp",
         "set_feature_compatibility_version_command.cpp",
         "snapshot_management.cpp",
@@ -186,7 +203,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/index/index_access_methods',
         '$BUILD_DIR/mongo/db/index_d',
         '$BUILD_DIR/mongo/db/lasterror',
-        '$BUILD_DIR/mongo/db/ops/write_ops',
+        '$BUILD_DIR/mongo/db/write_ops',
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
         '$BUILD_DIR/mongo/db/pipeline/serveronly',
         '$BUILD_DIR/mongo/db/repair_database',
@@ -201,9 +218,11 @@ env.Library(
         '$BUILD_DIR/mongo/s/client/parallel',
         'apply_ops_cmd_common',
         'core',
+        'current_op_common',
         'dcommands_fcv',
         'dcommands_fsync',
         'killcursors_common',
+        'write_commands_common',
     ],
 )
 
@@ -218,6 +237,20 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/authorization_manager_global',
         '$BUILD_DIR/mongo/db/query/command_request_response',
     ],
+)
+
+env.Library(
+    target='current_op_common',
+    source=[
+        'current_op_common.cpp'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/pipeline/aggregation_request',
+        '$BUILD_DIR/mongo/db/query/command_request_response',
+        '$BUILD_DIR/mongo/db/service_context',
+    ]
 )
 
 env.Library(

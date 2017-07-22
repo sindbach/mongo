@@ -119,6 +119,16 @@ Status wrappedRun(OperationContext* opCtx,
             return Status(ErrorCodes::InvalidOptions, "cannot drop _id index");
         }
 
+        if (desc->indexName() == "*") {
+            // Dropping an index named '*' results in an drop-index oplog entry with a name of '*',
+            // which in 3.6 and later is interpreted by replication as meaning "drop all indexes on
+            // this collection".
+            return Status(ErrorCodes::InvalidOptions,
+                          "cannot drop an index named '*' by key pattern.  You must drop the "
+                          "entire collection, drop all indexes on the collection by using an index "
+                          "name of '*', or downgrade to 3.4 to drop only this index.");
+        }
+
         Status s = indexCatalog->dropIndex(opCtx, desc);
         if (!s.isOK()) {
             return s;
@@ -138,46 +148,47 @@ Status dropIndexes(OperationContext* opCtx,
                    const NamespaceString& nss,
                    const BSONObj& idxDescriptor,
                    BSONObjBuilder* result) {
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+    return writeConflictRetry(
+        opCtx, "dropIndexes", nss.db(), [opCtx, &nss, &idxDescriptor, result] {
+            AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
 
-        bool userInitiatedWritesAndNotPrimary = opCtx->writesAreReplicated() &&
-            !repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(opCtx, nss);
+            bool userInitiatedWritesAndNotPrimary = opCtx->writesAreReplicated() &&
+                !repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(opCtx, nss);
 
-        if (userInitiatedWritesAndNotPrimary) {
-            return {ErrorCodes::NotMaster,
-                    str::stream() << "Not primary while dropping indexes in " << nss.ns()};
-        }
-
-        if (!serverGlobalParams.quiet.load()) {
-            LOG(0) << "CMD: dropIndexes " << nss;
-        }
-
-        // If db/collection does not exist, short circuit and return.
-        Database* db = autoDb.getDb();
-        Collection* collection = db ? db->getCollection(opCtx, nss) : nullptr;
-        if (!db || !collection) {
-            if (db && db->getViewCatalog()->lookup(opCtx, nss.ns())) {
-                return {ErrorCodes::CommandNotSupportedOnView,
-                        str::stream() << "Cannot drop indexes on view " << nss.ns()};
+            if (userInitiatedWritesAndNotPrimary) {
+                return Status(ErrorCodes::NotMaster,
+                              str::stream() << "Not primary while dropping indexes in "
+                                            << nss.ns());
             }
 
-            return Status(ErrorCodes::NamespaceNotFound, "ns not found");
-        }
+            if (!serverGlobalParams.quiet.load()) {
+                LOG(0) << "CMD: dropIndexes " << nss;
+            }
 
-        WriteUnitOfWork wunit(opCtx);
-        OldClientContext ctx(opCtx, nss.ns());
-        BackgroundOperation::assertNoBgOpInProgForNs(nss);
+            // If db/collection does not exist, short circuit and return.
+            Database* db = autoDb.getDb();
+            Collection* collection = db ? db->getCollection(opCtx, nss) : nullptr;
+            if (!db || !collection) {
+                if (db && db->getViewCatalog()->lookup(opCtx, nss.ns())) {
+                    return Status(ErrorCodes::CommandNotSupportedOnView,
+                                  str::stream() << "Cannot drop indexes on view " << nss.ns());
+                }
 
-        Status status = wrappedRun(opCtx, collection, idxDescriptor, result);
-        if (!status.isOK()) {
-            return status;
-        }
+                return Status(ErrorCodes::NamespaceNotFound, "ns not found");
+            }
 
-        wunit.commit();
-    }
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "dropIndexes", nss.db());
-    return Status::OK();
+            WriteUnitOfWork wunit(opCtx);
+            OldClientContext ctx(opCtx, nss.ns());
+            BackgroundOperation::assertNoBgOpInProgForNs(nss);
+
+            Status status = wrappedRun(opCtx, collection, idxDescriptor, result);
+            if (!status.isOK()) {
+                return status;
+            }
+
+            wunit.commit();
+            return Status::OK();
+        });
 }
 
 }  // namespace mongo

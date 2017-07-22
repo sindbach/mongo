@@ -40,9 +40,9 @@
 namespace mongo {
 namespace {
 
-class CmdShardingResetError : public Command {
+class CmdShardingResetError : public BasicCommand {
 public:
-    CmdShardingResetError() : Command("resetError", "reseterror") {}
+    CmdShardingResetError() : BasicCommand("resetError", "reseterror") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -62,7 +62,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         LastError::get(cc()).reset();
 

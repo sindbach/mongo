@@ -43,7 +43,7 @@ namespace mongo {
  * Defines common attributes for all plan cache related commands
  * such as slaveOk.
  */
-class PlanCacheCommand : public Command {
+class PlanCacheCommand : public BasicCommand {
 public:
     PlanCacheCommand(const std::string& name, const std::string& helpText, ActionType actionType);
 
@@ -60,7 +60,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result);
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override;

@@ -45,9 +45,9 @@
 namespace mongo {
 namespace {
 
-class DropDatabaseCmd : public Command {
+class DropDatabaseCmd : public BasicCommand {
 public:
-    DropDatabaseCmd() : Command("dropDatabase") {}
+    DropDatabaseCmd() : BasicCommand("dropDatabase") {}
 
     bool slaveOk() const override {
         return true;
@@ -72,7 +72,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         uassert(ErrorCodes::IllegalOperation,
                 "Cannot drop the config database",
@@ -82,7 +81,7 @@ public:
                 "have to pass 1 as db parameter",
                 cmdObj.firstElement().isNumber() && cmdObj.firstElement().number() == 1);
 
-        auto const catalogClient = Grid::get(opCtx)->catalogClient(opCtx);
+        auto const catalogClient = Grid::get(opCtx)->catalogClient();
 
         // Lock the database globally to prevent conflicts with simultaneous database
         // creation/modification.

@@ -64,9 +64,9 @@ boost::filesystem::path getJournalDir();
 }
 
 // Testing-only, enabled via command line
-class JournalLatencyTestCmd : public Command {
+class JournalLatencyTestCmd : public BasicCommand {
 public:
-    JournalLatencyTestCmd() : Command("journalLatencyTest") {}
+    JournalLatencyTestCmd() : BasicCommand("journalLatencyTest") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -87,7 +87,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         boost::filesystem::path p = dur::getJournalDir();
         p /= "journalLatencyTest";

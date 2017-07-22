@@ -28,14 +28,12 @@
 
 #pragma once
 
+#include "mongo/db/operation_context_group.h"
+#include "mongo/db/s/namespace_metadata_change_notifications.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/util/concurrency/thread_pool.h"
 
 namespace mongo {
-
-class ConfigServerCatalogCacheLoader;
-class ThreadPoolInterface;
-class VersionNotifications;
 
 /**
  * Shard implementation of the CatalogCacheLoader used by the CatalogCache. Retrieves chunk metadata
@@ -74,22 +72,19 @@ public:
      */
     void notifyOfCollectionVersionUpdate(OperationContext* opCtx,
                                          const NamespaceString& nss,
-                                         const ChunkVersion& version);
+                                         const ChunkVersion& version) override;
 
     /**
-     * This function can throw a DBException if the opCtx is interrupted by stepUp/Down.
+     * This function can throw a DBException if the opCtx is interrupted. A lock must not be held
+     * when calling this because it would prevent using the latest snapshot and actually seeing the
+     * change after it arrives.
      *
-     * Waits for the persisted collection version to be GTE to 'version', or an epoch change.
-     *
-     * If 'greaterVersion' is set, will wait for a version GT 'version', rather than GTE.
-     *
-     * Only call this function if you KNOW that a version GT or GTE WILL eventually replicate to the
-     * secondary!
+     * See CatalogCache::waitForCollectionVersion for function details: it's a passthrough function
+     * to give external access to this function, and so it is the interface.
      */
-    void waitForVersion(OperationContext* opCtx,
-                        const NamespaceString& nss,
-                        const ChunkVersion& version,
-                        const bool greaterVersion);
+    Status waitForCollectionVersion(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    const ChunkVersion& version) override;
 
     /**
      * This must be called serially, never in parallel, including waiting for the returned
@@ -218,14 +213,27 @@ private:
     typedef std::map<NamespaceString, TaskList> TaskLists;
 
     /**
-     * Retrieves chunk metadata from the shard's persisted metadata store, then passes the results
-     * to the 'callbackFn'.
+     * Forces the primary to refresh its metadata for 'nss' and waits until this node's metadata
+     * has caught up to the primary's.
+     * Then retrieves chunk metadata from this node's persisted metadata store and passes it to
+     * 'callbackFn'.
      */
     void _runSecondaryGetChunksSince(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const ChunkVersion& catalogCacheSinceVersion,
         stdx::function<void(OperationContext*, StatusWith<CollectionAndChangedChunks>)> callbackFn);
+
+    /**
+     * Forces the  primary to refresh its chunk metadata for 'nss' and obtain's the primary's
+     * collectionVersion after the refresh.
+     *
+     * Then waits until it has replicated chunk metadata up to at least that collectionVersion.
+     *
+     * Throws on error.
+     */
+    void _forcePrimaryRefreshAndWaitForReplication(OperationContext* opCtx,
+                                                   const NamespaceString& nss);
 
     /**
      * Refreshes chunk metadata from the config server's metadata store, and schedules maintenance
@@ -323,6 +331,8 @@ private:
     // Thread pool used to load chunk metadata.
     ThreadPool _threadPool;
 
+    NamespaceMetadataChangeNotifications _namespaceNotifications;
+
     // Protects the class state below.
     stdx::mutex _mutex;
 
@@ -338,7 +348,8 @@ private:
     // can be taken.
     ReplicaSetRole _role{ReplicaSetRole::None};
 
-    std::unique_ptr<VersionNotifications> _versionNotifications;
+    // The collection of operation contexts in use by all threads.
+    OperationContextGroup _contexts;
 };
 
 }  // namespace mongo

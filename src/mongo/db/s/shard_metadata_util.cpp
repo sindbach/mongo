@@ -72,7 +72,7 @@ QueryAndSort createShardChunkDiffQuery(const ChunkVersion& collectionVersion) {
             BSON(ChunkType::lastmod() << 1)};
 }
 
-bool RefreshState::operator==(RefreshState& other) const {
+bool RefreshState::operator==(const RefreshState& other) const {
     return (other.epoch == epoch) && (other.refreshing == refreshing) &&
         (other.lastRefreshedCollectionVersion == lastRefreshedCollectionVersion);
 }
@@ -275,6 +275,10 @@ Status updateShardChunks(OperationContext* opCtx,
 
     try {
         DBDirectClient client(opCtx);
+
+        // This may be the first update, so the first opportunity to create an index.
+        // If the index already exists, this is a no-op.
+        client.createIndex(chunkMetadataNss.ns(), BSON(ChunkType::lastmod() << 1));
 
         /**
          * Here are examples of the operations that can happen on the config server to update

@@ -212,7 +212,7 @@ public:
     /** retrieve a field within this element
         throws exception if *this is not an embedded object
     */
-    BSONElement operator[](const std::string& field) const;
+    BSONElement operator[](StringData field) const;
 
     /** See canonicalizeBSONType in bsontypes.h */
     int canonicalType() const {
@@ -556,9 +556,6 @@ public:
     const char* rawdata() const {
         return data;
     }
-
-    /** 0 == Equality, just not defined yet */
-    int getGtLtOp(int def = 0) const;
 
     /** Constructs an empty element */
     BSONElement();

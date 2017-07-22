@@ -58,9 +58,9 @@ namespace {
  * The group command is deprecated. Users should prefer the aggregation framework or mapReduce. See
  * http://dochub.mongodb.org/core/group-command-deprecation for more detail.
  */
-class GroupCommand : public Command {
+class GroupCommand : public BasicCommand {
 public:
-    GroupCommand() : Command("group") {}
+    GroupCommand() : BasicCommand("group") {}
 
 private:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -150,7 +150,6 @@ private:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
         RARELY {
             warning() << "The group command is deprecated. See "

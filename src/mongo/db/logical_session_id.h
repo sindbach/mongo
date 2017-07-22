@@ -40,17 +40,22 @@ namespace mongo {
 using TxnNumber = std::int64_t;
 using StmtId = std::int32_t;
 
+const StmtId kUninitializedStmtId = -1;
 const TxnNumber kUninitializedTxnNumber = -1;
 
 class BSONObjBuilder;
 
 /**
- * A 128-bit identifier for a logical session.
+ * A 128-bit unique identifier for a logical session.
  */
 class LogicalSessionId : public Logical_session_id {
 public:
     LogicalSessionId();
     LogicalSessionId(Logical_session_id&& lsid);
+
+    friend class Logical_session_id;
+    friend class Logical_session_record;
+    friend class SignedLogicalSessionId;
 
     /**
      * Create and return a new LogicalSessionId with a random UUID.
@@ -58,8 +63,8 @@ public:
     static LogicalSessionId gen();
 
     /**
-     * If the given string represents a valid LogicalSessionId, constructs and returns,
-     * the id, otherwise returns an error.
+     * If the given string represents a valid UUID, constructs and returns
+     * a new LogicalSessionId. Otherwise returns an error.
      */
     static StatusWith<LogicalSessionId> parse(const std::string& s);
 

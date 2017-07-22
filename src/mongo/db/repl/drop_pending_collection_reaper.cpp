@@ -32,6 +32,7 @@
 
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "mongo/db/client.h"
@@ -77,13 +78,17 @@ void DropPendingCollectionReaper::addDropPendingNamespace(
     const OpTime& dropOpTime, const NamespaceString& dropPendingNamespace) {
     invariant(dropPendingNamespace.isDropPendingNamespace());
     stdx::lock_guard<stdx::mutex> lock(_mutex);
-    auto insertResult =
+    const auto equalRange = _dropPendingNamespaces.equal_range(dropOpTime);
+    const auto& lowerBound = equalRange.first;
+    const auto& upperBound = equalRange.second;
+    auto matcher = [&dropPendingNamespace](const auto& pair) {
+        return pair.second == dropPendingNamespace;
+    };
+    if (std::find_if(lowerBound, upperBound, matcher) == upperBound) {
         _dropPendingNamespaces.insert(std::make_pair(dropOpTime, dropPendingNamespace));
-    if (!insertResult.second) {
+    } else {
         severe() << "Failed to add drop-pending collection " << dropPendingNamespace
-                 << " with drop optime " << dropOpTime
-                 << ". There is already an existing collection " << insertResult.first->second
-                 << " with the same drop optime.";
+                 << " with drop optime " << dropOpTime << ": duplicate optime and namespace pair.";
         fassertFailedNoTrace(40448);
     }
 }
@@ -97,66 +102,36 @@ boost::optional<OpTime> DropPendingCollectionReaper::getEarliestDropOpTime() {
     return it->first;
 }
 
-bool DropPendingCollectionReaper::dropCollectionAtOpTime(OperationContext* opCtx,
-                                                         const OpTime& opTime) {
-    // Every node cleans up its own drop-pending collections. We should never replicate these drops
-    // because these are internal operations.
-    UnreplicatedWritesBlock uwb(opCtx);
-
-    NamespaceString pendingNss;
-    {
-        stdx::lock_guard<stdx::mutex> lock(_mutex);
-        auto pendingNssIt = _dropPendingNamespaces.find(opTime);
-        if (pendingNssIt == _dropPendingNamespaces.end()) {
-            warning() << "Cannot find drop-pending namespace at OpTime " << opTime << " to drop.";
-            return false;
-        }
-
-        pendingNss = pendingNssIt->second;
-        _dropPendingNamespaces.erase(opTime);
-    }
-
-    log() << "Completing collection drop for " << pendingNss << " with drop OpTime " << opTime;
-
-    auto status = _storageInterface->dropCollection(opCtx, pendingNss);
-    if (!status.isOK()) {
-        warning() << "Failed to remove drop-pending collection " << pendingNss
-                  << " with drop OpTime " << opTime << ": " << status;
-    }
-
-    return true;
-}
-
-bool DropPendingCollectionReaper::rollBackDropPendingCollection(OperationContext* opCtx,
-                                                                const OpTime& opTime,
-                                                                StringData collName) {
-    // Every node cleans up its own drop-pending collections. We should never replicate these
+bool DropPendingCollectionReaper::rollBackDropPendingCollection(
+    OperationContext* opCtx, const OpTime& opTime, const NamespaceString& collectionNamespace) {
     // renames because these are internal operations.
     UnreplicatedWritesBlock uwb(opCtx);
 
-    NamespaceString pendingNss;
+    const auto pendingNss = collectionNamespace.makeDropPendingNamespace(opTime);
     {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
-        auto pendingNssIt = _dropPendingNamespaces.find(opTime);
-        if (pendingNssIt == _dropPendingNamespaces.end()) {
+        const auto equalRange = _dropPendingNamespaces.equal_range(opTime);
+        const auto& lowerBound = equalRange.first;
+        const auto& upperBound = equalRange.second;
+        auto matcher = [&pendingNss](const auto& pair) { return pair.second == pendingNss; };
+        auto it = std::find_if(lowerBound, upperBound, matcher);
+        if (it == upperBound) {
             warning() << "Cannot find drop-pending namespace at OpTime " << opTime
-                      << " for collection " << collName << " to roll back.";
+                      << " for collection " << collectionNamespace << " to roll back.";
             return false;
         }
 
-        pendingNss = pendingNssIt->second;
-        _dropPendingNamespaces.erase(opTime);
+        _dropPendingNamespaces.erase(it);
     }
 
-    NamespaceString newNss(pendingNss.db(), collName);
     log() << "Rolling back collection drop for " << pendingNss << " with drop OpTime " << opTime
-          << " to namespace " << newNss;
+          << " to namespace " << collectionNamespace;
 
-    auto status = _storageInterface->renameCollection(opCtx, pendingNss, newNss, true);
+    auto status = _storageInterface->renameCollection(opCtx, pendingNss, collectionNamespace, true);
     if (!status.isOK()) {
         warning() << "Failed to roll back drop-pending collection " << pendingNss
-                  << " with drop OpTime " << opTime << " and rename it to namespace " << newNss
-                  << ": " << status;
+                  << " with drop OpTime " << opTime << " and rename it to namespace "
+                  << collectionNamespace << ": " << status;
     }
 
     return true;

@@ -127,6 +127,8 @@ public:
     /**
      * Deletes the document with the given RecordId from the collection.
      *
+     * 'stmtId' the statement id for this delete operation. Pass in kUninitializedStmtId if not
+     * applicable.
      * 'fromMigrate' indicates whether the delete was induced by a chunk migration, and
      * so should be ignored by the user as an internal maintenance operation and not a
      * real delete.
@@ -137,6 +139,7 @@ public:
      * will not be logged.
      */
     void deleteDocument(OperationContext* opCtx,
+                        StmtId stmtId,
                         const RecordId& loc,
                         OpDebug* opDebug,
                         bool fromMigrate = false,
@@ -150,8 +153,8 @@ public:
      * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
      */
     Status insertDocuments(OperationContext* opCtx,
-                           std::vector<BSONObj>::const_iterator begin,
-                           std::vector<BSONObj>::const_iterator end,
+                           std::vector<InsertStatement>::const_iterator begin,
+                           std::vector<InsertStatement>::const_iterator end,
                            OpDebug* opDebug,
                            bool enforceQuota,
                            bool fromMigrate = false) final;
@@ -164,7 +167,7 @@ public:
      * 'enforceQuota' If false, quotas will be ignored.
      */
     Status insertDocument(OperationContext* opCtx,
-                          const BSONObj& doc,
+                          const InsertStatement& doc,
                           OpDebug* opDebug,
                           bool enforceQuota,
                           bool fromMigrate = false) final;
@@ -365,8 +368,8 @@ private:
     Status _insertDocument(OperationContext* opCtx, const BSONObj& doc, bool enforceQuota);
 
     Status _insertDocuments(OperationContext* opCtx,
-                            std::vector<BSONObj>::const_iterator begin,
-                            std::vector<BSONObj>::const_iterator end,
+                            std::vector<InsertStatement>::const_iterator begin,
+                            std::vector<InsertStatement>::const_iterator end,
                             bool enforceQuota,
                             OpDebug* opDebug);
 

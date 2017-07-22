@@ -46,9 +46,10 @@ namespace {
  *   setFeatureCompatibilityVersion: <string version>
  * }
  */
-class SetFeatureCompatibilityVersionCommand : public Command {
+class SetFeatureCompatibilityVersionCommand : public BasicCommand {
 public:
-    SetFeatureCompatibilityVersionCommand() : Command(FeatureCompatibilityVersion::kCommandName) {}
+    SetFeatureCompatibilityVersionCommand()
+        : BasicCommand(FeatureCompatibilityVersion::kCommandName) {}
 
     virtual bool slaveOk() const {
         return false;
@@ -84,7 +85,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) {
         const auto version = uassertStatusOK(
             FeatureCompatibilityVersionCommandParser::extractVersionFromCommand(getName(), cmdObj));

@@ -87,6 +87,7 @@
 "replSetGetStatus",
 "replSetHeartbeat",
 "replSetReconfig",  # Not used for permissions checks, but to id the event in logs.
+"replSetResizeOplog",
 "replSetStateChange",
 "resync",
 "revokeRole",
@@ -100,6 +101,7 @@
 "shutdown",
 "splitChunk",
 "splitVector",
+"startSession",
 "storageDetails",
 "top",
 "touch",

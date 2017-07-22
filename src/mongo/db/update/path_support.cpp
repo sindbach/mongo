@@ -34,6 +34,7 @@
 #include "mongo/bson/mutable/element.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 namespace pathsupport {
@@ -69,19 +70,6 @@ Status maybePadTo(mutablebson::Element* elemArray, size_t sizeRequired) {
 
 }  // unnamed namespace
 
-bool isNumericPathComponent(StringData str, size_t* num) {
-    size_t res = 0;
-    for (size_t i = 0; i < str.size(); ++i) {
-        if (str[i] < '0' || str[i] > '9') {
-            return false;
-        } else {
-            res = res * 10 + (str[i] - '0');
-        }
-    }
-    *num = res;
-    return true;
-}
-
 Status findLongestPrefix(const FieldRef& prefix,
                          mutablebson::Element root,
                          size_t* idxFound,
@@ -97,7 +85,7 @@ Status findLongestPrefix(const FieldRef& prefix,
     mutablebson::Element curr = root;
     mutablebson::Element prev = root;
     size_t i = 0;
-    size_t numericPart = 0;
+    boost::optional<size_t> numericPart;
     bool viable = true;
     for (; i < prefixSize; i++) {
         // If prefix wants to reach 'curr' by applying a non-numeric index to an array
@@ -111,10 +99,11 @@ Status findLongestPrefix(const FieldRef& prefix,
                 break;
 
             case Array:
-                if (!isNumericPathComponent(prefixPart, &numericPart)) {
+                numericPart = parseUnsignedBase10Integer(prefixPart);
+                if (!numericPart) {
                     viable = false;
                 } else {
-                    curr = prev[numericPart];
+                    curr = prev[*numericPart];
                 }
                 break;
 
@@ -156,11 +145,12 @@ Status findLongestPrefix(const FieldRef& prefix,
     }
 }
 
-Status createPathAt(const FieldRef& prefix,
-                    size_t idxFound,
-                    mutablebson::Element elemFound,
-                    mutablebson::Element newElem) {
+StatusWith<mutablebson::Element> createPathAt(const FieldRef& prefix,
+                                              size_t idxFound,
+                                              mutablebson::Element elemFound,
+                                              mutablebson::Element newElem) {
     Status status = Status::OK();
+    auto firstNewElem = elemFound.getDocument().end();
 
     if (elemFound.getType() != BSONType::Object && elemFound.getType() != BSONType::Array) {
         return Status(ErrorCodes::PathNotViable,
@@ -183,8 +173,8 @@ Status createPathAt(const FieldRef& prefix,
     size_t i = idxFound;
     bool inArray = false;
     if (elemFound.getType() == mongo::Array) {
-        size_t newIdx = 0;
-        if (!isNumericPathComponent(prefix.getPart(idxFound), &newIdx)) {
+        boost::optional<size_t> newIdx = parseUnsignedBase10Integer(prefix.getPart(idxFound));
+        if (!newIdx) {
             return Status(ErrorCodes::PathNotViable,
                           str::stream() << "Cannot create field '" << prefix.getPart(idxFound)
                                         << "' in element {"
@@ -192,7 +182,7 @@ Status createPathAt(const FieldRef& prefix,
                                         << "}");
         }
 
-        status = maybePadTo(&elemFound, newIdx);
+        status = maybePadTo(&elemFound, *newIdx);
         if (!status.isOK()) {
             return status;
         }
@@ -228,10 +218,16 @@ Status createPathAt(const FieldRef& prefix,
                 return status;
             }
             inArray = false;
+            if (!firstNewElem.ok()) {
+                firstNewElem = arrayObj;
+            }
         } else {
             status = elemFound.pushBack(elem);
             if (!status.isOK()) {
                 return status;
+            }
+            if (!firstNewElem.ok()) {
+                firstNewElem = elem;
             }
         }
 
@@ -257,14 +253,21 @@ Status createPathAt(const FieldRef& prefix,
             return status;
         }
 
+        if (!firstNewElem.ok()) {
+            firstNewElem = arrayObj;
+        }
+
     } else {
         status = elemFound.pushBack(newElem);
         if (!status.isOK()) {
             return status;
         }
+        if (!firstNewElem.ok()) {
+            firstNewElem = newElem;
+        }
     }
 
-    return Status::OK();
+    return firstNewElem;
 }
 
 Status setElementAtPath(const FieldRef& path,
@@ -299,7 +302,7 @@ Status setElementAtPath(const FieldRef& path,
         StringData leafFieldName = path.getPart(path.numParts() - 1);
         mutablebson::Element leafElem = doc->makeElementWithNewFieldName(leafFieldName, value);
         dassert(leafElem.ok());
-        return createPathAt(path, deepestElemPathPart, deepestElem, leafElem);
+        return createPathAt(path, deepestElemPathPart, deepestElem, leafElem).getStatus();
     }
 }
 

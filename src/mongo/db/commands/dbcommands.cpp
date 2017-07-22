@@ -124,7 +124,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         bool force = cmdObj.hasField("force") && cmdObj["force"].trueValue();
 
@@ -146,7 +145,7 @@ public:
 
 } cmdShutdownMongoD;
 
-class CmdDropDatabase : public Command {
+class CmdDropDatabase : public BasicCommand {
 public:
     virtual void help(stringstream& help) const {
         help << "drop (delete) this database";
@@ -168,12 +167,11 @@ public:
         return true;
     }
 
-    CmdDropDatabase() : Command("dropDatabase") {}
+    CmdDropDatabase() : BasicCommand("dropDatabase") {}
 
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         // disallow dropping the config database
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
@@ -211,7 +209,7 @@ public:
 
 } cmdDropDatabase;
 
-class CmdRepairDatabase : public Command {
+class CmdRepairDatabase : public ErrmsgCommandDeprecated {
 public:
     virtual bool slaveOk() const {
         return true;
@@ -236,13 +234,13 @@ public:
         out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
     }
 
-    CmdRepairDatabase() : Command("repairDatabase") {}
+    CmdRepairDatabase() : ErrmsgCommandDeprecated("repairDatabase") {}
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& cmdObj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         BSONElement e = cmdObj.firstElement();
         if (e.numberInt() != 1) {
             errmsg = "bad option";
@@ -296,7 +294,7 @@ public:
    todo: how do we handle profiling information put in the db with replication?
          sensibly or not?
 */
-class CmdProfile : public Command {
+class CmdProfile : public ErrmsgCommandDeprecated {
 public:
     virtual bool slaveOk() const {
         return true;
@@ -339,13 +337,13 @@ public:
         return Status(ErrorCodes::Unauthorized, "unauthorized");
     }
 
-    CmdProfile() : Command("profile") {}
+    CmdProfile() : ErrmsgCommandDeprecated("profile") {}
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& cmdObj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         BSONElement firstElement = cmdObj.firstElement();
         int profilingLevel = firstElement.numberInt();
 
@@ -395,12 +393,12 @@ public:
 
 } cmdProfile;
 
-class CmdDiagLogging : public Command {
+class CmdDiagLogging : public BasicCommand {
 public:
     virtual bool slaveOk() const {
         return true;
     }
-    CmdDiagLogging() : Command("diagLogging") {}
+    CmdDiagLogging() : BasicCommand("diagLogging") {}
     bool adminOnly() const {
         return true;
     }
@@ -426,7 +424,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         const char* deprecationWarning =
             "CMD diagLogging is deprecated and will be removed in a future release";
@@ -455,9 +452,9 @@ public:
 } cmddiaglogging;
 
 /* drop collection */
-class CmdDrop : public Command {
+class CmdDrop : public ErrmsgCommandDeprecated {
 public:
-    CmdDrop() : Command("drop") {}
+    CmdDrop() : ErrmsgCommandDeprecated("drop") {}
     virtual bool slaveOk() const {
         return false;
     }
@@ -480,11 +477,11 @@ public:
         return true;
     }
 
-    virtual bool run(OperationContext* opCtx,
-                     const string& dbname,
-                     const BSONObj& cmdObj,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& dbname,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
         const NamespaceString nsToDrop = parseNsCollectionRequired(dbname, cmdObj);
 
         if (NamespaceString::virtualized(nsToDrop.ns())) {
@@ -511,9 +508,9 @@ public:
 } cmdDrop;
 
 /* create collection */
-class CmdCreate : public Command {
+class CmdCreate : public BasicCommand {
 public:
-    CmdCreate() : Command("create") {}
+    CmdCreate() : BasicCommand("create") {}
     virtual bool slaveOk() const {
         return false;
     }
@@ -540,7 +537,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         const NamespaceString ns(parseNsCollectionRequired(dbname, cmdObj));
 
@@ -628,9 +624,9 @@ public:
 } cmdCreate;
 
 
-class CmdFileMD5 : public Command {
+class CmdFileMD5 : public BasicCommand {
 public:
-    CmdFileMD5() : Command("filemd5") {}
+    CmdFileMD5() : BasicCommand("filemd5") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -668,7 +664,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& jsobj,
-             string& errmsg,
              BSONObjBuilder& result) {
         const NamespaceString nss(parseNs(dbname, jsobj));
 
@@ -697,7 +692,7 @@ public:
         BSONObj query = BSON("files_id" << jsobj["filemd5"] << "n" << GTE << n);
         BSONObj sort = BSON("files_id" << 1 << "n" << 1);
 
-        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+        return writeConflictRetry(opCtx, "filemd5", dbname, [&] {
             auto qr = stdx::make_unique<QueryRequest>(nss);
             qr->setFilter(query);
             qr->setSort(sort);
@@ -706,7 +701,7 @@ public:
                 opCtx, std::move(qr), ExtensionsCallbackDisallowExtensions());
             if (!statusWithCQ.isOK()) {
                 uasserted(17240, "Can't canonicalize query " + query.toString());
-                return 0;
+                return false;
             }
             unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
@@ -717,17 +712,11 @@ public:
                 new AutoGetCollectionForReadCommand(opCtx, nss));
             Collection* coll = ctx->getCollection();
 
-            auto statusWithPlanExecutor = getExecutor(opCtx,
-                                                      coll,
-                                                      std::move(cq),
-                                                      PlanExecutor::YIELD_MANUAL,
-                                                      QueryPlannerParams::NO_TABLE_SCAN);
-            if (!statusWithPlanExecutor.isOK()) {
-                uasserted(17241, "Can't get executor for query " + query.toString());
-                return 0;
-            }
-
-            auto exec = std::move(statusWithPlanExecutor.getValue());
+            auto exec = uassertStatusOK(getExecutor(opCtx,
+                                                    coll,
+                                                    std::move(cq),
+                                                    PlanExecutor::YIELD_MANUAL,
+                                                    QueryPlannerParams::NO_TABLE_SCAN));
 
             BSONObj obj;
             PlanExecutor::ExecState state;
@@ -788,9 +777,9 @@ public:
 
             result.append("numChunks", n);
             result.append("md5", digestToString(d));
-        }
-        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "filemd5", dbname);
-        return true;
+
+            return true;
+        });
     }
 
     void dumpChunks(OperationContext* opCtx,
@@ -809,13 +798,13 @@ public:
 } cmdFileMD5;
 
 
-class CmdDatasize : public Command {
+class CmdDatasize : public ErrmsgCommandDeprecated {
     virtual string parseNs(const string& dbname, const BSONObj& cmdObj) const {
         return parseNsFullyQualified(dbname, cmdObj);
     }
 
 public:
-    CmdDatasize() : Command("dataSize", "datasize") {}
+    CmdDatasize() : ErrmsgCommandDeprecated("dataSize", "datasize") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -844,11 +833,11 @@ public:
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& jsobj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& jsobj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         Timer timer;
 
         string ns = jsobj.firstElement().String();
@@ -963,9 +952,9 @@ public:
 
 } cmdDatasize;
 
-class CollectionStats : public Command {
+class CollectionStats : public ErrmsgCommandDeprecated {
 public:
-    CollectionStats() : Command("collStats", "collstats") {}
+    CollectionStats() : ErrmsgCommandDeprecated("collStats", "collstats") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -987,11 +976,11 @@ public:
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& jsobj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& jsobj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         const NamespaceString nss(parseNsCollectionRequired(dbname, jsobj));
 
         if (nss.coll().empty()) {
@@ -1011,9 +1000,9 @@ public:
 
 } cmdCollectionStats;
 
-class CollectionModCommand : public Command {
+class CollectionModCommand : public BasicCommand {
 public:
-    CollectionModCommand() : Command("collMod") {}
+    CollectionModCommand() : BasicCommand("collMod") {}
 
     virtual bool slaveOk() const {
         return false;
@@ -1038,7 +1027,6 @@ public:
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& jsobj,
-             string& errmsg,
              BSONObjBuilder& result) {
         const NamespaceString nss(parseNsCollectionRequired(dbname, jsobj));
         return appendCommandStatus(result, collMod(opCtx, nss, jsobj, &result));
@@ -1046,9 +1034,9 @@ public:
 
 } collectionModCommand;
 
-class DBStats : public Command {
+class DBStats : public ErrmsgCommandDeprecated {
 public:
-    DBStats() : Command("dbStats", "dbstats") {}
+    DBStats() : ErrmsgCommandDeprecated("dbStats", "dbstats") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -1070,11 +1058,11 @@ public:
         out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
     }
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& jsobj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& jsobj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         int scale = 1;
         if (jsobj["scale"].isNumber()) {
             scale = jsobj["scale"].numberInt();
@@ -1139,9 +1127,9 @@ public:
 } cmdDBStats;
 
 /* Returns client's uri */
-class CmdWhatsMyUri : public Command {
+class CmdWhatsMyUri : public BasicCommand {
 public:
-    CmdWhatsMyUri() : Command("whatsmyuri") {}
+    CmdWhatsMyUri() : BasicCommand("whatsmyuri") {}
     virtual bool slaveOk() const {
         return true;
     }
@@ -1157,16 +1145,15 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         result << "you" << opCtx->getClient()->clientAddress(true /*includePort*/);
         return true;
     }
 } cmdWhatsMyUri;
 
-class AvailableQueryOptions : public Command {
+class AvailableQueryOptions : public BasicCommand {
 public:
-    AvailableQueryOptions() : Command("availableQueryOptions", "availablequeryoptions") {}
+    AvailableQueryOptions() : BasicCommand("availableQueryOptions", "availablequeryoptions") {}
 
     virtual bool slaveOk() const {
         return true;
@@ -1183,7 +1170,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
-                     string& errmsg,
                      BSONObjBuilder& result) {
         result << "options" << QueryOption_AllSupported;
         return true;

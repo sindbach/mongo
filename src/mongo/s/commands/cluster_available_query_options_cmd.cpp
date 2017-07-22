@@ -35,9 +35,9 @@
 namespace mongo {
 namespace {
 
-class AvailableQueryOptions : public Command {
+class AvailableQueryOptions : public BasicCommand {
 public:
-    AvailableQueryOptions() : Command("availableQueryOptions", "availablequeryoptions") {}
+    AvailableQueryOptions() : BasicCommand("availableQueryOptions", "availablequeryoptions") {}
 
     bool slaveOk() const override {
         return true;
@@ -56,7 +56,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         result << "options" << QueryOption_AllSupportedForSharding;
         return true;

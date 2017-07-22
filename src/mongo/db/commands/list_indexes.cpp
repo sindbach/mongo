@@ -74,7 +74,7 @@ namespace {
  *   ]
  * }
  */
-class CmdListIndexes : public Command {
+class CmdListIndexes : public BasicCommand {
 public:
     virtual bool slaveOk() const {
         return false;
@@ -114,12 +114,11 @@ public:
                                     << ns.coll());
     }
 
-    CmdListIndexes() : Command("listIndexes") {}
+    CmdListIndexes() : BasicCommand("listIndexes") {}
 
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
-             string& errmsg,
              BSONObjBuilder& result) {
         const NamespaceString ns(parseNsOrUUID(opCtx, dbname, cmdObj));
         const long long defaultBatchSize = std::numeric_limits<long long>::max();
@@ -148,21 +147,19 @@ public:
         invariant(cce);
 
         vector<string> indexNames;
-        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+        writeConflictRetry(opCtx, "listIndexes", ns.ns(), [&indexNames, &cce, &opCtx] {
             indexNames.clear();
             cce->getAllIndexes(opCtx, &indexNames);
-        }
-        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "listIndexes", ns.ns());
+        });
 
         auto ws = make_unique<WorkingSet>();
         auto root = make_unique<QueuedDataStage>(opCtx, ws.get());
 
         for (size_t i = 0; i < indexNames.size(); i++) {
-            BSONObj indexSpec;
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-                indexSpec = cce->getIndexSpec(opCtx, indexNames[i]);
-            }
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(opCtx, "listIndexes", ns.ns());
+            BSONObj indexSpec =
+                writeConflictRetry(opCtx, "listIndexes", ns.ns(), [&cce, &opCtx, &indexNames, i] {
+                    return cce->getIndexSpec(opCtx, indexNames[i]);
+                });
 
             WorkingSetID id = ws->allocate();
             WorkingSetMember* member = ws->get(id);

@@ -106,7 +106,7 @@ StatusWith<vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationCon
     // db.serverStatus() (mem.mapped) to all shards.
     //
     // TODO: skip unresponsive shards and mark information as stale.
-    auto shardsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getAllShards(
+    auto shardsStatus = Grid::get(opCtx)->catalogClient()->getAllShards(
         opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
     if (!shardsStatus.isOK()) {
         return shardsStatus.getStatus();
@@ -117,9 +117,16 @@ StatusWith<vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationCon
     vector<ShardStatistics> stats;
 
     for (const auto& shard : shards) {
-        auto shardSizeStatus = shardutil::retrieveTotalShardSize(opCtx, shard.getName());
+        const auto shardSizeStatus = [&]() -> StatusWith<long long> {
+            if (!shard.getMaxSizeMB()) {
+                return 0;
+            }
+
+            return shardutil::retrieveTotalShardSize(opCtx, shard.getName());
+        }();
+
         if (!shardSizeStatus.isOK()) {
-            const Status& status = shardSizeStatus.getStatus();
+            const auto& status = shardSizeStatus.getStatus();
 
             return {status.code(),
                     str::stream() << "Unable to obtain shard utilization information for "

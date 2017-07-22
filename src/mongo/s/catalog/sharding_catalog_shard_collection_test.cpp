@@ -42,8 +42,7 @@
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
-#include "mongo/s/catalog/dist_lock_catalog_impl.h"
-#include "mongo/s/catalog/sharding_catalog_manager_impl.h"
+#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
@@ -54,8 +53,6 @@
 #include "mongo/s/config_server_test_fixture.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/future.h"
 #include "mongo/transport/mock_session.h"
 #include "mongo/util/log.h"
@@ -112,33 +109,6 @@ private:
     const HostAndPort clientHost{"clientHost1"};
 };
 
-TEST_F(ShardCollectionTest, distLockFails) {
-    auto nss = NamespaceString("test.foo");
-
-    // Manually take the distlock on the collection so that shardCollection gets a conflict.
-    ASSERT_OK(distLockCatalog()
-                  ->grabLock(operationContext(),
-                             nss.ns(),
-                             OID::gen(),
-                             "dummyWho",
-                             "dummyProcessId",
-                             Date_t::now(),
-                             "dummyReason")
-                  .getStatus());
-
-    ShardKeyPattern keyPattern(BSON("_id" << 1));
-    BSONObj defaultCollation;
-    ASSERT_THROWS_CODE(catalogManager()->shardCollection(operationContext(),
-                                                         nss.ns(),
-                                                         keyPattern,
-                                                         defaultCollation,
-                                                         false,
-                                                         vector<BSONObj>{},
-                                                         false),
-                       UserException,
-                       ErrorCodes::LockBusy);
-}
-
 TEST_F(ShardCollectionTest, anotherMongosSharding) {
     const auto nss = NamespaceString("db1.foo");
 
@@ -162,13 +132,14 @@ TEST_F(ShardCollectionTest, anotherMongosSharding) {
     ShardKeyPattern shardKeyPattern(BSON("_id" << 1));
     BSONObj defaultCollation;
 
-    ASSERT_THROWS_CODE(catalogManager()->shardCollection(operationContext(),
-                                                         nss.ns(),
-                                                         shardKeyPattern,
-                                                         defaultCollation,
-                                                         false,
-                                                         vector<BSONObj>{},
-                                                         false),
+    ASSERT_THROWS_CODE(ShardingCatalogManager::get(operationContext())
+                           ->shardCollection(operationContext(),
+                                             nss.ns(),
+                                             shardKeyPattern,
+                                             defaultCollation,
+                                             false,
+                                             vector<BSONObj>{},
+                                             false),
                        UserException,
                        ErrorCodes::ManualInterventionRequired);
 }
@@ -200,13 +171,14 @@ TEST_F(ShardCollectionTest, noInitialChunksOrData) {
         ON_BLOCK_EXIT([&] { Client::destroy(); });
         Client::initThreadIfNotAlready("Test");
         auto opCtx = cc().makeOperationContext();
-        catalogManager()->shardCollection(opCtx.get(),
-                                          nss.ns(),
-                                          shardKeyPattern,
-                                          defaultCollation,
-                                          false,
-                                          vector<BSONObj>{},
-                                          false);
+        ShardingCatalogManager::get(operationContext())
+            ->shardCollection(opCtx.get(),
+                              nss.ns(),
+                              shardKeyPattern,
+                              defaultCollation,
+                              false,
+                              vector<BSONObj>{},
+                              false);
     });
 
     // Report that no documents exist for the given collection on the primary shard
@@ -327,14 +299,14 @@ TEST_F(ShardCollectionTest, withInitialChunks) {
         ON_BLOCK_EXIT([&] { Client::destroy(); });
         Client::initThreadIfNotAlready("Test");
         auto opCtx = cc().makeOperationContext();
-        catalogManager()->shardCollection(
-            opCtx.get(),
-            ns,
-            keyPattern,
-            defaultCollation,
-            true,
-            vector<BSONObj>{splitPoint0, splitPoint1, splitPoint2, splitPoint3},
-            true);
+        ShardingCatalogManager::get(operationContext())
+            ->shardCollection(opCtx.get(),
+                              ns,
+                              keyPattern,
+                              defaultCollation,
+                              true,
+                              vector<BSONObj>{splitPoint0, splitPoint1, splitPoint2, splitPoint3},
+                              true);
     });
 
     // Expect the set shard version for that namespace
@@ -425,8 +397,9 @@ TEST_F(ShardCollectionTest, withInitialData) {
         ON_BLOCK_EXIT([&] { Client::destroy(); });
         Client::initThreadIfNotAlready("Test");
         auto opCtx = cc().makeOperationContext();
-        catalogManager()->shardCollection(
-            opCtx.get(), ns, keyPattern, defaultCollation, false, vector<BSONObj>{}, false);
+        ShardingCatalogManager::get(operationContext())
+            ->shardCollection(
+                opCtx.get(), ns, keyPattern, defaultCollation, false, vector<BSONObj>{}, false);
     });
 
     // Report that documents exist for the given collection on the primary shard, so that calling

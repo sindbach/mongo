@@ -47,9 +47,9 @@
 namespace mongo {
 namespace {
 
-class GetShardVersion : public Command {
+class GetShardVersion : public BasicCommand {
 public:
-    GetShardVersion() : Command("getShardVersion") {}
+    GetShardVersion() : BasicCommand("getShardVersion") {}
 
     void help(std::stringstream& help) const override {
         help << " example: { getShardVersion : 'alleyinsider.foo'  } ";
@@ -85,7 +85,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
         const NamespaceString nss(parseNs(dbname, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,

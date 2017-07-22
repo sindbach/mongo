@@ -61,7 +61,6 @@
 #include "mongo/s/catalog/dist_lock_catalog.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_shard.h"
@@ -74,8 +73,6 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/set_shard_version_request.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/tick_source_mock.h"
@@ -225,8 +222,7 @@ std::unique_ptr<ShardRegistry> ShardingMongodTestFixture::makeShardRegistry(
     return stdx::make_unique<ShardRegistry>(std::move(shardFactory), configConnStr);
 }
 
-std::unique_ptr<DistLockCatalog> ShardingMongodTestFixture::makeDistLockCatalog(
-    ShardRegistry* shardRegistry) {
+std::unique_ptr<DistLockCatalog> ShardingMongodTestFixture::makeDistLockCatalog() {
     return nullptr;
 }
 
@@ -237,11 +233,6 @@ std::unique_ptr<DistLockManager> ShardingMongodTestFixture::makeDistLockManager(
 
 std::unique_ptr<ShardingCatalogClient> ShardingMongodTestFixture::makeShardingCatalogClient(
     std::unique_ptr<DistLockManager> distLockManager) {
-    return nullptr;
-}
-
-std::unique_ptr<ShardingCatalogManager> ShardingMongodTestFixture::makeShardingCatalogManager(
-    ShardingCatalogClient* catalogClient) {
     return nullptr;
 }
 
@@ -266,6 +257,7 @@ Status ShardingMongodTestFixture::initializeGlobalShardingStateForMongodForTest(
     const ConnectionString& configConnStr) {
     invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
               serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+
     // Create and initialize each sharding component individually before moving them to the Grid
     // in order to control the order of initialization, since some components depend on others.
 
@@ -274,48 +266,27 @@ Status ShardingMongodTestFixture::initializeGlobalShardingStateForMongodForTest(
         executorPoolPtr->startup();
     }
 
-    auto shardRegistryPtr = makeShardRegistry(configConnStr);
-
-    auto distLockCatalogPtr = makeDistLockCatalog(shardRegistryPtr.get());
+    auto distLockCatalogPtr = makeDistLockCatalog();
     _distLockCatalog = distLockCatalogPtr.get();
 
     auto distLockManagerPtr = makeDistLockManager(std::move(distLockCatalogPtr));
     _distLockManager = distLockManagerPtr.get();
 
-    auto catalogClientPtr = makeShardingCatalogClient(std::move(distLockManagerPtr));
-    auto catalogManagerPtr = makeShardingCatalogManager(catalogClientPtr.get());
-
-    auto catalogCacheLoaderPtr = makeCatalogCacheLoader();
-    auto catalogCachePtr = makeCatalogCache(std::move(catalogCacheLoaderPtr));
-
-    auto clusterCursorManagerPtr = makeClusterCursorManager();
-
-    auto balancerConfigurationPtr = makeBalancerConfiguration();
-
-    Grid::get(operationContext())
-        ->init(std::move(catalogClientPtr),
-               std::move(catalogManagerPtr),
-               std::move(catalogCachePtr),
-               std::move(shardRegistryPtr),
-               std::move(clusterCursorManagerPtr),
-               std::move(balancerConfigurationPtr),
+    auto const grid = Grid::get(operationContext());
+    grid->init(makeShardingCatalogClient(std::move(distLockManagerPtr)),
+               makeCatalogCache(makeCatalogCacheLoader()),
+               makeShardRegistry(configConnStr),
+               makeClusterCursorManager(),
+               makeBalancerConfiguration(),
                std::move(executorPoolPtr),
                _mockNetwork);
 
-    // Note: ShardRegistry::startup() is not called because it starts a task executor with a self-
-    // rescheduling task to reload the ShardRegistry over the network.
-    if (Grid::get(operationContext())->catalogClient(operationContext())) {
-        auto status = Grid::get(operationContext())->catalogClient(operationContext())->startup();
-        if (!status.isOK()) {
-            return status;
-        }
-    }
+    // NOTE: ShardRegistry::startup() is not called because it starts a task executor with a
+    // self-rescheduling task to reload the ShardRegistry over the network.
+    // grid->shardRegistry()->startup();
 
-    if (Grid::get(operationContext())->catalogManager()) {
-        auto status = Grid::get(operationContext())->catalogManager()->startup();
-        if (!status.isOK()) {
-            return status;
-        }
+    if (grid->catalogClient()) {
+        grid->catalogClient()->startup();
     }
 
     return Status::OK();
@@ -328,14 +299,8 @@ void ShardingMongodTestFixture::tearDown() {
         Grid::get(operationContext())->getExecutorPool()->shutdownAndJoin();
     }
 
-    if (Grid::get(operationContext())->catalogManager()) {
-        Grid::get(operationContext())->catalogManager()->shutDown(operationContext());
-    }
-
-    if (Grid::get(operationContext())->catalogClient(operationContext())) {
-        Grid::get(operationContext())
-            ->catalogClient(operationContext())
-            ->shutDown(operationContext());
+    if (Grid::get(operationContext())->catalogClient()) {
+        Grid::get(operationContext())->catalogClient()->shutDown(operationContext());
     }
 
     Grid::get(operationContext())->clearForUnitTests();
@@ -347,13 +312,8 @@ void ShardingMongodTestFixture::tearDown() {
 }
 
 ShardingCatalogClient* ShardingMongodTestFixture::catalogClient() const {
-    invariant(Grid::get(operationContext())->catalogClient(operationContext()));
-    return Grid::get(operationContext())->catalogClient(operationContext());
-}
-
-ShardingCatalogManager* ShardingMongodTestFixture::catalogManager() const {
-    invariant(Grid::get(operationContext())->catalogManager());
-    return Grid::get(operationContext())->catalogManager();
+    invariant(Grid::get(operationContext())->catalogClient());
+    return Grid::get(operationContext())->catalogClient();
 }
 
 CatalogCache* ShardingMongodTestFixture::catalogCache() const {

@@ -83,9 +83,9 @@ namespace {
  * }
  *
  */
-class ConfigSvrCommitChunkMigrationCommand : public Command {
+class ConfigSvrCommitChunkMigrationCommand : public BasicCommand {
 public:
-    ConfigSvrCommitChunkMigrationCommand() : Command("_configsvrCommitChunkMigration") {}
+    ConfigSvrCommitChunkMigrationCommand() : BasicCommand("_configsvrCommitChunkMigration") {}
 
     void help(std::stringstream& help) const override {
         help << "should not be calling this directly";
@@ -120,7 +120,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result) override {
 
         const NamespaceString nss = NamespaceString(parseNs(dbName, cmdObj));
@@ -128,7 +127,7 @@ public:
         auto commitRequest =
             uassertStatusOK(CommitChunkMigrationRequest::createFromCommand(nss, cmdObj));
 
-        StatusWith<BSONObj> response = Grid::get(opCtx)->catalogManager()->commitChunkMigration(
+        StatusWith<BSONObj> response = ShardingCatalogManager::get(opCtx)->commitChunkMigration(
             opCtx,
             nss,
             commitRequest.getMigratedChunk(),

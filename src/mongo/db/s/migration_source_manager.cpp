@@ -164,7 +164,8 @@ Status MigrationSourceManager::startClone(OperationContext* opCtx) {
     invariant(_state == kCreated);
     auto scopedGuard = MakeGuard([&] { cleanupOnError(opCtx); });
 
-    grid.catalogClient(opCtx)
+    Grid::get(opCtx)
+        ->catalogClient()
         ->logChange(opCtx,
                     "moveChunk.start",
                     getNss().ns(),
@@ -320,7 +321,7 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opC
     }
 
     auto commitChunkMigrationResponse =
-        grid.shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
+        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
             "admin",
@@ -344,7 +345,7 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opC
                  "against the config server to obtain its latest optime"
               << causedBy(redact(migrationCommitStatus));
 
-        Status status = grid.catalogClient(opCtx)->logChange(
+        Status status = Grid::get(opCtx)->catalogClient()->logChange(
             opCtx,
             "moveChunk.validating",
             getNss().ns(),
@@ -403,17 +404,6 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opC
         // Migration succeeded
         log() << "Migration succeeded and updated collection version to "
               << refreshedMetadata->getCollVersion();
-
-        // Schedule clearing out orphaned documents when they are no longer in active use.
-        const auto orphans = ChunkRange(_args.getMinKey(), _args.getMaxKey());
-        auto notification = css->cleanUpRange(orphans);
-        if (notification.ready() && !notification.waitStatus(opCtx).isOK()) {
-            // if it fails immediately, report that and continue.
-            warning() << "Failed to initiate cleanup of " << getNss().ns() << " orphan range "
-                      << redact(orphans.toString()) << ": "
-                      << redact(notification.waitStatus(opCtx).reason());
-        }
-        notification.abandon();
     } else {
         AutoGetCollection autoColl(opCtx, getNss(), MODE_IX, MODE_X);
 
@@ -435,7 +425,8 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opC
     scopedGuard.Dismiss();
     _cleanup(opCtx);
 
-    grid.catalogClient(opCtx)
+    Grid::get(opCtx)
+        ->catalogClient()
         ->logChange(opCtx,
                     "moveChunk.commit",
                     getNss().ns(),
@@ -454,7 +445,8 @@ void MigrationSourceManager::cleanupOnError(OperationContext* opCtx) {
         return;
     }
 
-    grid.catalogClient(opCtx)
+    Grid::get(opCtx)
+        ->catalogClient()
         ->logChange(opCtx,
                     "moveChunk.error",
                     getNss().ns(),

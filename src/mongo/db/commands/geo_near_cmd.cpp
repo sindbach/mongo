@@ -60,9 +60,9 @@ namespace mongo {
 using std::unique_ptr;
 using std::stringstream;
 
-class Geo2dFindNearCmd : public Command {
+class Geo2dFindNearCmd : public ErrmsgCommandDeprecated {
 public:
-    Geo2dFindNearCmd() : Command("geoNear") {}
+    Geo2dFindNearCmd() : ErrmsgCommandDeprecated("geoNear") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -97,11 +97,11 @@ public:
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
 
-    bool run(OperationContext* opCtx,
-             const string& dbname,
-             const BSONObj& cmdObj,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         if (!cmdObj["start"].eoo()) {
             errmsg = "using deprecated 'start' argument to geoNear";
             return false;
@@ -225,14 +225,8 @@ public:
         // version on initial entry into geoNear.
         auto rangePreserver = CollectionShardingState::get(opCtx, nss)->getMetadata();
 
-        auto statusWithPlanExecutor =
-            getExecutor(opCtx, collection, std::move(cq), PlanExecutor::YIELD_AUTO, 0);
-        if (!statusWithPlanExecutor.isOK()) {
-            errmsg = "can't get query executor";
-            return false;
-        }
-
-        auto exec = std::move(statusWithPlanExecutor.getValue());
+        auto exec = uassertStatusOK(
+            getExecutor(opCtx, collection, std::move(cq), PlanExecutor::YIELD_AUTO, 0));
 
         auto curOp = CurOp::get(opCtx);
         {

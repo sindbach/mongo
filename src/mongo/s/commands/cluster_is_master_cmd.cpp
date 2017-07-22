@@ -44,9 +44,9 @@
 namespace mongo {
 namespace {
 
-class CmdIsMaster : public Command {
+class CmdIsMaster : public BasicCommand {
 public:
-    CmdIsMaster() : Command("isMaster", "ismaster") {}
+    CmdIsMaster() : BasicCommand("isMaster", "ismaster") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -70,7 +70,6 @@ public:
     virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
                      const BSONObj& cmdObj,
-                     std::string& errmsg,
                      BSONObjBuilder& result) {
 
         auto& clientMetadataIsMasterState = ClientMetadataIsMasterState::get(opCtx->getClient());

@@ -49,7 +49,7 @@ namespace mongo {
  * Defines common attributes for all index filter related commands
  * such as slaveOk.
  */
-class IndexFilterCommand : public Command {
+class IndexFilterCommand : public BasicCommand {
 public:
     IndexFilterCommand(const std::string& name, const std::string& helpText);
 
@@ -66,7 +66,6 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbname,
              const BSONObj& cmdObj,
-             std::string& errmsg,
              BSONObjBuilder& result);
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override;

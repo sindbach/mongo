@@ -76,6 +76,7 @@
 #include "mongo/s/chunk_version.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -220,7 +221,8 @@ public:
     }
 
     std::vector<BSONObj> getCurrentOps(CurrentOpConnectionsMode connMode,
-                                       CurrentOpUserMode userMode) const {
+                                       CurrentOpUserMode userMode,
+                                       CurrentOpTruncateMode truncateMode) const {
         AuthorizationSession* ctxAuth = AuthorizationSession::get(_ctx->opCtx->getClient());
 
         const std::string hostName = getHostNameCachedAndPort();
@@ -268,13 +270,19 @@ public:
 
             // Fill out the rest of the BSONObj with opCtx specific details.
             infoBuilder.appendBool("active", static_cast<bool>(clientOpCtx));
+            infoBuilder.append(
+                "currentOpTime",
+                _ctx->opCtx->getServiceContext()->getPreciseClockSource()->now().toString());
+
             if (clientOpCtx) {
                 infoBuilder.append("opid", clientOpCtx->getOpID());
                 if (clientOpCtx->isKillPending()) {
                     infoBuilder.append("killPending", true);
                 }
 
-                CurOp::get(clientOpCtx)->reportState(&infoBuilder);
+                CurOp::get(clientOpCtx)
+                    ->reportState(&infoBuilder,
+                                  (truncateMode == CurrentOpTruncateMode::kTruncateOps));
 
                 Locker::LockerInfo lockerInfo;
                 clientOpCtx->lockState()->getLockerInfo(&lockerInfo);
@@ -384,6 +392,14 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     const AggregationRequest* aggRequest,
     const size_t plannerOpts) {
     auto qr = stdx::make_unique<QueryRequest>(nss);
+    switch (pExpCtx->tailableMode) {
+        case ExpressionContext::TailableMode::kNormal:
+            break;
+        case ExpressionContext::TailableMode::kTailableAndAwaitData:
+            qr->setTailable(true);
+            qr->setAwaitData(true);
+            break;
+    }
     qr->setFilter(queryObj);
     qr->setProj(projectionObj);
     qr->setSort(sortObj);
@@ -425,7 +441,6 @@ void PipelineD::prepareCursorSource(Collection* collection,
                                     const AggregationRequest* aggRequest,
                                     Pipeline* pipeline) {
     auto expCtx = pipeline->getContext();
-    dassert(expCtx->opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_IS));
 
     // We will be modifying the source vector as we go.
     Pipeline::SourceContainer& sources = pipeline->_sources;
@@ -439,11 +454,15 @@ void PipelineD::prepareCursorSource(Collection* collection,
         }
     }
 
-    if (!sources.empty()) {
-        if (sources.front()->isInitialSource()) {
-            return;  // don't need a cursor
-        }
+    // If the first stage of the pipeline is an initial source, we don't need an input cursor.
+    if (!sources.empty() && sources.front()->isInitialSource()) {
+        return;
+    }
 
+    // We are going to generate an input cursor, so we need to be holding the collection lock.
+    dassert(expCtx->opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_IS));
+
+    if (!sources.empty()) {
         auto sampleStage = dynamic_cast<DocumentSourceSample*>(sources.front().get());
         // Optimize an initial $sample stage if possible.
         if (collection && sampleStage) {

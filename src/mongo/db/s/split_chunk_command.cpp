@@ -130,9 +130,9 @@ bool _checkMetadataForSuccess(OperationContext* opCtx,
     return true;
 }
 
-class SplitChunkCommand : public Command {
+class SplitChunkCommand : public ErrmsgCommandDeprecated {
 public:
-    SplitChunkCommand() : Command("splitChunk") {}
+    SplitChunkCommand() : ErrmsgCommandDeprecated("splitChunk") {}
 
     void help(std::stringstream& help) const override {
         help << "internal command usage only\n"
@@ -167,11 +167,11 @@ public:
         return parseNsFullyQualified(dbname, cmdObj);
     }
 
-    bool run(OperationContext* opCtx,
-             const std::string& dbname,
-             const BSONObj& cmdObj,
-             std::string& errmsg,
-             BSONObjBuilder& result) override {
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& dbname,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
         auto shardingState = ShardingState::get(opCtx);
         uassertStatusOK(shardingState->canAcceptShardedCommands());
 
@@ -202,22 +202,6 @@ public:
         const BSONObj min = chunkRange.getMin();
         const BSONObj max = chunkRange.getMax();
 
-        vector<BSONObj> splitKeys;
-        {
-            BSONElement splitKeysElem;
-            auto splitKeysElemStatus =
-                bsonExtractTypedField(cmdObj, "splitKeys", mongo::Array, &splitKeysElem);
-
-            if (!splitKeysElemStatus.isOK()) {
-                errmsg = "need to provide the split points to chunk over";
-                return false;
-            }
-            BSONObjIterator it(splitKeysElem.Obj());
-            while (it.more()) {
-                splitKeys.push_back(it.next().Obj().getOwned());
-            }
-        }
-
         string shardName;
         auto parseShardNameStatus = bsonExtractStringField(cmdObj, "from", &shardName);
         if (!parseShardNameStatus.isOK())
@@ -232,7 +216,7 @@ public:
         const string whyMessage(str::stream() << "splitting chunk [" << min << ", " << max
                                               << ") in "
                                               << nss.toString());
-        auto scopedDistLock = grid.catalogClient(opCtx)->getDistLockManager()->lock(
+        auto scopedDistLock = Grid::get(opCtx)->catalogClient()->getDistLockManager()->lock(
             opCtx, nss.ns(), whyMessage, DistLockManager::kSingleLockAttemptTimeout);
         if (!scopedDistLock.isOK()) {
             errmsg = str::stream() << "could not acquire collection lock for " << nss.toString()
@@ -265,6 +249,54 @@ public:
             return false;
         }
 
+        ScopedCollectionMetadata collMetadata;
+        {
+            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+
+            // Get collection metadata
+            collMetadata = CollectionShardingState::get(opCtx, nss.ns())->getMetadata();
+        }
+
+        // With nonzero shard version, we must have metadata
+        invariant(collMetadata);
+
+        KeyPattern shardKeyPattern(collMetadata->getKeyPattern());
+
+        vector<BSONObj> splitKeys;
+        {
+            BSONElement splitKeysElem;
+            auto splitKeysElemStatus =
+                bsonExtractTypedField(cmdObj, "splitKeys", mongo::Array, &splitKeysElem);
+
+            if (!splitKeysElemStatus.isOK()) {
+                errmsg = "need to provide the split points to chunk over";
+                return false;
+            }
+
+            BSONObjIterator it(splitKeysElem.Obj());
+
+            // If the shard uses a hashed key, then we must make sure that the split point is of
+            // type NumberLong.
+            if (KeyPattern::isHashedKeyPattern(shardKeyPattern.toBSON())) {
+                while (it.more()) {
+                    BSONObj splitKeyObj = it.next().Obj();
+                    BSONObjIterator keyIt(splitKeyObj);
+                    while (keyIt.more()) {
+                        BSONElement splitKey = keyIt.next();
+                        if (splitKey.type() != NumberLong) {
+                            errmsg = "split point must be of type NumberLong";
+                            return false;
+                        }
+                    }
+                    splitKeys.push_back(splitKeyObj.getOwned());
+                }
+            } else {
+                while (it.more()) {
+                    splitKeys.push_back(it.next().Obj().getOwned());
+                }
+            }
+        }
+
         OID expectedCollectionEpoch;
         if (cmdObj.hasField("epoch")) {
             auto epochStatus = bsonExtractOIDField(cmdObj, "epoch", &expectedCollectionEpoch);
@@ -292,17 +324,6 @@ public:
             warning() << msg;
             return appendCommandStatus(result, {ErrorCodes::StaleEpoch, msg});
         }
-
-        ScopedCollectionMetadata collMetadata;
-        {
-            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-
-            // Get collection metadata
-            collMetadata = CollectionShardingState::get(opCtx, nss.ns())->getMetadata();
-        }
-
-        // With nonzero shard version, we must have metadata
-        invariant(collMetadata);
 
         ChunkVersion collVersion = collMetadata->getCollVersion();
         // With nonzero shard version, we must have a coll version >= our shard version
@@ -389,7 +410,6 @@ public:
         }
 
         // Select chunk to move out for "top chunk optimization".
-        KeyPattern shardKeyPattern(collMetadata->getKeyPattern());
 
         AutoGetCollection autoColl(opCtx, nss, MODE_IS);
 
