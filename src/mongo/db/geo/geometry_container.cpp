@@ -26,12 +26,15 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
+
 #include "mongo/db/geo/geometry_container.h"
 
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geoparser.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
@@ -448,6 +451,14 @@ bool GeometryContainer::contains(const S2Polyline& otherLine) const {
         return _polygon->bigPolygon->Contains(otherLine);
     }
 
+    if (NULL != _cap && (_cap->crs == SPHERE)) {
+        for (int i=0; i<otherLine.num_vertices(); ++i){
+            if(_cap->cap.InteriorContains(otherLine.vertex(i))) {
+                return true;
+            }
+        }
+    }
+
     if (NULL != _multiPolygon) {
         const vector<S2Polygon*>& polys = _multiPolygon->polygons.vector();
         for (size_t i = 0; i < polys.size(); ++i) {
@@ -491,6 +502,16 @@ bool GeometryContainer::contains(const S2Polygon& otherPolygon) const {
 
     if (NULL != _polygon && NULL != _polygon->bigPolygon) {
         return _polygon->bigPolygon->Contains(otherPolygon);
+    }
+
+    if (NULL != _cap && (_cap->crs == SPHERE)) {
+        for (int i=0; i<otherPolygon.num_loops(); ++i){
+            for (int j=0; j<otherPolygon.loop(i)->num_vertices(); ++j){
+                if(_cap->cap.InteriorContains(otherPolygon.loop(i)->vertex(j))) {
+                    return true;
+                }
+            }
+        }
     }
 
     if (NULL != _multiPolygon) {
