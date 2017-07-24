@@ -26,15 +26,12 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
-
 #include "mongo/db/geo/geometry_container.h"
 
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geoparser.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
-#include "mongo/util/log.h"
 
 namespace mongo {
 
@@ -452,10 +449,17 @@ bool GeometryContainer::contains(const S2Polyline& otherLine) const {
     }
 
     if (NULL != _cap && (_cap->crs == SPHERE)) {
+        // If any of the points are not contained within the S2Cap region
+        // we can stop iterating over the other points to save time.
+        bool allContained = true;
         for (int i=0; i<otherLine.num_vertices(); ++i){
-            if(_cap->cap.InteriorContains(otherLine.vertex(i))) {
-                return true;
+            if(!_cap->cap.Contains(otherLine.vertex(i))) {
+                allContained = false;
+                break;
             }
+        }
+        if (allContained==true) {
+            return true;
         }
     }
 
@@ -505,12 +509,19 @@ bool GeometryContainer::contains(const S2Polygon& otherPolygon) const {
     }
 
     if (NULL != _cap && (_cap->crs == SPHERE)) {
+        // If any of the points are not contained within the S2Cap region
+        // we can stop iterating over the other points to save time.
+        bool allContained = true;
         for (int i=0; i<otherPolygon.num_loops(); ++i){
             for (int j=0; j<otherPolygon.loop(i)->num_vertices(); ++j){
-                if(_cap->cap.InteriorContains(otherPolygon.loop(i)->vertex(j))) {
-                    return true;
+                if(!_cap->cap.Contains(otherPolygon.loop(i)->vertex(j))) {
+                    allContained = false; 
+                    break;
                 }
             }
+        }
+        if (allContained == true) {
+            return true; 
         }
     }
 
