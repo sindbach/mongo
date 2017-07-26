@@ -452,13 +452,13 @@ bool GeometryContainer::contains(const S2Polyline& otherLine) const {
         // If any of the points are not contained within the S2Cap region
         // we can stop iterating over the other points to save time.
         bool allContained = true;
-        for (int i=0; i<otherLine.num_vertices(); ++i){
-            if(!_cap->cap.Contains(otherLine.vertex(i))) {
+        for (int i = 0; i < otherLine.num_vertices(); ++i) {
+            if (!_cap->cap.Contains(otherLine.vertex(i))) {
                 allContained = false;
                 break;
             }
         }
-        if (allContained==true) {
+        if (allContained == true) {
             return true;
         }
     }
