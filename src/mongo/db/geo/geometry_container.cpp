@@ -509,19 +509,8 @@ bool GeometryContainer::contains(const S2Polygon& otherPolygon) const {
     }
 
     if (NULL != _cap && (_cap->crs == SPHERE)) {
-        // If any of the points are not contained within the S2Cap region
-        // we can stop iterating over the other points to save time.
-        bool allContained = true;
-        for (int i=0; i<otherPolygon.num_loops(); ++i){
-            for (int j=0; j<otherPolygon.loop(i)->num_vertices(); ++j){
-                if(!_cap->cap.Contains(otherPolygon.loop(i)->vertex(j))) {
-                    allContained = false; 
-                    break;
-                }
-            }
-        }
-        if (allContained == true) {
-            return true; 
+        if (_cap->cap.GetRectBound().Contains(otherPolygon.GetRectBound())) {
+            return true;
         }
     }
 
