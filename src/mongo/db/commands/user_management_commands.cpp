@@ -52,6 +52,7 @@
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/privilege_parser.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/user.h"
@@ -62,13 +63,11 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/unordered_set.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/write_ops/batched_command_response.h"
-#include "mongo/s/write_ops/batched_delete_request.h"
-#include "mongo/s/write_ops/batched_insert_request.h"
-#include "mongo/s/write_ops/batched_update_request.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/log.h"
@@ -78,8 +77,6 @@
 #include "mongo/util/time_support.h"
 
 namespace mongo {
-
-namespace str = mongoutils::str;
 
 using std::endl;
 using std::string;
@@ -182,8 +179,7 @@ Status checkOkayToGrantRolesToRole(OperationContext* opCtx,
         }
 
         BSONObj roleToAddDoc;
-        Status status = authzManager->getRoleDescription(
-            opCtx, roleToAdd, PrivilegeFormat::kOmit, &roleToAddDoc);
+        Status status = authzManager->getRoleDescription(opCtx, roleToAdd, &roleToAddDoc);
         if (status == ErrorCodes::RoleNotFound) {
             return Status(ErrorCodes::RoleNotFound,
                           "Cannot grant nonexistent role " + roleToAdd.toString());
@@ -271,12 +267,14 @@ Status insertAuthzDocument(OperationContext* opCtx,
     try {
         DBDirectClient client(opCtx);
 
-        BatchedInsertRequest req;
-        req.setNS(collectionName);
-        req.addToDocuments(document);
-
         BSONObj res;
-        client.runCommand(collectionName.db().toString(), req.toBSON(), res);
+        client.runCommand(collectionName.db().toString(),
+                          [&] {
+                              write_ops::Insert insertOp(collectionName);
+                              insertOp.setDocuments({document});
+                              return insertOp.toBSON({});
+                          }(),
+                          res);
 
         BatchedCommandResponse response;
         std::string errmsg;
@@ -305,18 +303,21 @@ Status updateAuthzDocuments(OperationContext* opCtx,
     try {
         DBDirectClient client(opCtx);
 
-        auto doc = stdx::make_unique<BatchedUpdateDocument>();
-        doc->setQuery(query);
-        doc->setUpdateExpr(updatePattern);
-        doc->setMulti(multi);
-        doc->setUpsert(upsert);
-
-        BatchedUpdateRequest req;
-        req.setNS(collectionName);
-        req.addToUpdates(doc.release());
-
         BSONObj res;
-        client.runCommand(collectionName.db().toString(), req.toBSON(), res);
+        client.runCommand(collectionName.db().toString(),
+                          [&] {
+                              write_ops::Update updateOp(collectionName);
+                              updateOp.setUpdates({[&] {
+                                  write_ops::UpdateOpEntry entry;
+                                  entry.setQ(query);
+                                  entry.setU(updatePattern);
+                                  entry.setMulti(multi);
+                                  entry.setUpsert(upsert);
+                                  return entry;
+                              }()});
+                              return updateOp.toBSON({});
+                          }(),
+                          res);
 
         BatchedCommandResponse response;
         std::string errmsg;
@@ -375,16 +376,19 @@ Status removeAuthzDocuments(OperationContext* opCtx,
     try {
         DBDirectClient client(opCtx);
 
-        auto doc = stdx::make_unique<BatchedDeleteDocument>();
-        doc->setQuery(query);
-        doc->setLimit(0);
-
-        BatchedDeleteRequest req;
-        req.setNS(collectionName);
-        req.addToDeletes(doc.release());
-
         BSONObj res;
-        client.runCommand(collectionName.db().toString(), req.toBSON(), res);
+        client.runCommand(collectionName.db().toString(),
+                          [&] {
+                              write_ops::Delete deleteOp(collectionName);
+                              deleteOp.setDeletes({[&] {
+                                  write_ops::DeleteOpEntry entry;
+                                  entry.setQ(query);
+                                  entry.setMulti(true);
+                                  return entry;
+                              }()});
+                              return deleteOp.toBSON({});
+                          }(),
+                          res);
 
         BatchedCommandResponse response;
         std::string errmsg;
@@ -724,8 +728,7 @@ public:
         // Role existence has to be checked after acquiring the update lock
         for (size_t i = 0; i < args.roles.size(); ++i) {
             BSONObj ignored;
-            status = authzManager->getRoleDescription(
-                opCtx, args.roles[i], PrivilegeFormat::kOmit, &ignored);
+            status = authzManager->getRoleDescription(opCtx, args.roles[i], &ignored);
             if (!status.isOK()) {
                 return appendCommandStatus(result, status);
             }
@@ -863,8 +866,7 @@ public:
         if (args.hasRoles) {
             for (size_t i = 0; i < args.roles.size(); ++i) {
                 BSONObj ignored;
-                status = authzManager->getRoleDescription(
-                    opCtx, args.roles[i], PrivilegeFormat::kOmit, &ignored);
+                status = authzManager->getRoleDescription(opCtx, args.roles[i], &ignored);
                 if (!status.isOK()) {
                     return appendCommandStatus(result, status);
                 }
@@ -1065,8 +1067,7 @@ public:
         for (vector<RoleName>::iterator it = roles.begin(); it != roles.end(); ++it) {
             RoleName& roleName = *it;
             BSONObj roleDoc;
-            status =
-                authzManager->getRoleDescription(opCtx, roleName, PrivilegeFormat::kOmit, &roleDoc);
+            status = authzManager->getRoleDescription(opCtx, roleName, &roleDoc);
             if (!status.isOK()) {
                 return appendCommandStatus(result, status);
             }
@@ -1138,8 +1139,7 @@ public:
         for (vector<RoleName>::iterator it = roles.begin(); it != roles.end(); ++it) {
             RoleName& roleName = *it;
             BSONObj roleDoc;
-            status =
-                authzManager->getRoleDescription(opCtx, roleName, PrivilegeFormat::kOmit, &roleDoc);
+            status = authzManager->getRoleDescription(opCtx, roleName, &roleDoc);
             if (!status.isOK()) {
                 return appendCommandStatus(result, status);
             }
@@ -1358,6 +1358,11 @@ public:
 
         roleObjBuilder.append("roles", rolesVectorToBSONArray(args.roles));
 
+        if (args.authenticationRestrictions && !args.authenticationRestrictions->isEmpty()) {
+            roleObjBuilder.append("authenticationRestrictions",
+                                  args.authenticationRestrictions.get());
+        }
+
         ServiceContext* serviceContext = opCtx->getClient()->getServiceContext();
         stdx::lock_guard<stdx::mutex> lk(getAuthzDataMutex(serviceContext));
 
@@ -1418,7 +1423,7 @@ public:
             return appendCommandStatus(result, status);
         }
 
-        if (!args.hasPrivileges && !args.hasRoles) {
+        if (!args.hasPrivileges && !args.hasRoles && !args.authenticationRestrictions) {
             return appendCommandStatus(
                 result,
                 Status(ErrorCodes::BadValue,
@@ -1426,6 +1431,7 @@ public:
         }
 
         BSONObjBuilder updateSetBuilder;
+        BSONObjBuilder updateUnsetBuilder;
 
         if (args.hasPrivileges) {
             BSONArray privileges;
@@ -1440,6 +1446,15 @@ public:
             updateSetBuilder.append("roles", rolesVectorToBSONArray(args.roles));
         }
 
+        if (args.authenticationRestrictions) {
+            if (args.authenticationRestrictions->isEmpty()) {
+                updateUnsetBuilder.append("authenticationRestrictions", "");
+            } else {
+                updateSetBuilder.append("authenticationRestrictions",
+                                        args.authenticationRestrictions.get());
+            }
+        }
+
         ServiceContext* serviceContext = opCtx->getClient()->getServiceContext();
         stdx::lock_guard<stdx::mutex> lk(getAuthzDataMutex(serviceContext));
 
@@ -1451,8 +1466,7 @@ public:
 
         // Role existence has to be checked after acquiring the update lock
         BSONObj ignored;
-        status = authzManager->getRoleDescription(
-            opCtx, args.roleName, PrivilegeFormat::kOmit, &ignored);
+        status = authzManager->getRoleDescription(opCtx, args.roleName, &ignored);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -1476,7 +1490,17 @@ public:
                              args.hasRoles ? &args.roles : NULL,
                              args.hasPrivileges ? &args.privileges : NULL);
 
-        status = updateRoleDocument(opCtx, args.roleName, BSON("$set" << updateSetBuilder.done()));
+        const auto updateSet = updateSetBuilder.obj();
+        const auto updateUnset = updateUnsetBuilder.obj();
+        BSONObjBuilder updateDocumentBuilder;
+        if (!updateSet.isEmpty()) {
+            updateDocumentBuilder.append("$set", updateSet);
+        }
+        if (!updateUnset.isEmpty()) {
+            updateDocumentBuilder.append("$unset", updateUnset);
+        }
+
+        status = updateRoleDocument(opCtx, args.roleName, updateDocumentBuilder.obj());
         // Must invalidate even on bad status - what if the write succeeded but the GLE failed?
         authzManager->invalidateUserCache();
         return appendCommandStatus(result, status);
@@ -1541,8 +1565,11 @@ public:
         }
 
         BSONObj roleDoc;
-        status = authzManager->getRoleDescription(
-            opCtx, roleName, PrivilegeFormat::kShowSeparate, &roleDoc);
+        status = authzManager->getRoleDescription(opCtx,
+                                                  roleName,
+                                                  PrivilegeFormat::kShowSeparate,
+                                                  AuthenticationRestrictionsFormat::kOmit,
+                                                  &roleDoc);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -1642,8 +1669,11 @@ public:
         }
 
         BSONObj roleDoc;
-        status = authzManager->getRoleDescription(
-            opCtx, roleName, PrivilegeFormat::kShowSeparate, &roleDoc);
+        status = authzManager->getRoleDescription(opCtx,
+                                                  roleName,
+                                                  PrivilegeFormat::kShowSeparate,
+                                                  AuthenticationRestrictionsFormat::kOmit,
+                                                  &roleDoc);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -1753,8 +1783,7 @@ public:
 
         // Role existence has to be checked after acquiring the update lock
         BSONObj roleDoc;
-        status =
-            authzManager->getRoleDescription(opCtx, roleName, PrivilegeFormat::kOmit, &roleDoc);
+        status = authzManager->getRoleDescription(opCtx, roleName, &roleDoc);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -1842,8 +1871,7 @@ public:
         }
 
         BSONObj roleDoc;
-        status =
-            authzManager->getRoleDescription(opCtx, roleName, PrivilegeFormat::kOmit, &roleDoc);
+        status = authzManager->getRoleDescription(opCtx, roleName, &roleDoc);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -1928,8 +1956,7 @@ public:
         }
 
         BSONObj roleDoc;
-        status =
-            authzManager->getRoleDescription(opCtx, roleName, PrivilegeFormat::kOmit, &roleDoc);
+        status = authzManager->getRoleDescription(opCtx, roleName, &roleDoc);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -2213,7 +2240,12 @@ public:
         if (args.allForDB) {
             std::vector<BSONObj> rolesDocs;
             status = getGlobalAuthorizationManager()->getRoleDescriptionsForDB(
-                opCtx, dbname, args.privilegeFormat, args.showBuiltinRoles, &rolesDocs);
+                opCtx,
+                dbname,
+                args.privilegeFormat,
+                args.authenticationRestrictionsFormat,
+                args.showBuiltinRoles,
+                &rolesDocs);
             if (!status.isOK()) {
                 return appendCommandStatus(result, status);
             }
@@ -2232,7 +2264,11 @@ public:
         } else {
             BSONObj roleDetails;
             status = getGlobalAuthorizationManager()->getRolesDescription(
-                opCtx, args.roleNames, args.privilegeFormat, &roleDetails);
+                opCtx,
+                args.roleNames,
+                args.privilegeFormat,
+                args.authenticationRestrictionsFormat,
+                &roleDetails);
             if (!status.isOK()) {
                 return appendCommandStatus(result, status);
             }

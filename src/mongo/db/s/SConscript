@@ -199,6 +199,7 @@ env.Library(
         'balancer',
         'collection_metadata',
         'sharding',
+        'split_chunk',
         'split_vector',
     ],
 )
@@ -271,12 +272,33 @@ env.CppUnitTest(
 )
 
 env.Library(
-    target='chunk_size_tracker',
+    target='split_chunk',
     source=[
-        'chunk_size_tracker.cpp',
+        'split_chunk.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base'
+        'sharding',
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/bson/util/bson_extract',
+        '$BUILD_DIR/mongo/db/clientcursor',
+        '$BUILD_DIR/mongo/db/db_raii',
+        '$BUILD_DIR/mongo/db/dbhelpers',
+        '$BUILD_DIR/mongo/db/exec/exec',
+        '$BUILD_DIR/mongo/db/pipeline/serveronly',
+        '$BUILD_DIR/mongo/db/query/query',
+        '$BUILD_DIR/mongo/db/rw_concern_d',
+        '$BUILD_DIR/mongo/s/catalog/sharding_catalog_manager',
+    ]
+)
+
+env.CppUnitTest(
+    target='split_chunk_test',
+    source=[
+        'split_chunk_test.cpp'
+    ],
+    LIBDEPS=[
+        'split_chunk',
+        '$BUILD_DIR/mongo/s/shard_server_test_fixture',
     ]
 )
 
@@ -308,16 +330,6 @@ env.Library(
     'balancer',
     'collection_metadata',
     'sharding',
-    ]
-)
-
-env.CppUnitTest(
-    target='chunk_size_tracker_test',
-    source=[
-        'chunk_size_tracker_test.cpp'
-    ],
-    LIBDEPS=[
-        'chunk_size_tracker'
     ]
 )
 
