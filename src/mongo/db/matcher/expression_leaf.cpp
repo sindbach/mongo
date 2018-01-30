@@ -246,9 +246,11 @@ bool RegexMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetai
             // pcrecpp::StringPiece instance using the full length of the string to avoid truncating
             // 'data' early.
             pcrecpp::StringPiece data(e.valuestr(), e.valuestrsize() - 1);
+            std::cerr << "String of "<< e.valuestr()<<"\n"; 
             return _re->PartialMatch(data);
         }
         case RegEx:
+            std::cerr << "Regex is regex object \n"; 
             return _regex == e.regex() && _flags == e.regexFlags();
         default:
             return false;
