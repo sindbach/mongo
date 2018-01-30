@@ -563,8 +563,11 @@ StatusWithMatchExpression parseRegexDocument(StringData name, const BSONObj& doc
             case PathAcceptingKeyword::REGEX:
                 if (e.type() == BSONType::String) {
                     regex = e.valueStringData();
+                    std::cerr << "--> string regex is " << regex << "\n"; 
                 } else if (e.type() == BSONType::RegEx) {
-                    regex = e.regex();
+                    regex = StringData(std::string(e.regex()));
+                    std::cerr << "--> object regex is " << regex << "\n"; 
+                    
                     regexOptions = e.regexFlags();
                 } else {
                     return {Status(ErrorCodes::BadValue, "$regex has to be a string")};
