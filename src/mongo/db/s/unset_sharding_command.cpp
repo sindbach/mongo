@@ -48,8 +48,8 @@ class UnsetShardingCommand : public BasicCommand {
 public:
     UnsetShardingCommand() : BasicCommand("unsetSharding") {}
 
-    void help(std::stringstream& help) const override {
-        help << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -60,13 +60,13 @@ public:
         return true;
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));

@@ -38,6 +38,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
@@ -67,11 +68,13 @@ public:
     using CallbackFn = stdx::function<void(const Status&)>;
 
     /**
-     * Type of function to to apply a single operation. In production, this function
-     * would have the same outcome as calling SyncTail::syncApply() (oplog application mode
-     * will be embedded in the function implementation).
+     * Type of function for a writer thread during oplog application to apply a set of operations
+     * that have been assigned (hashed by SyncTail::fillWriterVectors()) to that writer thread.
+     * In production, this function would have the same outcome as calling SyncTail::syncApply()
+     * (oplog application mode will be embedded in the function implementation).
      */
-    using ApplyOperationFn = stdx::function<Status(OperationPtrs*)>;
+    using ApplyOperationFn =
+        stdx::function<Status(OperationContext*, OperationPtrs*, WorkerMultikeyPathInfo*)>;
 
     using MultiApplyFn = stdx::function<StatusWith<OpTime>(
         OperationContext*, MultiApplier::Operations, MultiApplier::ApplyOperationFn)>;

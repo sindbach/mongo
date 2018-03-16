@@ -111,12 +111,21 @@
     jsTestLog('Primary ' + primary.host + ' successfully started two phase drop of collection ' +
               collToDrop.getFullName());
 
-    // Collection creation should fail with an error of ErrorCodes.DatabaseDropPending while the
-    // database is in a drop pending state.
+    // Commands that manipulate the database being dropped or perform destructive catalog operations
+    // should fail with the DatabaseDropPending error code while the database is in a drop-pending
+    // state.
     assert.commandFailedWithCode(
         dbToDrop.createCollection('collectionToCreateWhileDroppingDatabase'),
         ErrorCodes.DatabaseDropPending,
         'collection creation should fail while we are in the process of dropping the database');
+    assert.commandFailedWithCode(
+        dbToDrop.repairDatabase(),
+        ErrorCodes.DatabaseDropPending,
+        'repairDatabase should fail while we are in the process of dropping the database');
+    assert.commandFailedWithCode(
+        dbToDrop.adminCommand('restartCatalog'),
+        ErrorCodes.DatabaseDropPending,
+        'restartCatalog should fail if any databases are marked drop-pending');
 
     /**
      * DROP DATABASE 'Database' PHASE

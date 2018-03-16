@@ -30,11 +30,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <algorithm>
-#include <map>
-#include <string>
-#include <vector>
-
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -42,7 +37,10 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/chunk_move_write_concern_options.h"
+#include "mongo/db/s/migration_destination_manager.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
@@ -50,45 +48,42 @@
 #include "mongo/util/log.h"
 
 namespace mongo {
-
-using std::string;
-
 namespace {
 
 class RecvChunkStartCommand : public ErrmsgCommandDeprecated {
 public:
     RecvChunkStartCommand() : ErrmsgCommandDeprecated("_recvChunkStart") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         // This is required to be true to support moveChunk.
         return true;
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const string&,
+                   const std::string& dbname,
                    const BSONObj& cmdObj,
-                   string& errmsg,
-                   BSONObjBuilder& result) {
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
         auto shardingState = ShardingState::get(opCtx);
         uassertStatusOK(shardingState->canAcceptShardedCommands());
 
@@ -99,17 +94,7 @@ public:
 
         const auto chunkRange = uassertStatusOK(ChunkRange::fromBSON(cmdObj));
 
-        // Refresh our collection manager from the config server, we need a collection manager to
-        // start registering pending chunks. We force the remote refresh here to make the behavior
-        // consistent and predictable, generally we'd refresh anyway, and to be paranoid.
-        ChunkVersion shardVersion;
-        Status status = shardingState->refreshMetadataNow(opCtx, nss, &shardVersion);
-        if (!status.isOK()) {
-            errmsg = str::stream() << "cannot start receiving chunk "
-                                   << redact(chunkRange.toString()) << causedBy(redact(status));
-            warning() << errmsg;
-            return false;
-        }
+        const auto shardVersion = forceShardFilteringMetadataRefresh(opCtx, nss);
 
         // Process secondary throttle settings and assign defaults if necessary.
         const auto secondaryThrottle =
@@ -133,12 +118,12 @@ public:
             uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj)));
 
         // Ensure this shard is not currently receiving or donating any chunks.
-        auto scopedRegisterReceiveChunk(
-            uassertStatusOK(shardingState->registerReceiveChunk(nss, chunkRange, fromShard)));
+        auto scopedReceiveChunk(uassertStatusOK(
+            ActiveMigrationsRegistry::get(opCtx).registerReceiveChunk(nss, chunkRange, fromShard)));
 
-        uassertStatusOK(shardingState->migrationDestinationManager()->start(
+        uassertStatusOK(MigrationDestinationManager::get(opCtx)->start(
             nss,
-            std::move(scopedRegisterReceiveChunk),
+            std::move(scopedReceiveChunk),
             migrationSessionId,
             statusWithFromShardConnectionString.getValue(),
             fromShard,
@@ -159,35 +144,36 @@ class RecvChunkStatusCommand : public BasicCommand {
 public:
     RecvChunkStatusCommand() : BasicCommand("_recvChunkStatus") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
     bool run(OperationContext* opCtx,
-             const string&,
+             const std::string& dbname,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) {
-        ShardingState::get(opCtx)->migrationDestinationManager()->report(result);
+             BSONObjBuilder& result) override {
+        bool waitForSteadyOrDone = cmdObj["waitForSteadyOrDone"].boolean();
+        MigrationDestinationManager::get(opCtx)->report(result, opCtx, waitForSteadyOrDone);
         return true;
     }
 
@@ -197,39 +183,39 @@ class RecvChunkCommitCommand : public BasicCommand {
 public:
     RecvChunkCommitCommand() : BasicCommand("_recvChunkCommit") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
     bool run(OperationContext* opCtx,
-             const string&,
+             const std::string& dbname,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) {
+             BSONObjBuilder& result) override {
         auto const sessionId = uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj));
-        auto mdm = ShardingState::get(opCtx)->migrationDestinationManager();
+        auto const mdm = MigrationDestinationManager::get(opCtx);
         Status const status = mdm->startCommit(sessionId);
-        mdm->report(result);
+        mdm->report(result, opCtx, false);
         if (!status.isOK()) {
             log() << status.reason();
             return CommandHelpers::appendCommandStatus(result, status);
@@ -243,50 +229,50 @@ class RecvChunkAbortCommand : public BasicCommand {
 public:
     RecvChunkAbortCommand() : BasicCommand("_recvChunkAbort") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
     bool run(OperationContext* opCtx,
-             const string&,
+             const std::string&,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) {
-        auto const mdm = ShardingState::get(opCtx)->migrationDestinationManager();
+             BSONObjBuilder& result) override {
+        auto const mdm = MigrationDestinationManager::get(opCtx);
 
         auto migrationSessionIdStatus(MigrationSessionId::extractFromBSON(cmdObj));
 
         if (migrationSessionIdStatus.isOK()) {
             Status const status = mdm->abort(migrationSessionIdStatus.getValue());
-            mdm->report(result);
+            mdm->report(result, opCtx, false);
             if (!status.isOK()) {
                 log() << status.reason();
                 return CommandHelpers::appendCommandStatus(result, status);
             }
         } else if (migrationSessionIdStatus == ErrorCodes::NoSuchKey) {
             mdm->abortWithoutSessionIdCheck();
-            mdm->report(result);
+            mdm->report(result, opCtx, false);
         }
+
         uassertStatusOK(migrationSessionIdStatus.getStatus());
         return true;
     }

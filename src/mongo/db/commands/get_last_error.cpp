@@ -39,7 +39,7 @@
 #include "mongo/db/lasterror.h"
 #include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/util/log.h"
 
@@ -60,19 +60,19 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
 
     bool requiresAuth() const override {
         return false;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "reset error state (used with getpreverror)";
+    std::string help() const override {
+        return "reset error state (used with getpreverror)";
     }
     CmdResetError() : BasicCommand("resetError", "reseterror") {}
     bool run(OperationContext* opCtx,
@@ -90,26 +90,26 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
 
     bool requiresAuth() const override {
         return false;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "return error status of the last operation on this connection\n"
-             << "options:\n"
-             << "  { fsync:true } - fsync before returning, or wait for journal commit if running "
-                "with --journal\n"
-             << "  { j:true } - wait for journal commit if running with --journal\n"
-             << "  { w:n } - await replication to n servers (including self) before returning\n"
-             << "  { w:'majority' } - await replication to majority of set\n"
-             << "  { wtimeout:m} - timeout for w in m milliseconds";
+    std::string help() const override {
+        return "return error status of the last operation on this connection\n"
+               "options:\n"
+               "  { fsync:true } - fsync before returning, or wait for journal commit if running "
+               "with --journal\n"
+               "  { j:true } - wait for journal commit if running with --journal\n"
+               "  { w:n } - await replication to n servers (including self) before returning\n"
+               "  { w:'majority' } - await replication to majority of set\n"
+               "  { wtimeout:m} - timeout for w in m milliseconds";
     }
 
     bool errmsgRun(OperationContext* opCtx,
@@ -236,10 +236,7 @@ public:
         // Validate write concern no matter what, this matches 2.4 behavior
         //
         if (status.isOK()) {
-            // Ensure options are valid for this host. Since getLastError doesn't do writes itself,
-            // treat it as if these are admin database writes, which need to be replicated so we do
-            // the strictest checks write concern checks.
-            status = validateWriteConcern(opCtx, writeConcern, NamespaceString::kAdminDb);
+            status = validateWriteConcern(opCtx, writeConcern);
         }
 
         if (!status.isOK()) {
@@ -310,18 +307,18 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(stringstream& help) const {
-        help << "check for errors since last reseterror commandcal";
+    std::string help() const override {
+        return "check for errors since last reseterror commandcal";
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     bool requiresAuth() const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
     CmdGetPrevError() : BasicCommand("getPrevError", "getpreverror") {}
     bool run(OperationContext* opCtx,
              const string& dbname,

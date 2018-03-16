@@ -39,6 +39,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/op_observer_noop.h"
+#include "mongo/db/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
@@ -97,7 +98,8 @@ repl::OpTime OpObserverMock::onDropCollection(OperationContext* opCtx,
     uassert(
         ErrorCodes::OperationFailed, "onDropCollection() failed", !onDropCollectionThrowsException);
 
-    return opTime;
+    OpObserver::Times::get(opCtx).reservedOpTimes.push_back(opTime);
+    return {};
 }
 
 class DropDatabaseTest : public ServiceContextMongoDTest {
@@ -143,9 +145,11 @@ void DropDatabaseTest::setUp() {
     ASSERT_OK(_replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
 
     // Use OpObserverMock to track notifications for collection and database drops.
-    auto opObserver = stdx::make_unique<OpObserverMock>();
-    _opObserver = opObserver.get();
-    service->setOpObserver(std::move(opObserver));
+    OpObserverRegistry* opObserverRegistry =
+        dynamic_cast<OpObserverRegistry*>(service->getOpObserver());
+    auto mockObserver = stdx::make_unique<OpObserverMock>();
+    _opObserver = mockObserver.get();
+    opObserverRegistry->addObserver(std::move(mockObserver));
 
     _nss = NamespaceString("test.foo");
 }
@@ -453,6 +457,15 @@ TEST_F(DropDatabaseTest,
     auto db = autoDb.getDb();
     ASSERT_TRUE(db);
     ASSERT_FALSE(db->isDropPending(_opCtx.get()));
+}
+
+TEST_F(DropDatabaseTest, DropDatabaseFailsToDropAdmin) {
+    NamespaceString adminNSS(NamespaceString::kAdminDb, "foo");
+    _createCollection(_opCtx.get(), adminNSS);
+    ASSERT_THROWS_CODE_AND_WHAT(dropDatabase(_opCtx.get(), adminNSS.db().toString()).ignore(),
+                                AssertionException,
+                                ErrorCodes::IllegalOperation,
+                                "Dropping the 'admin' database is prohibited.");
 }
 
 }  // namespace

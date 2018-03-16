@@ -33,8 +33,8 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/transport/session_id.h"
-#include "mongo/transport/ticket.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/time_support.h"
@@ -75,47 +75,65 @@ public:
     static constexpr TagMask kExternalClientKeepOpen = 8;
     static constexpr TagMask kPending = 1 << 31;
 
-    /**
-     * Destroys a session, calling end() for this session in its TransportLayer.
-     */
     virtual ~Session() = default;
 
-    /**
-     * Return the id for this session.
-     */
     Id id() const {
         return _id;
     }
 
-    /**
-     * The TransportLayer for this Session.
-     */
     virtual TransportLayer* getTransportLayer() const = 0;
 
     /**
-     * Source (receive) a new Message for this Session.
+     * Ends this Session.
      *
-     * This method will forward to sourceMessage on this Session's transport layer.
+     * Operations on this Session that have already been started via wait() or asyncWait() will
+     * complete, but may return a failed Status.  Future operations on this Session will fail. If
+     * this TransportLayer implementation is networked, any connections for this Session will be
+     * closed.
+     *
+     * This method is idempotent and synchronous.
+     *
+     * Destructors of derived classes will close the session automatically if needed. This method
+     * should only be called explicitly if the session should be closed separately from destruction,
+     * eg due to some outside event.
      */
-    virtual Ticket sourceMessage(Message* message, Date_t expiration = Ticket::kNoExpirationDate);
+    virtual void end() = 0;
 
     /**
-     * Sink (send) a new Message for this Session. This method should be used
-     * to send replies to a given host.
-     *
-     * This method will forward to sinkMessage on this Session's transport layer.
+     * Source (receive) a new Message from the remote host for this Session.
      */
-    virtual Ticket sinkMessage(const Message& message,
-                               Date_t expiration = Ticket::kNoExpirationDate);
+    virtual StatusWith<Message> sourceMessage() = 0;
+    virtual Future<Message> asyncSourceMessage() = 0;
 
     /**
-     * Return the remote host for this session.
+     * Sink (send) a Message to the remote host for this Session.
+     *
+     * Async version will keep the buffer alive until the operation completes.
      */
+    virtual Status sinkMessage(Message message) = 0;
+    virtual Future<void> asyncSinkMessage(Message message) = 0;
+
+    /**
+    * This should only be used to detect when the remote host has disappeared without
+    * notice. It does NOT work correctly for ensuring that operations complete or fail
+    * by some deadline.
+    *
+    * This timeout will only effect calls sourceMessage()/sinkMessage(). Async operations do not
+    * currently support timeouts.
+    */
+    virtual void setTimeout(boost::optional<Milliseconds> timeout) = 0;
+
+    /**
+     * This will return whether calling sourceMessage()/sinkMessage() will fail with an EOF error.
+     *
+     * Implementations may actually perform some I/O or call syscalls to determine this, rather
+     * than just checking a flag.
+     *
+     * This must not be called while the session is currently sourcing or sinking a message.
+     */
+    virtual bool isConnected() = 0;
+
     virtual const HostAndPort& remote() const = 0;
-
-    /**
-     * Return the local host information for this session.
-     */
     virtual const HostAndPort& local() const = 0;
 
     /**
@@ -147,15 +165,9 @@ public:
      */
     virtual void mutateTags(const stdx::function<TagMask(TagMask)>& mutateFunc);
 
-    /**
-     * Get this session's tags.
-     */
     virtual TagMask getTags() const;
 
 protected:
-    /**
-     * Construct a new session.
-     */
     Session();
 
 private:

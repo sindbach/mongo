@@ -1,4 +1,14 @@
-// Contains helpers for checking the featureCompatibilityVersion.
+// Contains helpers for checking the featureCompatibilityVersion and constants for the current
+// featureCompatibilityVersion values.
+
+/**
+ * These constants represent the current "latest" and "last-stable" values for the
+ * featureCompatibilityVersion parameter. They should only be used for testing of upgrade-downgrade
+ * scenarios that are intended to be maintained between releases.
+ */
+
+const latestFCV = "4.0";
+const lastStableFCV = "3.6";
 
 /**
  * Checks the featureCompatibilityVersion document and server parameter. The
@@ -18,24 +28,7 @@ function checkFCV(adminDB, version, targetVersion) {
 }
 
 /**
- * Checks the featureCompatibilityVersion document and server parameter for a 3.4 binary. In 3.4,
- * the featureCompatibilityVersion document is of the form {_id: "featureCompatibilityVersion",
- * version: <value>}. The getParameter result is of the form {featureCompatibilityVersion: <value>,
- * ok: 1}.
- */
-function checkFCV34(adminDB, version) {
-    let res = adminDB.runCommand({getParameter: 1, featureCompatibilityVersion: 1});
-    assert.commandWorked(res);
-    assert.eq(res.featureCompatibilityVersion, version, tojson(res));
-
-    let doc = adminDB.system.version.findOne({_id: "featureCompatibilityVersion"});
-    assert.eq(doc.version, version, tojson(doc));
-}
-
-/**
- * Since SERVER-29453 disallows us to remove the FCV document in 3.6, we need to
- * do this hack to remove it. Notice this is only for 3.6. For 3.4, we can
- * simply remove the FCV document.
+ * Since SERVER-29453 disallowed removal of the FCV document, we need to do this hack to remove it.
  */
 function removeFCVDocument(adminDB) {
     let res = adminDB.runCommand({listCollections: 1, filter: {name: "system.version"}});

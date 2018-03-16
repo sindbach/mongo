@@ -111,8 +111,6 @@ public:
 
     virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
-    virtual Status setLastOptimeForSlave(const OID& rid, const Timestamp& ts);
-
     virtual void setMyLastAppliedOpTime(const OpTime& opTime);
     virtual void setMyLastDurableOpTime(const OpTime& opTime);
 
@@ -198,8 +196,6 @@ public:
     virtual Status processReplSetUpdatePosition(const UpdatePositionArgs& updates,
                                                 long long* configVersion);
 
-    virtual Status processHandshake(OperationContext* opCtx, const HandshakeArgs& handshake);
-
     virtual bool buildsIndexes();
 
     virtual std::vector<HostAndPort> getHostsWrittenTo(const OpTime& op, bool durablyWritten);
@@ -226,8 +222,7 @@ public:
                                               const ReplSetRequestVotesArgs& args,
                                               ReplSetRequestVotesResponse* response);
 
-    void prepareReplMetadata(OperationContext* opCtx,
-                             const BSONObj& metadataRequestObj,
+    void prepareReplMetadata(const BSONObj& metadataRequestObj,
                              const OpTime& lastOpTimeFromClient,
                              BSONObjBuilder* builder) const override;
 

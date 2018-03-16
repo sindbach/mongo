@@ -99,7 +99,7 @@ BSONObj makeCommandWithUUIDorCollectionName(StringData command,
 }
 
 CollectionCloner::CollectionCloner(executor::TaskExecutor* executor,
-                                   OldThreadPool* dbWorkThreadPool,
+                                   ThreadPool* dbWorkThreadPool,
                                    const HostAndPort& source,
                                    const NamespaceString& sourceNss,
                                    const CollectionOptions& options,
@@ -620,10 +620,7 @@ void CollectionCloner::_establishCollectionCursorsCallback(const RemoteCommandCa
             ShardId("CollectionClonerSyncSource"), _source, std::move(cursorResponse));
     }
 
-    // An empty list of authenticated users is passed into the cluster parameters
-    // as user information is not used in the ARM in context of collection cloning.
-    _clusterClientCursorParams =
-        stdx::make_unique<ClusterClientCursorParams>(_sourceNss, UserNameIterator());
+    _clusterClientCursorParams = stdx::make_unique<ClusterClientCursorParams>(_sourceNss);
     _clusterClientCursorParams->remotes = std::move(remoteCursors);
     if (_collectionCloningBatchSize > 0)
         _clusterClientCursorParams->batchSize = _collectionCloningBatchSize;

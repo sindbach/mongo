@@ -4,6 +4,7 @@
  * Theory of operation: Create a long running operation from a user which does not have the killOp
  * or inProg privileges. Using the same user, run currentOp to get the opId, and then run killOp
  * against it.
+ * @tags: [requires_sharding]
  */
 
 (function() {
@@ -71,10 +72,8 @@
                 o = ops();
                 return o.length == 1;
             },
-            {
-              toString: function() {
-                  return tojson(db.currentOp().inprog);
-              }
+            () => {
+                return tojson(db.currentOp().inprog);
             },
             60000);
 
@@ -117,10 +116,8 @@
                 o2 = ops();
                 return o2.length == 1;
             },
-            {
-              toString: function() {
-                  return tojson(db.currentOp().inprog);
-              }
+            () => {
+                return tojson(db.currentOp().inprog);
             },
             60000);
 

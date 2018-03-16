@@ -37,6 +37,7 @@
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"
+#include "mongo/db/server_options.h"
 #include "mongo/logger/console_appender.h"
 #include "mongo/logger/log_manager.h"
 #include "mongo/logger/logger.h"
@@ -51,10 +52,6 @@
 #include "mongo/util/timer.h"
 
 namespace mongo {
-
-using std::shared_ptr;
-using std::string;
-
 namespace unittest {
 
 namespace {
@@ -78,11 +75,15 @@ logger::LogstreamBuilder log() {
     return LogstreamBuilder(unittestOutput, getThreadName(), logger::LogSeverity::Log());
 }
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput, ("GlobalLogManager", "default"))
-(InitializerContext*) {
+void setupTestLogger() {
     unittestOutput->attachAppender(logger::MessageLogDomain::AppenderAutoPtr(
         new logger::ConsoleAppender<logger::MessageLogDomain::Event>(
             new logger::MessageEventDetailsEncoder)));
+}
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput, ("GlobalLogManager", "default"))
+(InitializerContext*) {
+    setupTestLogger();
     return Status::OK();
 }
 
@@ -104,8 +105,8 @@ public:
                 _millis / 1000.0);
         ss << result;
 
-        for (std::vector<std::string>::iterator i = _messages.begin(); i != _messages.end(); i++) {
-            ss << "\t" << *i << '\n';
+        for (const auto& i : _messages) {
+            ss << "\t" << i << '\n';
         }
 
         return ss.str();
@@ -115,7 +116,7 @@ public:
         return _rc;
     }
 
-    string _name;
+    std::string _name;
 
     int _rc;
     int _tests;
@@ -179,8 +180,15 @@ void Test::run() {
     }
 }
 
-void Test::setUp() {}
-void Test::tearDown() {}
+// Attempting to read the featureCompatibilityVersion parameter before it is explicitly initialized
+// with a meaningful value will trigger failures as of SERVER-32630.
+void Test::setUp() {
+    serverGlobalParams.featureCompatibility.setVersion(
+        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40);
+}
+void Test::tearDown() {
+    serverGlobalParams.featureCompatibility.reset();
+}
 
 namespace {
 class StringVectorAppender : public logger::MessageLogDomain::EventAppender {
@@ -258,7 +266,7 @@ Suite::Suite(const std::string& name) : _name(name) {
 Suite::~Suite() {}
 
 void Suite::add(const std::string& name, const TestFunction& testFn) {
-    _tests.push_back(std::shared_ptr<TestHolder>(new TestHolder(name, testFn)));
+    _tests.push_back(stdx::make_unique<TestHolder>(name, testFn));
 }
 
 Result* Suite::run(const std::string& filter, int runsPerTest) {
@@ -270,9 +278,7 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
     Result* r = new Result(_name);
     Result::cur = r;
 
-    for (std::vector<std::shared_ptr<TestHolder>>::iterator i = _tests.begin(); i != _tests.end();
-         i++) {
-        std::shared_ptr<TestHolder>& tc = *i;
+    for (const auto& tc : _tests) {
         if (filter.size() && tc->getName().find(filter) == std::string::npos) {
             LOG(1) << "\t skipping test: " << tc->getName() << " because doesn't match filter"
                    << std::endl;
@@ -341,20 +347,19 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
     std::vector<std::string> torun(suites);
 
     if (torun.empty()) {
-        for (SuiteMap::const_iterator i = _allSuites().begin(); i != _allSuites().end(); ++i) {
-            torun.push_back(i->first);
+        for (const auto& kv : _allSuites()) {
+            torun.push_back(kv.first);
         }
     }
 
-    std::vector<Result*> results;
+    std::vector<std::unique_ptr<Result>> results;
 
-    for (std::vector<std::string>::iterator i = torun.begin(); i != torun.end(); i++) {
-        std::string name = *i;
+    for (std::string name : torun) {
         std::shared_ptr<Suite>& s = _allSuites()[name];
         fassert(16145, s != NULL);
 
         log() << "going to run suite: " << name << std::endl;
-        results.push_back(s->run(filter, runsPerTest));
+        results.emplace_back(s->run(filter, runsPerTest));
     }
 
     log() << "**************************************************" << std::endl;
@@ -369,8 +374,7 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
     std::vector<std::string> failedSuites;
 
     Result::cur = NULL;
-    for (std::vector<Result*>::iterator i = results.begin(); i != results.end(); i++) {
-        Result* r = *i;
+    for (const auto& r : results) {
         log() << r->toString();
         if (abs(r->rc()) > abs(rc))
             rc = r->rc();
@@ -378,18 +382,14 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
         tests += r->_tests;
         if (!r->_fails.empty()) {
             failedSuites.push_back(r->toString());
-            for (std::vector<std::string>::const_iterator j = r->_fails.begin();
-                 j != r->_fails.end();
-                 j++) {
-                const std::string& s = (*j);
+            for (const std::string& s : r->_fails) {
                 totals._fails.push_back(r->_name + "/" + s);
             }
         }
         asserts += r->_asserts;
         millis += r->_millis;
-
-        delete r;
     }
+    results.clear();
 
     totals._tests = tests;
     totals._asserts = asserts;
@@ -400,10 +400,7 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
     // summary
     if (!totals._fails.empty()) {
         log() << "Failing tests:" << std::endl;
-        for (std::vector<std::string>::const_iterator i = totals._fails.begin();
-             i != totals._fails.end();
-             i++) {
-            const std::string& s = (*i);
+        for (const std::string& s : totals._fails) {
             log() << "\t " << s << " Failed";
         }
         log() << "FAILURE - " << totals._fails.size() << " tests in " << failedSuites.size()
@@ -484,8 +481,8 @@ std::ostream& TestAssertionFailure::stream() {
 
 std::vector<std::string> getAllSuiteNames() {
     std::vector<std::string> result;
-    for (SuiteMap::const_iterator i = _allSuites().begin(); i != _allSuites().end(); ++i) {
-        result.push_back(i->first);
+    for (const auto& kv : _allSuites()) {
+        result.push_back(kv.first);
     }
     return result;
 }

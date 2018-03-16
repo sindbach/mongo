@@ -72,8 +72,6 @@ void ReplicationCoordinatorExternalStateMock::startSteadyStateReplication(Operat
 
 void ReplicationCoordinatorExternalStateMock::stopDataReplication(OperationContext*) {}
 
-void ReplicationCoordinatorExternalStateMock::startMasterSlave(OperationContext*) {}
-
 Status ReplicationCoordinatorExternalStateMock::runRepairOnLocalDB(OperationContext* opCtx) {
     return Status::OK();
 }
@@ -92,15 +90,11 @@ executor::TaskExecutor* ReplicationCoordinatorExternalStateMock::getTaskExecutor
     return nullptr;
 }
 
-OldThreadPool* ReplicationCoordinatorExternalStateMock::getDbWorkThreadPool() const {
+ThreadPool* ReplicationCoordinatorExternalStateMock::getDbWorkThreadPool() const {
     return nullptr;
 }
 
 void ReplicationCoordinatorExternalStateMock::forwardSlaveProgress() {}
-
-OID ReplicationCoordinatorExternalStateMock::ensureMe(OperationContext*) {
-    return OID::gen();
-}
 
 bool ReplicationCoordinatorExternalStateMock::isSelf(const HostAndPort& host,
                                                      ServiceContext* const service) {
@@ -250,21 +244,16 @@ StatusWith<OpTime> ReplicationCoordinatorExternalStateMock::multiApply(
     return {ErrorCodes::InternalError, "Method not implemented"};
 }
 
-Status ReplicationCoordinatorExternalStateMock::multiSyncApply(MultiApplier::OperationPtrs* ops) {
-    return Status::OK();
-}
-
 Status ReplicationCoordinatorExternalStateMock::multiInitialSyncApply(
-    MultiApplier::OperationPtrs* ops, const HostAndPort& source, AtomicUInt32* fetchCount) {
+    OperationContext* opCtx,
+    MultiApplier::OperationPtrs* ops,
+    const HostAndPort& source,
+    AtomicUInt32* fetchCount,
+    WorkerMultikeyPathInfo* workerMultikeyPathInfo) {
     return Status::OK();
 }
 
 std::unique_ptr<OplogBuffer> ReplicationCoordinatorExternalStateMock::makeInitialSyncOplogBuffer(
-    OperationContext* opCtx) const {
-    return stdx::make_unique<OplogBufferBlockingQueue>();
-}
-
-std::unique_ptr<OplogBuffer> ReplicationCoordinatorExternalStateMock::makeSteadyStateOplogBuffer(
     OperationContext* opCtx) const {
     return stdx::make_unique<OplogBufferBlockingQueue>();
 }
@@ -283,7 +272,7 @@ OpTime ReplicationCoordinatorExternalStateMock::onTransitionToPrimary(OperationC
                                                                       bool isV1ElectionProtocol) {
     _lastOpTime = _firstOpTimeOfMyTerm;
     _firstOpTimeOfMyTerm = OpTime();
-    return fassertStatusOK(40297, _lastOpTime);
+    return fassert(40297, _lastOpTime);
 }
 
 void ReplicationCoordinatorExternalStateMock::startNoopWriter(OpTime opTime) {}

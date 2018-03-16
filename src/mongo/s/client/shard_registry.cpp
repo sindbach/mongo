@@ -52,7 +52,6 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/grid.h"
 #include "mongo/stdx/memory.h"
@@ -330,7 +329,7 @@ bool ShardRegistry::reload(OperationContext* opCtx) {
 void ShardRegistry::replicaSetChangeShardRegistryUpdateHook(
     const std::string& setName, const std::string& newConnectionString) {
     // Inform the ShardRegsitry of the new connection string for the shard.
-    auto connString = fassertStatusOK(28805, ConnectionString::parse(newConnectionString));
+    auto connString = fassert(28805, ConnectionString::parse(newConnectionString));
     invariant(setName == connString.getSetName());
     grid.shardRegistry()->updateReplSetHosts(connString);
 }

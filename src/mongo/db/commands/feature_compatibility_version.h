@@ -31,7 +31,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/commands/feature_compatibility_version_command_parser.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_options.h"
 
@@ -42,68 +41,23 @@ class OperationContext;
 
 /**
  * Startup parameter to ignore featureCompatibilityVersion checks. This parameter cannot be set if
- * the node is started with --replSet, --master, or --slave. This should never be set by end users.
+ * the node is started with --replSet. This should never be set by end users.
  */
 extern bool internalValidateFeaturesAsMaster;
 
 class FeatureCompatibilityVersion {
 public:
     static constexpr StringData kCollection = "admin.system.version"_sd;
-    static constexpr StringData kCommandName = "setFeatureCompatibilityVersion"_sd;
     static constexpr StringData kDatabase = "admin"_sd;
-    static constexpr StringData kParameterName = "featureCompatibilityVersion"_sd;
-    static constexpr StringData kVersionField = "version"_sd;
-    static constexpr StringData kTargetVersionField = "targetVersion"_sd;
 
     /**
-     * Should be taken in exclusive mode by any operations that should not run while
+     * Should be taken in shared mode by any operations that should not run while
      * setFeatureCompatibilityVersion is running.
+     *
+     * setFCV takes this lock in exclusive mode so that it both does not run with the shared mode
+     * operations and does not run with itself.
      */
     static Lock::ResourceMutex fcvLock;
-
-    /**
-     * Parses the featureCompatibilityVersion document from admin.system.version, and returns the
-     * state represented by the combination of the targetVersion and version.
-     */
-    static StatusWith<ServerGlobalParams::FeatureCompatibility::Version> parse(
-        const BSONObj& featureCompatibilityVersionDoc);
-
-    static StringData toString(ServerGlobalParams::FeatureCompatibility::Version version) {
-        switch (version) {
-            case ServerGlobalParams::FeatureCompatibility::Version::kUnsetDefault34Behavior:
-                return FeatureCompatibilityVersionCommandParser::kVersionUnset;
-            case ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34:
-                return FeatureCompatibilityVersionCommandParser::kVersion34;
-            case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo36:
-                return FeatureCompatibilityVersionCommandParser::kVersionUpgradingTo36;
-            case ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo34:
-                return FeatureCompatibilityVersionCommandParser::kVersionDowngradingTo34;
-            case ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo36:
-                return FeatureCompatibilityVersionCommandParser::kVersion36;
-            case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo40:
-                return FeatureCompatibilityVersionCommandParser::kVersionUpgradingTo40;
-            case ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo36:
-                return FeatureCompatibilityVersionCommandParser::kVersionDowngradingTo36;
-            case ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40:
-                return FeatureCompatibilityVersionCommandParser::kVersion40;
-            default:
-                MONGO_UNREACHABLE;
-        }
-    }
-
-    /**
-     * Records intent to perform a 3.4 -> 3.6 upgrade by updating the on-disk feature
-     * compatibility version document to have 'version'=3.4, 'targetVersion'=3.6.
-     * Should be called before schemas are modified.
-     */
-    static void setTargetUpgrade_DEPRECATED(OperationContext* opCtx);
-
-    /**
-     * Records intent to perform a 3.6 -> 3.4 downgrade by updating the on-disk feature
-     * compatibility version document to have 'version'=3.4, 'targetVersion'=3.4.
-     * Should be called before schemas are modified.
-     */
-    static void setTargetDowngrade_DEPRECATED(OperationContext* opCtx);
 
     /**
      * Records intent to perform a 3.6 -> 4.0 upgrade by updating the on-disk feature
@@ -120,9 +74,9 @@ public:
     static void setTargetDowngrade(OperationContext* opCtx);
 
     /**
-     * Records the completion of a 3.4 <-> 3.6 or 3.6 <-> 4.0 upgrade or downgrade by updating the
-     * on-disk feature compatibility version document to have 'version'=version and unsetting the
-     * 'targetVersion' field.
+     * Records the completion of a 3.6 <-> 4.0 upgrade or downgrade by updating the on-disk feature
+     * compatibility version document to have 'version'=version and unsetting the 'targetVersion'
+     * field.
      * Should be called after schemas are modified.
      */
     static void unsetTargetUpgradeOrDowngrade(OperationContext* opCtx, StringData version);
@@ -147,18 +101,6 @@ public:
      * the server parameter.
      */
     static void onInsertOrUpdate(OperationContext* opCtx, const BSONObj& doc);
-
-    /**
-     * Examines the _id of a document removed from admin.system.version. If it is the
-     * featureCompatibilityVersion document, resets the server parameter to its default value
-     * on commit.
-     */
-    static void onDelete(OperationContext* opCtx, const BSONObj& doc);
-
-    /**
-     * Resets the server parameter to its default value on commit.
-     */
-    static void onDropCollection(OperationContext* opCtx);
 
     /**
      * Sets the server's outgoing and incomingInternalClient minWireVersions according to the

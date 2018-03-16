@@ -38,6 +38,7 @@
 #include "mongo/client/sasl_client_session.h"
 #include "mongo/client/scram_client_cache.h"
 #include "mongo/crypto/mechanism_scram.h"
+#include "mongo/util/icu.h"
 
 namespace mongo {
 
@@ -70,6 +71,11 @@ public:
      */
     virtual bool verifyServerSignature(StringData sig) const = 0;
 
+    /**
+     * Runs saslPrep except on SHA-1.
+     */
+    virtual StatusWith<std::string> saslPrep(StringData val) const = 0;
+
 private:
     /**
      * Generates client-first-message.
@@ -79,12 +85,12 @@ private:
     /**
      * Parses server-first-message and generate client-final-message.
      **/
-    StatusWith<bool> _secondStep(const std::vector<std::string>& input, std::string* outputData);
+    StatusWith<bool> _secondStep(StringData input, std::string* outputData);
 
     /**
      * Generates client-first-message.
      **/
-    StatusWith<bool> _thirdStep(const std::vector<std::string>& input, std::string* outputData);
+    StatusWith<bool> _thirdStep(StringData input, std::string* outputData);
 
 protected:
     int _step{0};
@@ -103,10 +109,9 @@ public:
 
     std::string generateClientProof(const std::vector<std::uint8_t>& salt,
                                     size_t iterationCount) final {
-        scram::Presecrets<HashBlock> presecrets(
-            _saslClientSession->getParameter(SaslClientSession::parameterPassword).toString(),
-            salt,
-            iterationCount);
+        auto password = uassertStatusOK(saslPrep(
+            _saslClientSession->getParameter(SaslClientSession::parameterPassword).toString()));
+        scram::Presecrets<HashBlock> presecrets(password, salt, iterationCount);
 
         auto targetHost = HostAndPort::parse(
             _saslClientSession->getParameter(SaslClientSession::parameterServiceHostAndPort));
@@ -127,6 +132,14 @@ public:
 
     bool verifyServerSignature(StringData sig) const final {
         return _credentials.verifyServerSignature(_authMessage, sig);
+    }
+
+    StatusWith<std::string> saslPrep(StringData val) const final {
+        if (std::is_same<SHA1Block, HashBlock>::value) {
+            return val.toString();
+        } else {
+            return mongo::saslPrep(val);
+        }
     }
 
 private:

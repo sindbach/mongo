@@ -48,7 +48,6 @@
 #include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/commands/cluster_commands_helpers.h"
-#include "mongo/s/commands/cluster_write.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/shard_collection_gen.h"
@@ -107,7 +106,9 @@ BSONObj fixForShards(const BSONObj& orig,
         b.append("splitInfo", maxChunkSizeBytes);
     }
 
-    return b.obj();
+    // mapReduce creates temporary collections and renames them at the end, so it will handle
+    // cluster collection creation differently.
+    return appendAllowImplicitCreate(b.obj(), true);
 }
 
 /**
@@ -151,8 +152,8 @@ class MRCmd : public ErrmsgCommandDeprecated {
 public:
     MRCmd() : ErrmsgCommandDeprecated("mapReduce", "mapreduce") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -167,13 +168,13 @@ public:
         return mr::mrSupportsWriteConcern(cmd);
     }
 
-    void help(std::stringstream& help) const override {
-        help << "Runs the sharded map/reduce command";
+    std::string help() const override {
+        return "Runs the sharded map/reduce command";
     }
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         mr::addPrivilegesRequiredForMapReduce(this, dbname, cmdObj, out);
     }
 
@@ -284,7 +285,10 @@ public:
 
             BSONObj res;
             bool ok = conn->runCommand(
-                dbname, CommandHelpers::filterCommandRequestForPassthrough(cmdObj), res);
+                dbname,
+                appendAllowImplicitCreate(
+                    CommandHelpers::filterCommandRequestForPassthrough(cmdObj), true),
+                res);
             conn.done();
 
             if (auto wcErrorElem = res["writeConcernError"]) {
@@ -444,7 +448,8 @@ public:
                 uassertStatusOK(shardRegistry->getShard(opCtx, outputDbInfo.primaryId()));
 
             ShardConnection conn(outputShard->getConnString(), outputCollNss.ns());
-            ok = conn->runCommand(outDB, finalCmd.obj(), singleResult);
+            ok = conn->runCommand(
+                outDB, appendAllowImplicitCreate(finalCmd.obj(), true), singleResult);
 
             BSONObj counts = singleResult.getObjectField("counts");
             postCountsB.append(conn->getServerAddress(), counts);
@@ -476,7 +481,7 @@ public:
             } else {
                 // Collection is already sharded; read the collection's UUID from the config server.
                 const auto coll =
-                    uassertStatusOK(catalogClient->getCollection(opCtx, outputCollNss.ns())).value;
+                    uassertStatusOK(catalogClient->getCollection(opCtx, outputCollNss)).value;
                 shardedOutputCollUUID = coll.getUUID();
             }
 
@@ -497,7 +502,7 @@ public:
                     return CommandHelpers::appendCommandStatus(result, scopedDistLock.getStatus());
                 }
 
-                BSONObj finalCmdObj = finalCmd.obj();
+                BSONObj finalCmdObj = appendAllowImplicitCreate(finalCmd.obj(), true);
                 mrCommandResults.clear();
 
                 try {
@@ -688,8 +693,7 @@ private:
                 Shard::RetryPolicy::kIdempotent));
         uassertStatusOK(cmdResponse.commandStatus);
 
-        // Parse the UUID for the sharded collection from the shardCollection response, if one is
-        // present. It will only be present if the cluster is in fcv=3.6.
+        // Parse the UUID for the sharded collection from the shardCollection response.
         auto shardCollResponse = ConfigsvrShardCollectionResponse::parse(
             IDLParserErrorContext("ConfigsvrShardCollectionResponse"), cmdResponse.response);
         *outUUID = std::move(shardCollResponse.getCollectionUUID());

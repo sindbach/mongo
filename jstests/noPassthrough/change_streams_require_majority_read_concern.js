@@ -5,10 +5,21 @@
     load("jstests/replsets/rslib.js");           // For startSetIfSupportsReadMajority.
     load("jstests/libs/write_concern_util.js");  // For stopReplicationOnSecondaries.
     const rst = new ReplSetTest({nodes: 2, nodeOptions: {enableMajorityReadConcern: ""}});
-    if (!startSetIfSupportsReadMajority(rst)) {
-        jsTestLog("Skipping test since storage engine doesn't support majority read concern.");
+
+    // Skip this test if running with --nojournal and WiredTiger.
+    if (jsTest.options().noJournal &&
+        (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+        print("Skipping test because running WiredTiger without journaling isn't a valid" +
+              " replica set configuration");
         return;
     }
+
+    if (!startSetIfSupportsReadMajority(rst)) {
+        jsTestLog("Skipping test since storage engine doesn't support majority read concern.");
+        rst.stopSet();
+        return;
+    }
+
     rst.initiate();
 
     const oplogProjection = {$project: {"_id.clusterTime": 0}};
@@ -112,4 +123,5 @@
     let doc = getOneDoc(cursor);
     assert.docEq(doc.operationType, "insert");
     assert.docEq(doc.fullDocument, {_id: 2});
+    rst.stopSet();
 }());

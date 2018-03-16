@@ -29,6 +29,7 @@
 
     if (!startSetIfSupportsReadMajority(rst)) {
         jsTestLog("Skipping test since storage engine doesn't support majority read concern.");
+        rst.stopSet();
         return;
     }
     rst.initiate();
@@ -117,5 +118,6 @@
     assertAfterClusterTimeReadFailsWithCode(
         testDB, {level: "majority", afterClusterTime: Timestamp(0, 0)}, ErrorCodes.InvalidOptions);
 
+    rst.stopSet();
     st.stop();
 })();

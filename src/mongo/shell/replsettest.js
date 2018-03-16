@@ -338,6 +338,17 @@ var ReplSetTest = function(opts) {
     }
 
     /**
+     * Returns the {readConcern: majority} OpTime for the host. Throws if not available.
+     */
+    this.getReadConcernMajorityOpTimeOrThrow = function(conn) {
+        const majorityOpTime = _getReadConcernMajorityOpTime(conn);
+        if (friendlyEqual(majorityOpTime, {ts: Timestamp(0, 0), t: NumberLong(0)})) {
+            throw new Error("readConcern majority optime not available");
+        }
+        return majorityOpTime;
+    };
+
+    /**
      * Returns the last durable OpTime for the host if running with journaling.
      * Returns the last applied OpTime otherwise.
      */
@@ -725,6 +736,29 @@ var ReplSetTest = function(opts) {
         return this.getSecondaries(timeout)[0];
     };
 
+    this.getArbiters = function() {
+        var arbiters = [];
+        for (var i = 0; i < this.nodes.length; i++) {
+            var node = this.nodes[i];
+
+            let isArbiter = false;
+
+            assert.retryNoExcept(() => {
+                isArbiter = node.getDB('admin').isMaster('admin').arbiterOnly;
+                return true;
+            }, `Could not call 'isMaster' on ${node}.`, 3, 1000);
+
+            if (isArbiter) {
+                arbiters.push(node);
+            }
+        }
+        return arbiters;
+    };
+
+    this.getArbiter = function() {
+        return this.getArbiters()[0];
+    };
+
     this.status = function(timeout) {
         var master = _callIsMaster();
         if (!master) {
@@ -864,6 +898,7 @@ var ReplSetTest = function(opts) {
             // if a heartbeat times out during the quorum check.
             // They may also fail with NewReplicaSetConfigurationIncompatible on similar timeout
             // during the config validation stage while deducing isSelf().
+            // This can fail with an InterruptedDueToReplStateChange error when interrupted.
             // We retry three times to reduce the chance of failing this way.
             assert.retry(() => {
                 var res;
@@ -882,10 +917,13 @@ var ReplSetTest = function(opts) {
                     throw e;
                 }
 
-                assert.commandFailedWithCode(
-                    res,
-                    [ErrorCodes.NodeNotFound, ErrorCodes.NewReplicaSetConfigurationIncompatible],
-                    "replSetReconfig during initiate failed");
+                assert.commandFailedWithCode(res,
+                                             [
+                                               ErrorCodes.NodeNotFound,
+                                               ErrorCodes.NewReplicaSetConfigurationIncompatible,
+                                               ErrorCodes.InterruptedDueToReplStateChange
+                                             ],
+                                             "replSetReconfig during initiate failed");
                 return false;
             }, "replSetReconfig during initiate failed", 3, 5 * 1000);
         }
@@ -1344,6 +1382,9 @@ var ReplSetTest = function(opts) {
         msgPrefix = 'checkReplicatedDataHashes', excludedDBs = [], ignoreUUIDs = false) {
         // Return items that are in either Array `a` or `b` but not both. Note that this will
         // not work with arrays containing NaN. Array.indexOf(NaN) will always return -1.
+
+        var collectionPrinted = new Set();
+
         function arraySymmetricDifference(a, b) {
             var inAOnly = a.filter(function(elem) {
                 return b.indexOf(elem) < 0;
@@ -1356,23 +1397,66 @@ var ReplSetTest = function(opts) {
             return inAOnly.concat(inBOnly);
         }
 
-        function collectionInfo(node, dbName, collName) {
-            var res = node.getDB(dbName).runCommand({listCollections: 1, filter: {name: collName}});
-            assert.commandWorked(res);
-            var coll = node.getDB(dbName).getCollection(collName);
-            return {
-                ns: dbName + '.' + collName,
-                host: node.host,
-                UUID: res.cursor.firstBatch[0].info.uuid,
-                count: coll.find().itcount()
-            };
+        function printCollectionInfo(connName, conn, dbName, collName) {
+            var ns = dbName + '.' + collName;
+            var hostColl = `${conn.host}--${ns}`;
+            var alreadyPrinted = collectionPrinted.has(hostColl);
+
+            // Extract basic collection info.
+            var coll = conn.getDB(dbName).getCollection(collName);
+            var res = conn.getDB(dbName).runCommand({listCollections: 1, filter: {name: collName}});
+            var collInfo = null;
+            if (res.ok === 1 && res.cursor.firstBatch.length !== 0) {
+                collInfo = {
+                    ns: ns,
+                    host: conn.host,
+                    UUID: res.cursor.firstBatch[0].info.uuid,
+                    count: coll.find().itcount()
+                };
+            }
+            var infoPrefix = `${connName}(${conn.host}) info for ${ns} : `;
+            if (collInfo !== null) {
+                if (alreadyPrinted) {
+                    print(`${connName} info for ${ns} already printed. Search for ` +
+                          `'${infoPrefix}'`);
+                } else {
+                    print(infoPrefix + tojsononeline(collInfo));
+                }
+            } else {
+                print(infoPrefix + 'collection does not exist');
+            }
+
+            var collStats = conn.getDB(dbName).runCommand({collStats: collName});
+            var statsPrefix = `${connName}(${conn.host}) collStats for ${ns}: `;
+            if (collStats.ok === 1) {
+                if (alreadyPrinted) {
+                    print(`${connName} collStats for ${ns} already printed. Search for ` +
+                          `'${statsPrefix}'`);
+                } else {
+                    print(statsPrefix + tojsononeline(collStats));
+                }
+            } else {
+                print(`${statsPrefix}  error: ${tojsononeline(collStats)}`);
+            }
+
+            collectionPrinted.add(hostColl);
+
+            // Return true if collInfo & collStats can be retrieved for conn.
+            return collInfo !== null && collStats.ok === 1;
         }
 
         function dumpCollectionDiff(primary, secondary, dbName, collName) {
-            print('Dumping collection: ' + dbName + '.' + collName);
+            var ns = dbName + '.' + collName;
+            print('Dumping collection: ' + ns);
 
-            print('primary info: ' + tojsononeline(collectionInfo(primary, dbName, collName)));
-            print('secondary info: ' + tojsononeline(collectionInfo(secondary, dbName, collName)));
+            var primaryExists = printCollectionInfo('primary', primary, dbName, collName);
+            var secondaryExists = printCollectionInfo('secondary', secondary, dbName, collName);
+
+            if (!primaryExists || !secondaryExists) {
+                print(`Skipping checking collection differences for ${ns} since it does not ` +
+                      'exist on primary and secondary');
+                return;
+            }
 
             var primaryColl = primary.getDB(dbName).getCollection(collName);
             var secondaryColl = secondary.getDB(dbName).getCollection(collName);
@@ -1532,9 +1616,8 @@ var ReplSetTest = function(opts) {
                                           ', the primary and secondary have different ' +
                                           'attributes for the collection or view ' + dbName + '.' +
                                           secondaryInfo.name);
-                                    print('Collection info on the primary: ' + tojson(primaryInfo));
-                                    print('Collection info on the secondary: ' +
-                                          tojson(secondaryInfo));
+                                    dumpCollectionDiff(
+                                        primary, secondary, dbName, secondaryInfo.name);
                                     success = false;
                                 }
                             }
@@ -1549,24 +1632,20 @@ var ReplSetTest = function(opts) {
                     primaryCollections.forEach(collName => {
                         var primaryCollStats =
                             primary.getDB(dbName).runCommand({collStats: collName});
-                        assert.commandWorked(primaryCollStats);
                         var secondaryCollStats =
                             secondary.getDB(dbName).runCommand({collStats: collName});
-                        assert.commandWorked(secondaryCollStats);
 
-                        if (primaryCollStats.capped !== secondaryCollStats.capped ||
-                            primaryCollStats.nindexes !== secondaryCollStats.nindexes ||
-                            primaryCollStats.ns !== secondaryCollStats.ns) {
+                        if (primaryCollStats.ok !== 1 || secondaryCollStats.ok !== 1) {
+                            printCollectionInfo('primary', primary, dbName, collName);
+                            printCollectionInfo('secondary', secondary, dbName, collName);
+                            success = false;
+                        } else if (primaryCollStats.capped !== secondaryCollStats.capped ||
+                                   primaryCollStats.nindexes !== secondaryCollStats.nindexes ||
+                                   primaryCollStats.ns !== secondaryCollStats.ns) {
                             print(msgPrefix +
                                   ', the primary and secondary have different stats for the ' +
                                   'collection ' + dbName + '.' + collName);
-                            print('Collection stats on the primary: ' + tojson(primaryCollStats));
-                            print('Collection info on the primary: ' +
-                                  tojsononeline(collectionInfo(primary, dbName, collName)));
-                            print('Collection stats on the secondary: ' +
-                                  tojson(secondaryCollStats));
-                            print('Collection info on the secondary: ' +
-                                  tojsononeline(collectionInfo(secondary, dbName, collName)));
+                            dumpCollectionDiff(primary, secondary, dbName, collName);
                             success = false;
                         }
                     });
@@ -1969,7 +2048,7 @@ var ReplSetTest = function(opts) {
             return;
         }
 
-        if (_alldbpaths) {
+        if ((!opts || !opts.noCleanData) && _alldbpaths) {
             print("ReplSetTest stopSet deleting all dbpaths");
             for (var i = 0; i < _alldbpaths.length; i++) {
                 resetDbpath(_alldbpaths[i]);
@@ -1979,6 +2058,13 @@ var ReplSetTest = function(opts) {
         _forgetReplSet(this.name);
 
         print('ReplSetTest stopSet *** Shut down repl set - test worked ****');
+    };
+
+    /**
+     * Returns whether or not this ReplSetTest uses mongobridge.
+     */
+    this.usesBridge = function() {
+        return _useBridge;
     };
 
     /**
@@ -2074,7 +2160,11 @@ var ReplSetTest = function(opts) {
      * Constructor, which instantiates the ReplSetTest object from an existing set.
      */
     function _constructFromExistingSeedNode(seedNode) {
-        var conf = _replSetGetConfig(new Mongo(seedNode));
+        const conn = new Mongo(seedNode);
+        if (jsTest.options().keyFile) {
+            self.keyFile = jsTest.options().keyFile;
+        }
+        var conf = asCluster(conn, () => _replSetGetConfig(conn));
         print('Recreating replica set from config ' + tojson(conf));
 
         var existingNodes = conf.members.map(member => member.host);
@@ -2084,7 +2174,12 @@ var ReplSetTest = function(opts) {
     }
 
     if (typeof opts === 'string' || opts instanceof String) {
-        _constructFromExistingSeedNode(opts);
+        retryOnNetworkError(function() {
+            // The primary may unexpectedly step down during startup if under heavy load
+            // and too slowly processing heartbeats. When it steps down, it closes all of
+            // its connections.
+            _constructFromExistingSeedNode(opts);
+        }, 10);
     } else {
         _constructStartNewInstances(opts);
     }

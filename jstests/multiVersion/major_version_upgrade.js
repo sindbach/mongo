@@ -31,10 +31,9 @@
     // TODO SERVER-26792: In the future, we should have a common place from which both the
     // multiversion setup procedure and this test get information about supported major releases.
     const versions = [
-        {binVersion: '3.0', testCollection: 'three_zero'},
         {binVersion: '3.2', testCollection: 'three_two'},
-        {binVersion: '3.4', testCollection: 'three_four'},
-        {binVersion: '3.6', testCollection: 'three_six'},
+        {binVersion: '3.4', featureCompatibilityVersion: '3.4', testCollection: 'three_four'},
+        {binVersion: '3.6', featureCompatibilityVersion: '3.6', testCollection: 'three_six'},
         {binVersion: 'last-stable', testCollection: 'last_stable'},
         {binVersion: 'latest', testCollection: 'latest'},
     ];
@@ -130,17 +129,20 @@
         let conn = MongoRunner.runMongod(mongodOptions);
 
         if ((conn === null) && (i > 0) && !authSchemaUpgraded) {
-            // As of 3.8, mongod will refuse to start up with authSchema 3
+            // As of 4.0, mongod will refuse to start up with authSchema 3
             // until the schema has been upgraded.
             // Step back a version (to 3.6) in order to perform the upgrade,
-            // Then try startuing 3.8 again.
+            // Then try startuing 4.0 again.
+            print(
+                "Failed starting mongod, going to try upgrading the auth schema on the prior version");
             conn = MongoRunner.runMongod(
-                Object.extend({binVersion: version[i - 1].binVersion}, defaultOptions));
+                Object.extend({binVersion: versions[i - 1].binVersion}, defaultOptions));
             assert.neq(null,
                        conn,
                        'mongod was previously able to start with version ' +
                            tojson(version.binVersion) + " but now can't");
             assert.commandWorked(conn.getDB('admin').runCommand({authSchemaUpgrade: 1}));
+            MongoRunner.stopMongod(conn);
 
             authSchemaUpgraded = true;
             conn = MongoRunner.runMongod(mongodOptions);
@@ -150,10 +152,10 @@
             null, conn, 'mongod was unable to start up with options: ' + tojson(mongodOptions));
         assert.binVersion(conn, version.binVersion);
 
-        if ((i === 0) && (version.binVersion < 3.8)) {
+        if ((i === 0) && (version.binVersion <= 3.6)) {
             // Simulate coming from a <= 2.6 installation where MONGODB-CR was the default/only
             // authentication mechanism. Eventually, the upgrade process will fail (above) when
-            // running on 3.8 where support for MONGODB-CR has been removed.
+            // running on 4.0 where support for MONGODB-CR has been removed.
             conn.getDB('admin').system.version.save({"_id": "authSchema", "currentVersion": 3});
         }
 
@@ -196,11 +198,11 @@
             validateBadIndexesStandalone(testDB);
         }
 
-        // Make sure a featureCompatibilityVersion document exists during the version.binVersion
-        // === 3.4 iteration and all remaining iterations of "version".
-        if (version.binVersion === "3.4") {
+        // Set the appropriate featureCompatibilityVersion upon upgrade, if applicable.
+        if (version.hasOwnProperty('featureCompatibilityVersion')) {
             let adminDB = conn.getDB("admin");
-            assert.commandWorked(adminDB.runCommand({"setFeatureCompatibilityVersion": "3.4"}));
+            assert.commandWorked(adminDB.runCommand(
+                {"setFeatureCompatibilityVersion": version.featureCompatibilityVersion}));
         }
 
         // Shutdown the current mongod.
@@ -294,12 +296,11 @@
                 `index from ${oldVersionCollection} should be available; nodes: ${tojson(nodes)}`);
         }
 
-        // Make sure a featureCompatibilityVersion document exists during the version.binVersion
-        // === 3.4 iteration and all remaining iterations of "version".
-        if (version.binVersion === "3.4") {
+        // Set the appropriate featureCompatibilityVersion upon upgrade, if applicable.
+        if (version.hasOwnProperty('featureCompatibilityVersion')) {
             let primaryAdminDB = primary.getDB("admin");
-            assert.commandWorked(
-                primaryAdminDB.runCommand({setFeatureCompatibilityVersion: "3.4"}));
+            assert.commandWorked(primaryAdminDB.runCommand(
+                {setFeatureCompatibilityVersion: version.featureCompatibilityVersion}));
             rst.awaitReplication();
         }
     }

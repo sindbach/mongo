@@ -91,11 +91,11 @@ public:
             const BSONObj idIndexSpec,
             const std::vector<BSONObj>& secondaryIndexSpecs)>;
     using InsertDocumentFn = stdx::function<Status(OperationContext* opCtx,
-                                                   const NamespaceString& nss,
+                                                   const NamespaceStringOrUUID& nsOrUUID,
                                                    const TimestampedBSONObj& doc,
                                                    long long term)>;
     using InsertDocumentsFn = stdx::function<Status(OperationContext* opCtx,
-                                                    const NamespaceString& nss,
+                                                    const NamespaceStringOrUUID& nsOrUUID,
                                                     const std::vector<InsertStatement>& docs)>;
     using DropUserDatabasesFn = stdx::function<Status(OperationContext* opCtx)>;
     using CreateOplogFn =
@@ -125,7 +125,6 @@ public:
     using IsAdminDbValidFn = stdx::function<Status(OperationContext* opCtx)>;
     using GetCollectionUUIDFn = stdx::function<StatusWith<OptionalCollectionUUID>(
         OperationContext* opCtx, const NamespaceString& nss)>;
-    using UpgradeUUIDSchemaVersionNonReplicatedFn = stdx::function<Status(OperationContext* opCtx)>;
 
     StorageInterfaceMock() = default;
 
@@ -142,16 +141,16 @@ public:
     };
 
     Status insertDocument(OperationContext* opCtx,
-                          const NamespaceString& nss,
+                          const NamespaceStringOrUUID& nsOrUUID,
                           const TimestampedBSONObj& doc,
                           long long term) override {
-        return insertDocumentFn(opCtx, nss, doc, term);
+        return insertDocumentFn(opCtx, nsOrUUID, doc, term);
     };
 
     Status insertDocuments(OperationContext* opCtx,
-                           const NamespaceString& nss,
+                           const NamespaceStringOrUUID& nsOrUUID,
                            const std::vector<InsertStatement>& docs) override {
-        return insertDocumentsFn(opCtx, nss, docs);
+        return insertDocumentsFn(opCtx, nsOrUUID, docs);
     }
 
     Status dropReplicatedDatabases(OperationContext* opCtx) override {
@@ -187,6 +186,15 @@ public:
                             bool stayTemp) override {
 
         return Status{ErrorCodes::IllegalOperation, "renameCollection not implemented."};
+    }
+
+    Status setIndexIsMultikey(OperationContext* opCtx,
+                              const NamespaceString& nss,
+                              const std::string& indexName,
+                              const MultikeyPaths& paths,
+                              Timestamp ts) override {
+
+        return Status{ErrorCodes::IllegalOperation, "setIndexIsMultikey not implemented."};
     }
 
     StatusWith<std::vector<BSONObj>> findDocuments(OperationContext* opCtx,
@@ -230,19 +238,19 @@ public:
     }
 
     StatusWith<BSONObj> findById(OperationContext* opCtx,
-                                 const NamespaceString& nss,
+                                 const NamespaceStringOrUUID&,
                                  const BSONElement& idKey) override {
         return Status{ErrorCodes::IllegalOperation, "findById not implemented."};
     }
 
     StatusWith<BSONObj> deleteById(OperationContext* opCtx,
-                                   const NamespaceString& nss,
+                                   const NamespaceStringOrUUID&,
                                    const BSONElement& idKey) override {
         return Status{ErrorCodes::IllegalOperation, "deleteById not implemented."};
     }
 
     Status upsertById(OperationContext* opCtx,
-                      const NamespaceString& nss,
+                      const NamespaceStringOrUUID& nsOrUUID,
                       const BSONElement& idKey,
                       const BSONObj& update) override {
         return Status{ErrorCodes::IllegalOperation, "upsertById not implemented."};
@@ -269,10 +277,6 @@ public:
         return getCollectionUUIDFn(opCtx, nss);
     }
 
-    Status upgradeUUIDSchemaVersionNonReplicated(OperationContext* opCtx) override {
-        return upgradeUUIDSchemaVersionNonReplicatedFn(opCtx);
-    }
-
     void setStableTimestamp(ServiceContext* serviceCtx, Timestamp snapshotName) override;
 
     void setInitialDataTimestamp(ServiceContext* serviceCtx, Timestamp snapshotName) override;
@@ -281,8 +285,16 @@ public:
 
     Timestamp getInitialDataTimestamp() const;
 
-    Status recoverToStableTimestamp(ServiceContext* serviceCtx) override {
+    StatusWith<Timestamp> recoverToStableTimestamp(ServiceContext* serviceCtx) override {
         return Status{ErrorCodes::IllegalOperation, "recoverToStableTimestamp not implemented."};
+    }
+
+    bool supportsRecoverToStableTimestamp(ServiceContext* serviceCtx) const override {
+        return false;
+    }
+
+    boost::optional<Timestamp> getRecoveryTimestamp(ServiceContext* serviceCtx) const override {
+        return boost::none;
     }
 
     Status isAdminDbValid(OperationContext* opCtx) override {
@@ -303,13 +315,13 @@ public:
         return Status{ErrorCodes::IllegalOperation, "CreateCollectionForBulkFn not implemented."};
     };
     InsertDocumentFn insertDocumentFn = [](OperationContext* opCtx,
-                                           const NamespaceString& nss,
+                                           const NamespaceStringOrUUID& nsOrUUID,
                                            const TimestampedBSONObj& doc,
                                            long long term) {
         return Status{ErrorCodes::IllegalOperation, "InsertDocumentFn not implemented."};
     };
     InsertDocumentsFn insertDocumentsFn = [](OperationContext* opCtx,
-                                             const NamespaceString& nss,
+                                             const NamespaceStringOrUUID& nsOrUUID,
                                              const std::vector<InsertStatement>& docs) {
         return Status{ErrorCodes::IllegalOperation, "InsertDocumentsFn not implemented."};
     };
@@ -353,11 +365,6 @@ public:
     GetCollectionUUIDFn getCollectionUUIDFn = [](
         OperationContext* opCtx, const NamespaceString& nss) -> StatusWith<OptionalCollectionUUID> {
         return Status{ErrorCodes::IllegalOperation, "GetCollectionUUIDFn not implemented."};
-    };
-    UpgradeUUIDSchemaVersionNonReplicatedFn upgradeUUIDSchemaVersionNonReplicatedFn =
-        [](OperationContext* opCtx) -> Status {
-        return Status{ErrorCodes::IllegalOperation,
-                      "UpgradeUUIDSchemaVersionNonReplicatedFn not implemented."};
     };
 
 private:

@@ -35,7 +35,14 @@
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/replace.hpp>
 
+#include "mongo/base/disallow_copying.h"
+#include "mongo/base/init.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/crypto/mechanism_scram.h"
 #include "mongo/crypto/sha1_block.h"
+#include "mongo/db/auth/sasl_mechanism_policies.h"
+#include "mongo/db/auth/sasl_mechanism_registry.h"
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/base64.h"
@@ -46,28 +53,25 @@
 
 namespace mongo {
 
-using std::unique_ptr;
-using std::string;
 
-StatusWith<bool> SaslSCRAMServerConversation::step(StringData inputData, std::string* outputData) {
-    std::vector<std::string> input = StringSplitter::split(inputData.toString(), ",");
+template <typename Policy>
+StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::stepImpl(
+    OperationContext* opCtx, StringData inputData) {
     _step++;
 
     if (_step > 3 || _step <= 0) {
-        return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
-                                mongoutils::str::stream() << "Invalid SCRAM authentication step: "
-                                                          << _step);
+        return Status(ErrorCodes::AuthenticationFailed,
+                      str::stream() << "Invalid SCRAM authentication step: " << _step);
     }
+
     if (_step == 1) {
-        return _firstStep(input, outputData);
+        return _firstStep(opCtx, inputData);
     }
     if (_step == 2) {
-        return _secondStep(input, outputData);
+        return _secondStep(opCtx, inputData);
     }
 
-    *outputData = "";
-
-    return StatusWith<bool>(true);
+    return std::make_tuple(true, std::string{});
 }
 
 /*
@@ -88,111 +92,149 @@ static void decodeSCRAMUsername(std::string& user) {
  *
  * NOTE: we are ignoring the authorization ID part of the message
  */
-StatusWith<bool> SaslSCRAMServerConversation::_firstStep(std::vector<string>& input,
-                                                         std::string* outputData) {
-    std::string authzId = "";
+template <typename Policy>
+StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_firstStep(
+    OperationContext* opCtx, StringData inputData) {
+    const auto badCount = [](int got) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream()
+                          << "Incorrect number of arguments for first SCRAM client message, got "
+                          << got
+                          << " expected at least 3");
+    };
 
-    if (input.size() == 4) {
-        /* The second entry a=authzid is optional. If provided it will be
-         * validated against the encoded username.
-         *
-         * The two allowed input forms are:
-         * n,,n=encoded-username,r=client-nonce
-         * n,a=authzid,n=encoded-username,r=client-nonce
-         */
-        if (!str::startsWith(input[1], "a=") || input[1].size() < 3) {
-            return StatusWith<bool>(ErrorCodes::BadValue,
-                                    mongoutils::str::stream() << "Incorrect SCRAM authzid: "
-                                                              << input[1]);
+    /**
+     * gs2-cbind-flag := ("p=" cb-name) / 'y' / 'n'
+     * gs2-header := gs2-cbind-flag ',' [ authzid ] ','
+     * reserved-mext := "m=" 1*(value-char)
+     * client-first-message-bare := [reserved-mext  ','] username ',' nonce [',' extensions]
+     * client-first-message := gs2-header client-first-message-bare
+     */
+    const auto gs2_cbind_comma = inputData.find(',');
+    if (gs2_cbind_comma == std::string::npos) {
+        return badCount(1);
+    }
+    const auto gs2_cbind_flag = inputData.substr(0, gs2_cbind_comma);
+    if (gs2_cbind_flag.startsWith("p=")) {
+        return Status(ErrorCodes::BadValue, "Server does not support channel binding");
+    }
+
+    if ((gs2_cbind_flag != "y") && (gs2_cbind_flag != "n")) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Incorrect SCRAM client message prefix: " << gs2_cbind_flag);
+    }
+
+    const auto gs2_header_comma = inputData.find(',', gs2_cbind_comma + 1);
+    if (gs2_header_comma == std::string::npos) {
+        return badCount(2);
+    }
+    auto authzId = inputData.substr(gs2_cbind_comma + 1, gs2_header_comma - (gs2_cbind_comma + 1));
+    if (authzId.size()) {
+        if (authzId.startsWith("a=")) {
+            authzId = authzId.substr(2);
+        } else {
+            return Status(ErrorCodes::BadValue,
+                          str::stream() << "Incorrect SCRAM authzid: " << authzId);
         }
-        authzId = input[1].substr(2);
-        input.erase(input.begin() + 1);
     }
 
-    if (input.size() != 3) {
-        return StatusWith<bool>(
-            ErrorCodes::BadValue,
-            mongoutils::str::stream()
-                << "Incorrect number of arguments for first SCRAM client message, got "
-                << input.size()
-                << " expected 4");
-    } else if (str::startsWith(input[0], "p=")) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream()
-                                    << "Server does not support channel binding");
-    } else if (input[0] != "n" && input[0] != "y") {
-        return StatusWith<bool>(
-            ErrorCodes::BadValue,
-            mongoutils::str::stream() << "Incorrect SCRAM client message prefix: " << input[0]);
-    } else if (!str::startsWith(input[1], "n=") || input[1].size() < 3) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream() << "Incorrect SCRAM user name: "
-                                                          << input[1]);
-    } else if (!str::startsWith(input[2], "r=") || input[2].size() < 6) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream() << "Incorrect SCRAM client nonce: "
-                                                          << input[2]);
+    const auto client_first_message_bare = inputData.substr(gs2_header_comma + 1);
+    if (client_first_message_bare.startsWith("m=")) {
+        return Status(ErrorCodes::BadValue, "SCRAM mandatory extensions are not supported");
     }
 
-    _user = input[1].substr(2);
-    if (!authzId.empty() && _user != authzId) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream() << "SCRAM user name " << _user
-                                                          << " does not match authzid "
-                                                          << authzId);
+    /* StringSplitter::split() will ignore consecutive delimiters.
+     * e.g. "foo,,bar" => {"foo","bar"}
+     * This makes our implementation of SCRAM *slightly* more generous
+     * in what it will accept than the standard calls for.
+     *
+     * This does not impact _authMessage, as it's composed from the raw
+     * string input, rather than the output of the split operation.
+     */
+    const auto input = StringSplitter::split(client_first_message_bare.toString(), ",");
+
+    if (input.size() < 2) {
+        // gs2-header is not included in this count, so add it back in.
+        return badCount(input.size() + 2);
     }
 
-    decodeSCRAMUsername(_user);
+    if (!str::startsWith(input[0], "n=") || input[0].size() < 3) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Invalid SCRAM user name: " << input[0]);
+    }
+    ServerMechanismBase::_principalName = input[0].substr(2);
+    decodeSCRAMUsername(ServerMechanismBase::_principalName);
+
+    auto swUser = saslPrep(ServerMechanismBase::ServerMechanismBase::_principalName);
+    if (!swUser.isOK()) {
+        return swUser.getStatus();
+    }
+    ServerMechanismBase::ServerMechanismBase::_principalName = std::move(swUser.getValue());
+
+    if (!authzId.empty() && ServerMechanismBase::_principalName != authzId) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "SCRAM user name " << ServerMechanismBase::_principalName
+                                    << " does not match authzid "
+                                    << authzId);
+    }
+
+    if (!str::startsWith(input[1], "r=") || input[1].size() < 6) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Invalid SCRAM client nonce: " << input[1]);
+    }
+    const auto clientNonce = input[1].substr(2);
+
 
     // SERVER-16534, SCRAM-SHA-1 must be enabled for authenticating the internal user, so that
     // cluster members may communicate with each other. Hence ignore disabled auth mechanism
     // for the internal user.
-    UserName user(_user, _saslAuthSession->getAuthenticationDatabase());
+    UserName user(ServerMechanismBase::ServerMechanismBase::_principalName,
+                  ServerMechanismBase::getAuthenticationDatabase());
     if (!sequenceContains(saslGlobalParams.authenticationMechanisms, "SCRAM-SHA-1") &&
         user != internalSecurity.user->getName()) {
-        return StatusWith<bool>(ErrorCodes::BadValue, "SCRAM-SHA-1 authentication is disabled");
+        return Status(ErrorCodes::BadValue, "SCRAM-SHA-1 authentication is disabled");
     }
-
-    // add client-first-message-bare to _authMessage
-    _authMessage += input[1] + "," + input[2] + ",";
-
-    std::string clientNonce = input[2].substr(2);
 
     // The authentication database is also the source database for the user.
     User* userObj;
-    Status status =
-        _saslAuthSession->getAuthorizationSession()->getAuthorizationManager().acquireUser(
-            _saslAuthSession->getOpCtxt(), user, &userObj);
+    auto authManager = AuthorizationManager::get(opCtx->getServiceContext());
 
+    Status status = authManager->acquireUser(opCtx, user, &userObj);
     if (!status.isOK()) {
-        return StatusWith<bool>(status);
+        return status;
     }
 
-    _creds = userObj->getCredentials();
+    User::CredentialData credentials = userObj->getCredentials();
     UserName userName = userObj->getName();
 
-    _saslAuthSession->getAuthorizationSession()->getAuthorizationManager().releaseUser(userObj);
+    authManager->releaseUser(userObj);
 
-    // Check for authentication attempts of the __system user on
-    // systems started without a keyfile.
-    if (userName == internalSecurity.user->getName() && _creds.scram.salt.empty()) {
-        return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
-                                "It is not possible to authenticate as the __system user "
-                                "on servers started without a --keyFile parameter");
+    _scramCredentials = credentials.scram<HashBlock>();
+
+    if (!_scramCredentials.isValid()) {
+        // Check for authentication attempts of the __system user on
+        // systems started without a keyfile.
+        if (userName == internalSecurity.user->getName()) {
+            return Status(ErrorCodes::AuthenticationFailed,
+                          "It is not possible to authenticate as the __system user "
+                          "on servers started without a --keyFile parameter");
+        } else {
+            return Status(ErrorCodes::AuthenticationFailed,
+                          "Unable to perform SCRAM authentication for a user with missing "
+                          "or invalid SCRAM credentials");
+        }
     }
 
-    if (!_creds.scram.isValid()) {
-        return Status(ErrorCodes::AuthenticationFailed,
-                      "Unable to perform SCRAM authentication for a user with missing "
-                      "or invalid SCRAM credentials");
-    }
+    _secrets = scram::Secrets<HashBlock>("",
+                                         base64::decode(_scramCredentials.storedKey),
+                                         base64::decode(_scramCredentials.serverKey));
 
     // Generate server-first-message
     // Create text-based nonce as base64 encoding of a binary blob of length multiple of 3
     const int nonceLenQWords = 3;
     uint64_t binaryNonce[nonceLenQWords];
 
-    unique_ptr<SecureRandom> sr(SecureRandom::create());
+    std::unique_ptr<SecureRandom> sr(SecureRandom::create());
 
     binaryNonce[0] = sr->nextInt64();
     binaryNonce[1] = sr->nextInt64();
@@ -201,13 +243,14 @@ StatusWith<bool> SaslSCRAMServerConversation::_firstStep(std::vector<string>& in
     _nonce =
         clientNonce + base64::encode(reinterpret_cast<char*>(binaryNonce), sizeof(binaryNonce));
     StringBuilder sb;
-    sb << "r=" << _nonce << ",s=" << _creds.scram.salt << ",i=" << _creds.scram.iterationCount;
-    *outputData = sb.str();
+    sb << "r=" << _nonce << ",s=" << _scramCredentials.salt
+       << ",i=" << _scramCredentials.iterationCount;
+    std::string outputData = sb.str();
 
-    // add server-first-message to authMessage
-    _authMessage += *outputData + ",";
+    // add client-first-message-bare and server-first-message to _authMessage
+    _authMessage = client_first_message_bare.toString() + "," + outputData;
 
-    return StatusWith<bool>(false);
+    return std::make_tuple(false, std::move(outputData));
 }
 
 /**
@@ -222,45 +265,64 @@ StatusWith<bool> SaslSCRAMServerConversation::_firstStep(std::vector<string>& in
  *
  * NOTE: we are ignoring the channel binding part of the message
 **/
-StatusWith<bool> SaslSCRAMServerConversation::_secondStep(const std::vector<string>& input,
-                                                          std::string* outputData) {
-    if (input.size() != 3) {
-        return StatusWith<bool>(
-            ErrorCodes::BadValue,
-            mongoutils::str::stream()
-                << "Incorrect number of arguments for second SCRAM client message, got "
-                << input.size()
-                << " expected 3");
-    } else if (!str::startsWith(input[0], "c=") || input[0].size() < 3) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream() << "Incorrect SCRAM channel binding: "
-                                                          << input[0]);
-    } else if (!str::startsWith(input[1], "r=") || input[1].size() < 6) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream() << "Incorrect SCRAM client|server nonce: "
-                                                          << input[1]);
-    } else if (!str::startsWith(input[2], "p=") || input[2].size() < 3) {
-        return StatusWith<bool>(ErrorCodes::BadValue,
-                                mongoutils::str::stream() << "Incorrect SCRAM ClientProof: "
-                                                          << input[2]);
+template <typename Policy>
+StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_secondStep(
+    OperationContext* opCtx, StringData inputData) {
+    const auto badCount = [](int got) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream()
+                          << "Incorrect number of arguments for second SCRAM client message, got "
+                          << got
+                          << " expected at least 3");
+    };
+
+    /**
+     * client-final-message-without-proof := cbind ',' nonce ',' [ ',' extensions ]
+     * client-final-message := client-final-message-without-proof ',' proof
+     */
+    const auto last_comma = inputData.rfind(',');
+    if (last_comma == std::string::npos) {
+        return badCount(1);
     }
 
     // add client-final-message-without-proof to authMessage
-    _authMessage += input[0] + "," + input[1];
+    const auto client_final_message_without_proof = inputData.substr(0, last_comma);
+    _authMessage += "," + client_final_message_without_proof.toString();
 
-    // Concatenated nonce sent by client should equal the one in server-first-message
-    std::string nonce = input[1].substr(2);
-    if (nonce != _nonce) {
-        return StatusWith<bool>(
-            ErrorCodes::BadValue,
-            mongoutils::str::stream()
-                << "Unmatched SCRAM nonce received from client in second step, expected "
-                << _nonce
-                << " but received "
-                << nonce);
+    const auto last_field = inputData.substr(last_comma + 1);
+    if ((last_field.size() < 3) || !last_field.startsWith("p=")) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Incorrect SCRAM ClientProof: " << last_field);
+    }
+    const auto proof = last_field.substr(2);
+
+    const auto input = StringSplitter::split(client_final_message_without_proof.toString(), ",");
+    if (input.size() < 2) {
+        // Add count for proof back on.
+        return badCount(input.size() + 1);
     }
 
-    std::string clientProof = input[2].substr(2);
+    if (!str::startsWith(input[0], "c=") || input[0].size() < 3) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Incorrect SCRAM channel binding: " << input[0]);
+    }
+    const auto cbind = input[0].substr(2);
+
+    if (!str::startsWith(input[1], "r=") || input[1].size() < 6) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Incorrect SCRAM client|server nonce: " << input[1]);
+    }
+    const auto nonce = input[1].substr(2);
+
+    // Concatenated nonce sent by client should equal the one in server-first-message
+    if (nonce != _nonce) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream()
+                          << "Unmatched SCRAM nonce received from client in second step, expected "
+                          << _nonce
+                          << " but received "
+                          << nonce);
+    }
 
     // Do server side computations, compare storedKeys and generate client-final-message
     // AuthMessage     := client-first-message-bare + "," +
@@ -269,21 +331,26 @@ StatusWith<bool> SaslSCRAMServerConversation::_secondStep(const std::vector<stri
     // ClientSignature := HMAC(StoredKey, AuthMessage)
     // ClientKey := ClientSignature XOR ClientProof
     // ServerSignature := HMAC(ServerKey, AuthMessage)
-    invariant(_creds.scram.isValid());
 
-    if (!verifyClientProof(base64::decode(clientProof))) {
-        return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
-                                mongoutils::str::stream()
-                                    << "SCRAM authentication failed, storedKey mismatch");
+    if (!_secrets.verifyClientProof(_authMessage, base64::decode(proof.toString()))) {
+        return Status(ErrorCodes::AuthenticationFailed,
+                      "SCRAM authentication failed, storedKey mismatch");
     }
 
-    // ServerSignature := HMAC(ServerKey, AuthMessage)
-    const auto serverSignature = generateServerSignature();
-
     StringBuilder sb;
-    sb << "v=" << serverSignature;
-    *outputData = sb.str();
+    // ServerSignature := HMAC(ServerKey, AuthMessage)
+    sb << "v=" << _secrets.generateServerSignature(_authMessage);
 
-    return StatusWith<bool>(false);
+    return std::make_tuple(false, sb.str());
 }
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(SASLSCRAMServerMechanism,
+                                     ("CreateSASLServerMechanismRegistry"))
+(::mongo::InitializerContext* context) {
+    auto& registry = SASLServerMechanismRegistry::get(getGlobalServiceContext());
+    registry.registerFactory<SCRAMSHA1ServerFactory>();
+    registry.registerFactory<SCRAMSHA256ServerFactory>();
+    return Status::OK();
+}
+
 }  // namespace mongo

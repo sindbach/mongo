@@ -43,7 +43,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/random.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/concurrency/spin_lock.h"
@@ -53,7 +52,6 @@
 
 namespace mongo {
 
-class AbstractMessagingPort;
 class Collection;
 class OperationContext;
 
@@ -230,9 +228,6 @@ private:
     // Description for the client (e.g. conn8)
     const std::string _desc;
 
-    // OS id of the thread, which owns this client
-    const stdx::thread::id _threadId;
-
     // > 0 for things "conn", 0 otherwise
     const ConnectionId _connectionId;
 
@@ -252,4 +247,4 @@ private:
 Client& cc();
 
 bool haveClient();
-};
+}  // namespace mongo

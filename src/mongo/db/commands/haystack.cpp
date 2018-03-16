@@ -68,12 +68,8 @@ public:
         return false;
     }
 
-    bool slaveOk() const {
-        return true;
-    }
-
-    bool slaveOverrideOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool supportsReadConcern(const std::string& dbName,
@@ -92,7 +88,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));

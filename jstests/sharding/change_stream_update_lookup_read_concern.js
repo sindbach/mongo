@@ -37,6 +37,7 @@
 
     if (!startSetIfSupportsReadMajority(rst)) {
         jsTestLog("Skipping test since storage engine doesn't support majority read concern.");
+        rst.stopSet();
         return;
     }
     rst.initiate();
@@ -105,7 +106,7 @@
             // We need to filter out any profiler entries with a stale config - this is the first
             // read on this secondary with a readConcern specified, so it is the first read on this
             // secondary that will enforce shard version.
-            exceptionCode: {$ne: ErrorCodes.StaleConfig}
+            errCode: {$ne: ErrorCodes.StaleConfig}
         },
         errorMsgFilter: {ns: mongosColl.getFullName()},
         errorMsgProj: {ns: 1, op: 1, command: 1},
@@ -195,7 +196,7 @@
             // We need to filter out any profiler entries with a stale config - this is the first
             // read on this secondary with a readConcern specified, so it is the first read on this
             // secondary that will enforce shard version.
-            exceptionCode: {$ne: ErrorCodes.StaleConfig}
+            errCode: {$ne: ErrorCodes.StaleConfig}
         }
     });
 

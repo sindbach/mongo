@@ -8,6 +8,7 @@ selector:
   # mongos. This command or functionality is placed in a comment next to the failing test.
   - jstests/core/apitest_db.js  # profiling.
   - jstests/core/apply_ops*.js  # applyOps, SERVER-1439.
+  - jstests/core/awaitdata_getmore_cmd.js  # capped collections.
   - jstests/core/bypass_doc_validation.js  # copyDatabase
   - jstests/core/capped*.js  # capped collections.
   - jstests/core/check_shard_index.js  # checkShardingIndex.
@@ -71,6 +72,9 @@ selector:
   - jstests/core/ns_length.js
   - jstests/core/views/*.js # Views tests aren't expected to work when collections are implicitly sharded.
   - jstests/core/killop_drop_collection.js # Uses fsyncLock.
+  # These tests fail because sharded clusters do not clean up correctly after failed index builds.
+  # See SERVER-33207 as an example.
+  - jstests/core/geo_borders.js
   # TODO: Remove after fixing SERVER-32555. executionStats.nReturned is incorrect for sharded
   # queries with a limit or for distinct commands.
   - jstests/core/distinct_index1.js
@@ -83,8 +87,9 @@ selector:
   # TODO: Remove after fixing SERVER-14324. mapReduce behaves unpredictably when the out collection
   # is sharded on anything other than {_id: 1}.
   - jstests/core/mr_undef.js
-  # TODO SERVER-32311: These tests use getAggPlanStage(), which can't handle sharded explain output.
+  # TODO SERVER-32311: These tests use plan stage helpers which can't handle sharded explain output.
   - jstests/core/expr_index_use.js
+  - jstests/core/index_multikey.js
   - jstests/core/optimized_match_explain.js
   - jstests/core/sort_array.js
   # TODO: SERVER-16605
@@ -102,6 +107,10 @@ selector:
   - cannot_create_unique_index_when_using_hashed_shard_key
 
 executor:
+  archive:
+    hooks:
+      - CheckReplDBHash
+      - ValidateCollections
   config:
     shell_options:
       readMode: commands

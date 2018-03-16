@@ -44,7 +44,6 @@
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/s/catalog/dist_lock_manager_mock.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
-#include "mongo/s/catalog/sharding_catalog_test_fixture.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
@@ -52,6 +51,7 @@
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/memory.h"
@@ -69,8 +69,8 @@ using std::string;
 using std::vector;
 using unittest::assertGet;
 
-using InsertRetryTest = ShardingCatalogTestFixture;
-using UpdateRetryTest = ShardingCatalogTestFixture;
+using InsertRetryTest = ShardingTestFixture;
+using UpdateRetryTest = ShardingTestFixture;
 
 const NamespaceString kTestNamespace("config.TestColl");
 const HostAndPort kTestHosts[] = {
@@ -85,7 +85,7 @@ TEST_F(InsertRetryTest, RetryOnInterruptedAndNetworkErrorSuccess) {
     auto future = launchAsync([&] {
         Status status =
             catalogClient()->insertConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToInsert,
                                                   ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_OK(status);
@@ -117,7 +117,7 @@ TEST_F(InsertRetryTest, RetryOnNetworkErrorFails) {
     auto future = launchAsync([&] {
         Status status =
             catalogClient()->insertConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToInsert,
                                                   ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_EQ(ErrorCodes::NetworkTimeout, status.code());
@@ -152,7 +152,7 @@ TEST_F(InsertRetryTest, DuplicateKeyErrorAfterNetworkErrorMatch) {
     auto future = launchAsync([&] {
         Status status =
             catalogClient()->insertConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToInsert,
                                                   ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_OK(status);
@@ -190,7 +190,7 @@ TEST_F(InsertRetryTest, DuplicateKeyErrorAfterNetworkErrorNotFound) {
     auto future = launchAsync([&] {
         Status status =
             catalogClient()->insertConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToInsert,
                                                   ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_EQ(ErrorCodes::DuplicateKey, status.code());
@@ -228,7 +228,7 @@ TEST_F(InsertRetryTest, DuplicateKeyErrorAfterNetworkErrorMismatch) {
     auto future = launchAsync([&] {
         Status status =
             catalogClient()->insertConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToInsert,
                                                   ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_EQ(ErrorCodes::DuplicateKey, status.code());
@@ -267,7 +267,7 @@ TEST_F(InsertRetryTest, DuplicateKeyErrorAfterWriteConcernFailureMatch) {
     auto future = launchAsync([&] {
         Status status =
             catalogClient()->insertConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToInsert,
                                                   ShardingCatalogClient::kMajorityWriteConcern);
         ASSERT_OK(status);
@@ -276,7 +276,7 @@ TEST_F(InsertRetryTest, DuplicateKeyErrorAfterWriteConcernFailureMatch) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto insertOp = InsertOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), insertOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, insertOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());
@@ -324,7 +324,7 @@ TEST_F(UpdateRetryTest, Success) {
     auto future = launchAsync([&] {
         auto status =
             catalogClient()->updateConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToUpdate,
                                                   updateExpr,
                                                   false,
@@ -335,7 +335,7 @@ TEST_F(UpdateRetryTest, Success) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), updateOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, updateOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());
@@ -358,7 +358,7 @@ TEST_F(UpdateRetryTest, NotMasterErrorReturnedPersistently) {
     auto future = launchAsync([&] {
         auto status =
             catalogClient()->updateConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToUpdate,
                                                   updateExpr,
                                                   false,
@@ -389,7 +389,7 @@ TEST_F(UpdateRetryTest, NotMasterReturnedFromTargeter) {
     auto future = launchAsync([&] {
         auto status =
             catalogClient()->updateConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToUpdate,
                                                   updateExpr,
                                                   false,
@@ -420,7 +420,7 @@ TEST_F(UpdateRetryTest, NotMasterOnceSuccessAfterRetry) {
     auto future = launchAsync([&] {
         ASSERT_OK(
             catalogClient()->updateConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToUpdate,
                                                   updateExpr,
                                                   false,
@@ -442,7 +442,7 @@ TEST_F(UpdateRetryTest, NotMasterOnceSuccessAfterRetry) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), updateOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, updateOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());
@@ -465,7 +465,7 @@ TEST_F(UpdateRetryTest, OperationInterruptedDueToPrimaryStepDown) {
     auto future = launchAsync([&] {
         auto status =
             catalogClient()->updateConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToUpdate,
                                                   updateExpr,
                                                   false,
@@ -476,7 +476,7 @@ TEST_F(UpdateRetryTest, OperationInterruptedDueToPrimaryStepDown) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), updateOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, updateOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());
@@ -493,7 +493,7 @@ TEST_F(UpdateRetryTest, OperationInterruptedDueToPrimaryStepDown) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), updateOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, updateOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());
@@ -516,7 +516,7 @@ TEST_F(UpdateRetryTest, WriteConcernFailure) {
     auto future = launchAsync([&] {
         auto status =
             catalogClient()->updateConfigDocument(operationContext(),
-                                                  kTestNamespace.ns(),
+                                                  kTestNamespace,
                                                   objToUpdate,
                                                   updateExpr,
                                                   false,
@@ -527,7 +527,7 @@ TEST_F(UpdateRetryTest, WriteConcernFailure) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), updateOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, updateOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());
@@ -550,7 +550,7 @@ TEST_F(UpdateRetryTest, WriteConcernFailure) {
     onCommand([&](const RemoteCommandRequest& request) {
         const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
         const auto updateOp = UpdateOp::parse(opMsgRequest);
-        ASSERT_EQUALS(kTestNamespace.ns(), updateOp.getNamespace().ns());
+        ASSERT_EQUALS(kTestNamespace, updateOp.getNamespace());
 
         BatchedCommandResponse response;
         response.setStatus(Status::OK());

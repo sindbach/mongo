@@ -190,6 +190,11 @@ public:
      */
     Status compact(OperationContext* opCtx);
 
+    /**
+     * Sets this index as multikey with the provided paths.
+     */
+    void setIndexIsMultikey(OperationContext* opCtx, MultikeyPaths paths);
+
     //
     // Bulk operations support
     //
@@ -204,6 +209,12 @@ public:
                       const RecordId& loc,
                       const InsertDeleteOptions& options,
                       int64_t* numInserted);
+
+        const MultikeyPaths& getMultikeyPaths() const {
+            return _indexMultikeyPaths;
+        }
+
+        bool isMultikey() const;
 
     private:
         friend class IndexAccessMethod;
@@ -243,21 +254,29 @@ public:
      * Call this when you are ready to finish your bulk work.
      * Pass in the BulkBuilder returned from initiateBulk.
      * @param bulk - something created from initiateBulk
-     * @param mayInterrupt - is this commit interruptable (will cancel)
+     * @param mayInterrupt - is this commit interruptible (will cancel)
      * @param dupsAllowed - if false, error or fill 'dups' if any duplicate values are found
      * @param dups - if NULL, error out on dups if not allowed
      *               if not NULL, put the bad RecordIds there
      */
     Status commitBulk(OperationContext* opCtx,
-                      std::unique_ptr<BulkBuilder> bulk,
+                      BulkBuilder* bulk,
                       bool mayInterrupt,
                       bool dupsAllowed,
                       std::set<RecordId>* dups);
 
     /**
-     * Specifies whether getKeys should relax the index constraints or not.
+     * Specifies whether getKeys should relax the index constraints or not, in order of most
+     * permissive to least permissive.
      */
-    enum class GetKeysMode { kRelaxConstraints, kEnforceConstraints };
+    enum class GetKeysMode {
+        // Relax all constraints.
+        kRelaxConstraints,
+        // Relax all constraints on documents that don't apply to a partial index.
+        kRelaxConstraintsUnfiltered,
+        // Enforce all constraints.
+        kEnforceConstraints
+    };
 
     /**
      * Fills 'keys' with the keys that should be generated for 'obj' on this index.

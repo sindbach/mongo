@@ -30,10 +30,10 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/keys_collection_client_direct.h"
+
 #include <boost/optional.hpp>
 #include <vector>
-
-#include "mongo/db/keys_collection_client_direct.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -43,7 +43,6 @@
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
@@ -52,8 +51,8 @@
 #include "mongo/util/log.h"
 
 namespace mongo {
-
 namespace {
+
 const int kOnErrorNumRetries = 3;
 
 bool isRetriableError(ErrorCodes::Error code, Shard::RetryPolicy options) {
@@ -68,7 +67,8 @@ bool isRetriableError(ErrorCodes::Error code, Shard::RetryPolicy options) {
         return false;
     }
 }
-}
+
+}  // namespace
 
 KeysCollectionClientDirect::KeysCollectionClientDirect() : _rsLocalClient() {}
 
@@ -83,7 +83,7 @@ StatusWith<std::vector<KeysCollectionDocument>> KeysCollectionClientDirect::getN
     auto findStatus = _query(opCtx,
                              ReadPreferenceSetting(ReadPreference::Nearest, TagSet{}),
                              repl::ReadConcernLevel::kLocalReadConcern,
-                             NamespaceString(KeysCollectionDocument::ConfigNS),
+                             KeysCollectionDocument::ConfigNS,
                              queryBuilder.obj(),
                              BSON("expiresAt" << 1),
                              boost::none);
@@ -130,10 +130,9 @@ StatusWith<Shard::QueryResponse> KeysCollectionClientDirect::_query(
 }
 
 Status KeysCollectionClientDirect::_insert(OperationContext* opCtx,
-                                           const std::string& ns,
+                                           const NamespaceString& nss,
                                            const BSONObj& doc,
                                            const WriteConcernOptions& writeConcern) {
-    const NamespaceString nss(ns);
     BatchedCommandRequest request([&] {
         write_ops::Insert insertOp(nss);
         insertOp.setDocuments({doc});
@@ -166,4 +165,5 @@ Status KeysCollectionClientDirect::insertNewKey(OperationContext* opCtx, const B
     return _insert(
         opCtx, KeysCollectionDocument::ConfigNS, doc, ShardingCatalogClient::kMajorityWriteConcern);
 }
+
 }  // namespace mongo

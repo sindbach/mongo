@@ -35,7 +35,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/lasterror.h"
@@ -43,9 +43,9 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/migration_source_manager.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/log.h"
@@ -62,16 +62,16 @@ class SetShardVersion : public ErrmsgCommandDeprecated {
 public:
     SetShardVersion() : ErrmsgCommandDeprecated("setShardVersion") {}
 
-    void help(std::stringstream& help) const override {
-        help << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
     bool adminOnly() const override {
         return true;
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -80,7 +80,7 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
@@ -157,7 +157,7 @@ public:
 
         // Validate shardName parameter.
         const auto shardName = cmdObj["shard"].str();
-        const auto storedShardName = ShardingState::get(opCtx)->getShardName();
+        const auto storedShardName = shardingState->getShardName();
         uassert(ErrorCodes::BadValue,
                 str::stream() << "received shardName " << shardName
                               << " which differs from stored shardName "
@@ -176,7 +176,8 @@ public:
                               << " is not of type SET",
                 givenConnStr.type() == ConnectionString::SET);
 
-        const auto storedConnStr = ShardingState::get(opCtx)->getConfigServer(opCtx);
+        const auto storedConnStr =
+            Grid::get(opCtx)->shardRegistry()->getConfigServerConnectionString();
         uassert(ErrorCodes::IllegalOperation,
                 str::stream() << "Given config server set name: " << givenConnStr.getSetName()
                               << " differs from known set name: "
@@ -195,7 +196,14 @@ public:
 
         // Step 4
 
-        const ChunkVersion connectionVersion = info->getVersion(nss.ns());
+        const auto connectionVersionOrNotSet = info->getVersion(nss.ns());
+
+        // For backwards compatibility, calling SSV for a namespace which is sharded, but doesn't
+        // have version set on the connection requires the call to fail and require the
+        // "need_authoritative" flag to be set on the response. Treating unset connection versions
+        // as UNSHARDED is the legacy way to achieve this purpose.
+        const auto connectionVersion =
+            (connectionVersionOrNotSet ? *connectionVersionOrNotSet : ChunkVersion::UNSHARDED());
         connectionVersion.addToBSON(result, "oldVersion");
 
         {
@@ -225,19 +233,19 @@ public:
                                     : ChunkVersion::UNSHARDED());
 
             if (requestedVersion.isWriteCompatibleWith(collectionShardVersion)) {
-                // mongos and mongod agree!
+                // MongoS and MongoD agree on what is the collection's shard version
+                //
                 // Now we should update the connection's version if it's not compatible with the
                 // request's version. This could happen if the shard's metadata has changed, but
                 // the remote client has already refreshed its view of the metadata since the last
                 // time it sent anything over this connection.
                 if (!connectionVersion.isWriteCompatibleWith(requestedVersion)) {
-                    // A migration occurred.
                     if (connectionVersion < collectionShardVersion &&
                         connectionVersion.epoch() == collectionShardVersion.epoch()) {
+                        // A migration occurred
                         info->setVersion(nss.ns(), requestedVersion);
-                    }
-                    // The collection was dropped and recreated.
-                    else if (authoritative) {
+                    } else if (authoritative) {
+                        // The collection was dropped and recreated
                         info->setVersion(nss.ns(), requestedVersion);
                     } else {
                         result.append("ns", nss.ns());
@@ -284,16 +292,13 @@ public:
                 // TODO: Refactor all of this
                 if (requestedVersion < collectionShardVersion &&
                     requestedVersion.epoch() == collectionShardVersion.epoch()) {
-                    if (css->getMigrationSourceManager()) {
-                        auto critSecSignal =
-                            css->getMigrationSourceManager()->getMigrationCriticalSectionSignal(
-                                false);
-                        if (critSecSignal) {
-                            collLock.reset();
-                            autoDb.reset();
-                            log() << "waiting till out of critical section";
-                            critSecSignal->waitFor(opCtx, Seconds(10));
-                        }
+                    auto critSecSignal =
+                        css->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite);
+                    if (critSecSignal) {
+                        collLock.reset();
+                        autoDb.reset();
+                        log() << "waiting till out of critical section";
+                        critSecSignal->waitFor(opCtx, Seconds(10));
                     }
 
                     errmsg = str::stream() << "shard global version for collection is higher "
@@ -308,16 +313,13 @@ public:
                 if (!collectionShardVersion.isSet() && !authoritative) {
                     // Needed b/c when the last chunk is moved off a shard, the version gets reset
                     // to zero, which should require a reload.
-                    if (css->getMigrationSourceManager()) {
-                        auto critSecSignal =
-                            css->getMigrationSourceManager()->getMigrationCriticalSectionSignal(
-                                false);
-                        if (critSecSignal) {
-                            collLock.reset();
-                            autoDb.reset();
-                            log() << "waiting till out of critical section";
-                            critSecSignal->waitFor(opCtx, Seconds(10));
-                        }
+                    auto critSecSignal =
+                        css->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite);
+                    if (critSecSignal) {
+                        collLock.reset();
+                        autoDb.reset();
+                        log() << "waiting till out of critical section";
+                        critSecSignal->waitFor(opCtx, Seconds(10));
                     }
 
                     // need authoritative for first look
@@ -333,7 +335,7 @@ public:
 
         // Step 7
 
-        Status status = shardingState->onStaleShardVersion(opCtx, nss, requestedVersion);
+        const auto status = onShardVersionMismatch(opCtx, nss, requestedVersion);
 
         {
             AutoGetCollection autoColl(opCtx, nss, MODE_IS);

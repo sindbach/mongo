@@ -51,73 +51,60 @@ namespace {
 
 class ParallelCollectionScanCmd : public BasicCommand {
 public:
-    struct ExtentInfo {
-        ExtentInfo(RecordId dl, size_t s) : diskLoc(dl), size(s) {}
-        RecordId diskLoc;
-        size_t size;
-    };
-
     ParallelCollectionScanCmd() : BasicCommand("parallelCollectionScan") {}
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool supportsReadConcern(const std::string& dbName,
                              const BSONObj& cmdObj,
-                             repl::ReadConcernLevel level) const final {
+                             repl::ReadConcernLevel level) const override {
         return true;
     }
 
-    ReadWriteType getReadWriteType() const {
+    ReadWriteType getReadWriteType() const override {
         return ReadWriteType::kCommand;
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const std::string& dbname,
-                                 const BSONObj& cmdObj) override {
+                                 const BSONObj& cmdObj) const override {
         AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
 
         if (!authSession->isAuthorizedToParseNamespaceElement(cmdObj.firstElement())) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
-        const NamespaceString ns(CommandHelpers::parseNsOrUUID(opCtx, dbname, cmdObj));
-        if (!authSession->isAuthorizedForActionsOnNamespace(ns, ActionType::find)) {
-            return Status(ErrorCodes::Unauthorized, "Unauthorized");
-        }
-
-        return Status::OK();
+        const auto hasTerm = false;
+        return authSession->checkAuthForFind(
+            AutoGetCollection::resolveNamespaceStringOrUUID(
+                opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj)),
+            hasTerm);
     }
 
-    virtual bool run(OperationContext* opCtx,
-                     const string& dbname,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
-        Lock::DBLock dbSLock(opCtx, dbname, MODE_IS);
-        const NamespaceString ns(CommandHelpers::parseNsOrUUID(opCtx, dbname, cmdObj));
+    bool run(OperationContext* opCtx,
+             const string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        AutoGetCollectionForReadCommand ctx(opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj));
+        const auto nss = ctx.getNss();
 
-        AutoGetCollectionForReadCommand ctx(opCtx, ns, std::move(dbSLock));
-
-        Collection* collection = ctx.getCollection();
-        if (!collection)
-            return CommandHelpers::appendCommandStatus(
-                result,
-                Status(ErrorCodes::NamespaceNotFound,
-                       str::stream() << "ns does not exist: " << ns.ns()));
+        Collection* const collection = ctx.getCollection();
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "ns does not exist: " << nss.ns(),
+                collection);
 
         size_t numCursors = static_cast<size_t>(cmdObj["numCursors"].numberInt());
-
-        if (numCursors == 0 || numCursors > 10000)
-            return CommandHelpers::appendCommandStatus(
-                result,
-                Status(ErrorCodes::BadValue,
-                       str::stream() << "numCursors has to be between 1 and 10000"
-                                     << " was: "
-                                     << numCursors));
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "numCursors has to be between 1 and 10000"
+                              << " was: "
+                              << numCursors,
+                numCursors >= 1 && numCursors <= 10000);
 
         std::vector<std::unique_ptr<RecordCursor>> iterators;
         // Opening multiple cursors on a capped collection and reading them in parallel can produce
@@ -156,36 +143,34 @@ public:
             mis->addIterator(std::move(iterators[i]));
         }
 
-        {
-            BSONArrayBuilder bucketsBuilder;
-            for (auto&& exec : execs) {
-                // Need to save state while yielding locks between now and getMore().
-                exec->saveState();
-                exec->detachFromOperationContext();
+        BSONArrayBuilder bucketsBuilder;
+        for (auto&& exec : execs) {
+            // Need to save state while yielding locks between now and getMore().
+            exec->saveState();
+            exec->detachFromOperationContext();
 
-                // Create and register a new ClientCursor.
-                auto pinnedCursor = collection->getCursorManager()->registerCursor(
-                    opCtx,
-                    {std::move(exec),
-                     ns,
-                     AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
-                     opCtx->recoveryUnit()->isReadingFromMajorityCommittedSnapshot(),
-                     cmdObj});
-                pinnedCursor.getCursor()->setLeftoverMaxTimeMicros(
-                    opCtx->getRemainingMaxTimeMicros());
+            // Create and register a new ClientCursor.
+            auto pinnedCursor = collection->getCursorManager()->registerCursor(
+                opCtx,
+                {std::move(exec),
+                 nss,
+                 AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
+                 opCtx->recoveryUnit()->getReadConcernLevel(),
+                 cmdObj});
+            pinnedCursor.getCursor()->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
 
-                BSONObjBuilder threadResult;
-                appendCursorResponseObject(
-                    pinnedCursor.getCursor()->cursorid(), ns.ns(), BSONArray(), &threadResult);
-                threadResult.appendBool("ok", 1);
+            BSONObjBuilder threadResult;
+            appendCursorResponseObject(
+                pinnedCursor.getCursor()->cursorid(), nss.ns(), BSONArray(), &threadResult);
+            threadResult.appendBool("ok", 1);
 
-                bucketsBuilder.append(threadResult.obj());
-            }
-            result.appendArray("cursors", bucketsBuilder.obj());
+            bucketsBuilder.append(threadResult.obj());
         }
+        result.appendArray("cursors", bucketsBuilder.obj());
 
         return true;
     }
+
 } parallelCollectionScanCmd;
 
 }  // namespace

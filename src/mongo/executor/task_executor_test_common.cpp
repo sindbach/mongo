@@ -40,9 +40,9 @@
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_test_fixture.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/log.h"
@@ -71,7 +71,7 @@ private:
 
 using ExecutorTestCaseFactory =
     stdx::function<std::unique_ptr<CommonTaskExecutorTestFixture>(ExecutorFactory)>;
-using ExecutorTestCaseMap = unordered_map<std::string, ExecutorTestCaseFactory>;
+using ExecutorTestCaseMap = stdx::unordered_map<std::string, ExecutorTestCaseFactory>;
 
 static ExecutorTestCaseMap& executorTestCaseRegistry() {
     static ExecutorTestCaseMap registry;
@@ -350,10 +350,35 @@ COMMON_EXECUTOR_TEST(EventWaitingWithTimeoutTest) {
     auto client = serviceContext->makeClient("for testing");
     auto opCtx = client->makeOperationContext();
 
-    opCtx->setDeadlineAfterNowBy(Milliseconds{1});
+    auto deadline = mockClock->now() + Milliseconds{1};
     mockClock->advance(Milliseconds(2));
-    ASSERT_EQ(ErrorCodes::ExceededTimeLimit,
-              executor.waitForEvent(opCtx.get(), eventThatWillNeverBeTriggered));
+    ASSERT(stdx::cv_status::timeout ==
+           executor.waitForEvent(opCtx.get(), eventThatWillNeverBeTriggered, deadline));
+    executor.shutdown();
+    joinExecutorThread();
+}
+
+COMMON_EXECUTOR_TEST(EventSignalWithTimeoutTest) {
+    TaskExecutor& executor = getExecutor();
+    launchExecutorThread();
+
+    auto eventSignalled = unittest::assertGet(executor.makeEvent());
+
+    auto serviceContext = getGlobalServiceContext();
+
+    serviceContext->setFastClockSource(stdx::make_unique<ClockSourceMock>());
+    auto mockClock = static_cast<ClockSourceMock*>(serviceContext->getFastClockSource());
+
+    auto client = serviceContext->makeClient("for testing");
+    auto opCtx = client->makeOperationContext();
+
+    auto deadline = mockClock->now() + Milliseconds{1};
+    mockClock->advance(Milliseconds(1));
+
+    executor.signalEvent(eventSignalled);
+
+    ASSERT(stdx::cv_status::no_timeout ==
+           executor.waitForEvent(opCtx.get(), eventSignalled, deadline));
     executor.shutdown();
     joinExecutorThread();
 }

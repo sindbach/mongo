@@ -64,11 +64,9 @@ public:
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override;
 
-    virtual bool slaveOk() const;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override;
 
-    virtual bool slaveOverrideOk() const;
-
-    virtual void help(std::stringstream& ss) const;
+    std::string help() const override;
 
     /**
      * Two action types defined for plan cache commands:
@@ -77,7 +75,7 @@ public:
      */
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj);
+                                       const BSONObj& cmdObj) const;
     /**
      * Subset of command arguments used by plan cache commands
      * Override to provide command functionality.

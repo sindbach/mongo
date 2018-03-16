@@ -1,5 +1,9 @@
 load('jstests/multiVersion/libs/multi_rs.js');
 
+// Do not fail if this test leaves unterminated processes because this file expects replset1.js to
+// throw for invalid SSL options.
+TestData.failIfUnterminatedProcesses = false;
+
 //=== Shared SSL testing library functions and constants ===
 
 var KEYFILE = "jstests/libs/key1";
@@ -55,12 +59,8 @@ var replShouldFail = function(name, opt1, opt2) {
     ssl_options1 = opt1;
     ssl_options2 = opt2;
     ssl_name = name;
-    replTest = null;
     assert.throws(load, [replSetTestFile], "This setup should have failed");
-    // clean up to continue running...
-    if (replTest) {
-        replTest.stopSet();
-    }
+    // Note: this leaves running mongod processes.
 };
 
 /**
@@ -109,11 +109,12 @@ function mixedShardTest(options1, options2, shouldSucceed) {
         // Start ShardingTest with enableBalancer because ShardingTest attempts to turn
         // off the balancer otherwise, which it will not be authorized to do if auth is enabled.
         // Once SERVER-14017 is fixed the "enableBalancer" line can be removed.
+        // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
         var st = new ShardingTest({
             mongos: [options1],
             config: [options1],
             shards: [options1, options2],
-            other: {enableBalancer: true}
+            other: {enableBalancer: true, shardAsReplicaSet: false}
         });
 
         // Create admin user in case the options include auth
@@ -131,8 +132,8 @@ function mixedShardTest(options1, options2, shouldSucceed) {
         var r = st.adminCommand({enableSharding: "test"});
         assert.eq(r, true, "error enabling sharding for this configuration");
 
-        st.ensurePrimaryShard("test", "shard0000");
-        r = st.adminCommand({movePrimary: 'test', to: 'shard0001'});
+        st.ensurePrimaryShard("test", st.shard0.shardName);
+        r = st.adminCommand({movePrimary: 'test', to: st.shard1.shardName});
         assert.eq(r, true, "error movePrimary failed for this configuration");
 
         var db1 = st.getDB("test");
@@ -150,7 +151,8 @@ function mixedShardTest(options1, options2, shouldSucceed) {
         assert.eq(128, db1.col.count(), "error retrieving documents from cluster");
 
         // Test shards talking to each other
-        r = st.getDB('test').adminCommand({moveChunk: 'test.col', find: {_id: 0}, to: 'shard0000'});
+        r = st.getDB('test').adminCommand(
+            {moveChunk: 'test.col', find: {_id: 0}, to: st.shard0.shardName});
         assert(r.ok, "error moving chunks: " + tojson(r));
 
         db1.col.remove({});

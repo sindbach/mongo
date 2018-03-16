@@ -38,10 +38,10 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/transport/service_entry_point_utils.h"
 #include "mongo/transport/service_executor_task_names.h"
+#include "mongo/transport/thread_idle_callback.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/thread_idle_callback.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/stringutils.h"
@@ -105,8 +105,7 @@ struct ServerParameterOptions : public ServiceExecutorAdaptive::Options {
     int reservedThreads() const final {
         int value = adaptiveServiceExecutorReservedThreads.load();
         if (value == -1) {
-            ProcessInfo pi;
-            value = pi.getNumAvailableCores().value_or(pi.getNumCores()) / 2;
+            value = ProcessInfo::getNumAvailableCores() / 2;
             value = std::max(value, 2);
             adaptiveServiceExecutorReservedThreads.store(value);
             log() << "No thread count configured for executor. Using number of cores / 2: "

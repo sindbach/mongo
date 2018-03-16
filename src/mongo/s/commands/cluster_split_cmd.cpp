@@ -88,8 +88,8 @@ class SplitCollectionCmd : public ErrmsgCommandDeprecated {
 public:
     SplitCollectionCmd() : ErrmsgCommandDeprecated("split") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -100,17 +100,17 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const override {
-        help << " example: - split the shard that contains give key\n"
-             << "   { split : 'alleyinsider.blog.posts' , find : { ts : 1 } }\n"
-             << " example: - split the shard that contains the key with this as the middle\n"
-             << "   { split : 'alleyinsider.blog.posts' , middle : { ts : 1 } }\n"
-             << " NOTE: this does not move the chunks, it just creates a logical separation.";
+    std::string help() const override {
+        return " example: - split the shard that contains give key\n"
+               "   { split : 'alleyinsider.blog.posts' , find : { ts : 1 } }\n"
+               " example: - split the shard that contains the key with this as the middle\n"
+               "   { split : 'alleyinsider.blog.posts' , middle : { ts : 1 } }\n"
+               " NOTE: this does not move the chunks, it just creates a logical separation.";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
                 ActionType::splitChunk)) {

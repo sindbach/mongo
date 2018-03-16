@@ -61,13 +61,6 @@ class RouterExecStage;
  * this cursor have been processed.
  */
 struct ClusterClientCursorParams {
-    // When mongos has to do a merge in order to return results to the client in the correct sort
-    // order, it requests a sortKey meta-projection using this field name.
-    static const char kSortKeyField[];
-
-    // The expected sort key pattern when 'compareWholeSortKey' is true.
-    static const BSONObj kWholeSortKeySortPattern;
-
     struct RemoteCursor {
         RemoteCursor(ShardId shardId, HostAndPort hostAndPort, CursorResponse cursorResponse)
             : shardId(std::move(shardId)),
@@ -85,12 +78,8 @@ struct ClusterClientCursorParams {
     };
 
     ClusterClientCursorParams(NamespaceString nss,
-                              UserNameIterator authenticatedUsersIter,
                               boost::optional<ReadPreferenceSetting> readPref = boost::none)
         : nsString(std::move(nss)) {
-        while (authenticatedUsersIter.more()) {
-            authenticatedUsers.emplace_back(authenticatedUsersIter.next());
-        }
         if (readPref) {
             readPreference = std::move(readPref.get());
         }
@@ -99,8 +88,8 @@ struct ClusterClientCursorParams {
     // Namespace against which the cursors exist.
     NamespaceString nsString;
 
-    // The set of authenticated users when this cursor was created.
-    std::vector<UserName> authenticatedUsers;
+    // The original command object which generated this cursor. Must either be empty or owned.
+    BSONObj originatingCommandObj;
 
     // Per-remote node data.
     std::vector<RemoteCursor> remotes;

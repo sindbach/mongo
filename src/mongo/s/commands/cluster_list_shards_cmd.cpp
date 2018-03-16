@@ -28,10 +28,7 @@
 
 #include "mongo/platform/basic.h"
 
-#include <vector>
-
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/grid.h"
 
@@ -42,16 +39,16 @@ class ListShardsCmd : public BasicCommand {
 public:
     ListShardsCmd() : BasicCommand("listShards", "listshards") {}
 
-    void help(std::stringstream& help) const override {
-        help << "list all shards of the system";
+    std::string help() const override {
+        return "list all shards of the system";
     }
 
     bool adminOnly() const override {
         return true;
     }
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -60,7 +57,7 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::listShards);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
@@ -83,7 +80,7 @@ public:
         return true;
     }
 
-} listShards;
+} listShardsCmd;
 
 }  // namespace
 }  // namespace mongo

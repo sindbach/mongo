@@ -73,7 +73,7 @@
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/stage_builder.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
@@ -641,15 +641,18 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getOplogStartHack(
         opCtx, std::move(ws), std::move(cs), std::move(cq), collection, PlanExecutor::YIELD_AUTO);
 }
 
-}  // namespace
-
-StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
+StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> _getExecutorFind(
     OperationContext* opCtx,
     Collection* collection,
     const NamespaceString& nss,
     unique_ptr<CanonicalQuery> canonicalQuery,
     PlanExecutor::YieldPolicy yieldPolicy,
     size_t plannerOptions) {
+    if (canonicalQuery->getQueryRequest().getMaxScan()) {
+        RARELY log() << "Support for the maxScan option has been deprecated. Instead, use "
+                        "maxTimeMS. See http://dochub.mongodb.org/core/4.0-deprecate-maxScan.";
+    }
+
     if (NULL != collection && canonicalQuery->getQueryRequest().isOplogReplay()) {
         return getOplogStartHack(opCtx, collection, std::move(canonicalQuery), plannerOptions);
     }
@@ -657,8 +660,36 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     if (ShardingState::get(opCtx)->needCollectionMetadata(opCtx, nss.ns())) {
         plannerOptions |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
     }
-    return getExecutor(
-        opCtx, collection, std::move(canonicalQuery), PlanExecutor::YIELD_AUTO, plannerOptions);
+    return getExecutor(opCtx, collection, std::move(canonicalQuery), yieldPolicy, plannerOptions);
+}
+
+}  // namespace
+
+StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
+    OperationContext* opCtx,
+    Collection* collection,
+    const NamespaceString& nss,
+    unique_ptr<CanonicalQuery> canonicalQuery,
+    size_t plannerOptions) {
+    auto readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    auto yieldPolicy = readConcernArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern
+        ? PlanExecutor::INTERRUPT_ONLY
+        : PlanExecutor::YIELD_AUTO;
+    return _getExecutorFind(
+        opCtx, collection, nss, std::move(canonicalQuery), yieldPolicy, plannerOptions);
+}
+
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorLegacyFind(
+    OperationContext* opCtx,
+    Collection* collection,
+    const NamespaceString& nss,
+    std::unique_ptr<CanonicalQuery> canonicalQuery) {
+    return _getExecutorFind(opCtx,
+                            collection,
+                            nss,
+                            std::move(canonicalQuery),
+                            PlanExecutor::YIELD_AUTO,
+                            QueryPlannerParams::DEFAULT);
 }
 
 namespace {

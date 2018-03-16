@@ -1,4 +1,3 @@
-// mongo/shell/shell_utils_launcher.h
 /*
  *    Copyright 2010 10gen Inc.
  *
@@ -38,10 +37,10 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/platform/process_id.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -56,6 +55,9 @@ struct MongoProgramScope {
     ~MongoProgramScope();
 };
 int KillMongoProgramInstances();
+
+// Returns true if there are running child processes.
+std::vector<ProcessId> getRunningMongoChildProcessIds();
 
 void installShellUtilsLauncher(Scope& scope);
 
@@ -142,5 +144,5 @@ private:
     ProcessId _pid;
     std::string _name;
 };
-}
-}
+}  // namespace shell_utils
+}  // namespace mongo

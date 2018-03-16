@@ -33,6 +33,11 @@ selector:
   - jstests/core/write_result.js
 
 executor:
+  archive:
+    hooks:
+      - CheckReplDBHash
+      - CheckReplOplogs
+      - ValidateCollections
   config:
     shell_options:
       eval: >-
@@ -58,7 +63,6 @@ executor:
   fixture:
     class: ReplicaSetFixture
     mongod_options:
-      oplogSize: 511
       set_parameters:
         enableTestCommands: 1
         numInitialSyncAttempts: 1

@@ -56,23 +56,22 @@ class CmdClone : public BasicCommand {
 public:
     CmdClone() : BasicCommand("clone") {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
-
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "clone this database from an instance of the db on another host\n";
-        help << "{clone: \"host13\"[, slaveOk: <bool>]}";
+    std::string help() const override {
+        return "clone this database from an instance of the db on another host\n"
+               "{clone: \"host13\"[, slaveOk: <bool>]}";
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         ActionSet actions;
         actions.addAction(ActionType::insert);
         actions.addAction(ActionType::createIndex);

@@ -51,15 +51,23 @@ public:
 
     void kill(OperationContext* opCtx) final;
 
-    void reattachToOperationContext(OperationContext* opCtx) final {}
+    void reattachToOperationContext(OperationContext* opCtx) final {
+        _opCtx = opCtx;
+    }
 
-    void detachFromOperationContext() final {}
+    void detachFromOperationContext() final {
+        _opCtx = nullptr;
+    }
+
+    OperationContext* getCurrentOperationContext() const final {
+        return _opCtx;
+    }
 
     bool isTailable() const final;
 
     bool isTailableAndAwaitData() const final;
 
-    UserNameIterator getAuthenticatedUsers() const final;
+    BSONObj getOriginatingCommand() const final;
 
     long long getNumReturnedSoFar() const final;
 
@@ -90,12 +98,17 @@ private:
     std::queue<StatusWith<ClusterQueryResult>> _resultsQueue;
     stdx::function<void(void)> _killCallback;
 
+    // Originating command object.
+    BSONObj _originatingCommand;
+
     // Number of returned documents.
     long long _numReturnedSoFar = 0;
 
     bool _remotesExhausted = true;
 
     boost::optional<LogicalSessionId> _lsid;
+
+    OperationContext* _opCtx = nullptr;
 };
 
 }  // namespace mongo

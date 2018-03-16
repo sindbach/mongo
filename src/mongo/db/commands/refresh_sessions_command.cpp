@@ -46,8 +46,8 @@ class RefreshSessionsCommand final : public BasicCommand {
 public:
     RefreshSessionsCommand() : BasicCommand("refreshSessions") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     bool adminOnly() const override {
         return false;
@@ -55,12 +55,12 @@ public:
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    void help(std::stringstream& help) const override {
-        help << "renew a set of logical sessions";
+    std::string help() const override {
+        return "renew a set of logical sessions";
     }
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const std::string& dbname,
-                                 const BSONObj& cmdObj) override {
+                                 const BSONObj& cmdObj) const override {
         // It is always ok to run this command, as long as you are authenticated
         // as some user, if auth is enabled.
         AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());

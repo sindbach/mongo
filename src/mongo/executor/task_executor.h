@@ -39,6 +39,7 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/platform/hash_namespace.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/time_support.h"
 
@@ -185,11 +186,13 @@ public:
     virtual void waitForEvent(const EventHandle& event) = 0;
 
     /**
-     * Same as waitForEvent without an OperationContext, but returns an error if the event was not
-     * triggered but the operation was killed - see OperationContext::checkForInterruptNoAssert()
-     * for expected error codes.
+     * Same as waitForEvent without an OperationContext, but if the OperationContext gets
+     * interrupted, will return the kill code, or, if the the deadline passes, will return
+     * Status::OK with cv_status::timeout.
      */
-    virtual Status waitForEvent(OperationContext* opCtx, const EventHandle& event) = 0;
+    virtual StatusWith<stdx::cv_status> waitForEvent(OperationContext* opCtx,
+                                                     const EventHandle& event,
+                                                     Date_t deadline = Date_t::max()) = 0;
 
     /**
      * Schedules "work" to be run by the executor ASAP.

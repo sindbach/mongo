@@ -33,6 +33,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/s/catalog/type_chunk_base_gen.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/shard_id.h"
 
@@ -104,6 +105,22 @@ private:
     BSONObj _maxKey;
 };
 
+class ChunkHistory : public ChunkHistoryBase {
+public:
+    ChunkHistory() : ChunkHistoryBase() {}
+    ChunkHistory(mongo::Timestamp ts, mongo::ShardId shard) : ChunkHistoryBase() {
+        setValidAfter(std::move(ts));
+        setShard(std::move(shard));
+    }
+    ChunkHistory(const ChunkHistoryBase& b) : ChunkHistoryBase(b) {}
+
+    static StatusWith<std::vector<ChunkHistory>> fromBSON(const BSONArray& source);
+
+    bool operator==(const ChunkHistory& other) const {
+        return getValidAfter() == other.getValidAfter() && getShard() == other.getShard();
+    }
+};
+
 /**
  * This class represents the layouts and contents of documents contained in the config server's
  * config.chunks and shard server's config.chunks.uuid collections. All manipulation of documents
@@ -147,7 +164,7 @@ private:
 class ChunkType {
 public:
     // Name of the chunks collection in the config server.
-    static const std::string ConfigNS;
+    static const NamespaceString ConfigNS;
 
     // The shard chunks collections' common namespace prefix.
     static const std::string ShardNSPrefix;
@@ -162,6 +179,7 @@ public:
     static const BSONField<bool> jumbo;
     static const BSONField<Date_t> lastmod;
     static const BSONField<OID> epoch;
+    static const BSONField<BSONObj> history;
 
     ChunkType();
     ChunkType(NamespaceString nss, ChunkRange range, ChunkVersion version, ShardId shardId);
@@ -199,10 +217,10 @@ public:
     /**
      * Getters and setters.
      */
-    const std::string& getNS() const {
-        return _ns.get();
+    const NamespaceString& getNS() const {
+        return _nss.get();
     }
-    void setNS(const std::string& name);
+    void setNS(const NamespaceString& nss);
 
     const BSONObj& getMin() const {
         return _min.get();
@@ -236,10 +254,19 @@ public:
     }
     void setJumbo(bool jumbo);
 
+    void setHistory(std::vector<ChunkHistory>&& history) {
+        _history = std::move(history);
+    }
+    const std::vector<ChunkHistory>& getHistory() const {
+        return _history;
+    }
+
+    void addHistoryToBSON(BSONObjBuilder& builder) const;
+
     /**
      * Generates chunk id based on the namespace name and the lower bound of the chunk.
      */
-    static std::string genID(StringData ns, const BSONObj& min);
+    static std::string genID(const NamespaceString& nss, const BSONObj& min);
 
     /**
      * Returns OK if all the mandatory fields have been set. Otherwise returns NoSuchKey and
@@ -256,7 +283,7 @@ private:
     // Convention: (M)andatory, (O)ptional, (S)pecial; (C)onfig, (S)hard.
 
     // (O)(C)     collection this chunk is in
-    boost::optional<std::string> _ns;
+    boost::optional<NamespaceString> _nss;
     // (M)(C)(S)  first key of the range, inclusive
     boost::optional<BSONObj> _min;
     // (M)(C)(S)  last key of the range, non-inclusive
@@ -267,6 +294,8 @@ private:
     boost::optional<ShardId> _shard;
     // (O)(C)     too big to move?
     boost::optional<bool> _jumbo;
+    // history of the chunk
+    std::vector<ChunkHistory> _history;
 };
 
 }  // namespace mongo

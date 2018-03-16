@@ -44,8 +44,8 @@ class ReapLogicalSessionCacheNowCommand final : public BasicCommand {
 public:
     ReapLogicalSessionCacheNowCommand() : BasicCommand("reapLogicalSessionCacheNow") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -56,14 +56,14 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "force the logical session cache to reap. Test command only.";
+    std::string help() const override {
+        return "force the logical session cache to reap. Test command only.";
     }
 
     // No auth needed because it only works when enabled via command line.
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const std::string& dbname,
-                                 const BSONObj& cmdObj) override {
+                                 const BSONObj& cmdObj) const override {
         return Status::OK();
     }
 
@@ -84,7 +84,7 @@ public:
 };
 
 MONGO_INITIALIZER(RegisterReapLogicalSessionCacheNowCommand)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
+    if (getTestCommandsEnabled()) {
         // Leaked intentionally: a Command registers itself when constructed.
         new ReapLogicalSessionCacheNowCommand();
     }

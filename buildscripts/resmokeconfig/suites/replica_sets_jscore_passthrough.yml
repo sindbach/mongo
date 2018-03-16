@@ -11,6 +11,11 @@ selector:
   - jstests/core/capped_update.js
 
 executor:
+  archive:
+    hooks:
+      - CheckReplDBHash
+      - CheckReplOplogs
+      - ValidateCollections
   config:
     shell_options:
       eval: "testingReplication = true;"
@@ -28,7 +33,6 @@ executor:
   fixture:
     class: ReplicaSetFixture
     mongod_options:
-      oplogSize: 511
       set_parameters:
         enableTestCommands: 1
         numInitialSyncAttempts: 1

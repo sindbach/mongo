@@ -14,7 +14,7 @@ from ... import core
 from ... import utils
 
 
-class DBTestCase(interface.TestCase):
+class DBTestCase(interface.ProcessTestCase):
     """
     A dbtest to execute.
     """
@@ -30,7 +30,7 @@ class DBTestCase(interface.TestCase):
         Initializes the DBTestCase with the dbtest suite to run.
         """
 
-        interface.TestCase.__init__(self, logger, "DBTest", dbtest_suite)
+        interface.ProcessTestCase.__init__(self, logger, "dbtest suite", dbtest_suite)
 
         # Command line options override the YAML configuration.
         self.dbtest_executable = utils.default_if_none(config.DBTEST_EXECUTABLE, dbtest_executable)
@@ -39,11 +39,11 @@ class DBTestCase(interface.TestCase):
         self.dbtest_options = utils.default_if_none(dbtest_options, {}).copy()
 
     def configure(self, fixture, *args, **kwargs):
-        interface.TestCase.configure(self, fixture, *args, **kwargs)
+        interface.ProcessTestCase.configure(self, fixture, *args, **kwargs)
 
         # If a dbpath was specified, then use it as a container for all other dbpaths.
         dbpath_prefix = self.dbtest_options.pop("dbpath", DBTestCase._get_dbpath_prefix())
-        dbpath = os.path.join(dbpath_prefix, "job%d" % (self.fixture.job_num), "unittest")
+        dbpath = os.path.join(dbpath_prefix, "job%d" % self.fixture.job_num, "unittest")
         self.dbtest_options["dbpath"] = dbpath
 
         self._clear_dbpath()
@@ -54,16 +54,9 @@ class DBTestCase(interface.TestCase):
             # Directory already exists.
             pass
 
-    def run_test(self):
-        try:
-            dbtest = self._make_process()
-            self._execute(dbtest)
-            self._clear_dbpath()
-        except self.failureException:
-            raise
-        except:
-            self.logger.exception("Encountered an error running dbtest suite %s.", self.basename())
-            raise
+    def _execute(self, process):
+        interface.ProcessTestCase._execute(self, process)
+        self._clear_dbpath()
 
     def _clear_dbpath(self):
         shutil.rmtree(self.dbtest_options["dbpath"], ignore_errors=True)

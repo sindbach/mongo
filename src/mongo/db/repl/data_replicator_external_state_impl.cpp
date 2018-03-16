@@ -49,7 +49,7 @@ executor::TaskExecutor* DataReplicatorExternalStateImpl::getTaskExecutor() const
     return _replicationCoordinatorExternalState->getTaskExecutor();
 }
 
-OldThreadPool* DataReplicatorExternalStateImpl::getDbWorkThreadPool() const {
+ThreadPool* DataReplicatorExternalStateImpl::getDbWorkThreadPool() const {
     return _replicationCoordinatorExternalState->getDbWorkThreadPool();
 }
 
@@ -110,11 +110,6 @@ std::unique_ptr<OplogBuffer> DataReplicatorExternalStateImpl::makeInitialSyncOpl
     return _replicationCoordinatorExternalState->makeInitialSyncOplogBuffer(opCtx);
 }
 
-std::unique_ptr<OplogBuffer> DataReplicatorExternalStateImpl::makeSteadyStateOplogBuffer(
-    OperationContext* opCtx) const {
-    return _replicationCoordinatorExternalState->makeSteadyStateOplogBuffer(opCtx);
-}
-
 StatusWith<ReplSetConfig> DataReplicatorExternalStateImpl::getCurrentConfig() const {
     return _replicationCoordinator->getConfig();
 }
@@ -126,14 +121,14 @@ StatusWith<OpTime> DataReplicatorExternalStateImpl::_multiApply(
     return _replicationCoordinatorExternalState->multiApply(opCtx, std::move(ops), applyOperation);
 }
 
-Status DataReplicatorExternalStateImpl::_multiSyncApply(MultiApplier::OperationPtrs* ops) {
-    return _replicationCoordinatorExternalState->multiSyncApply(ops);
-}
-
-Status DataReplicatorExternalStateImpl::_multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                                               const HostAndPort& source,
-                                                               AtomicUInt32* fetchCount) {
-    return _replicationCoordinatorExternalState->multiInitialSyncApply(ops, source, fetchCount);
+Status DataReplicatorExternalStateImpl::_multiInitialSyncApply(
+    OperationContext* opCtx,
+    MultiApplier::OperationPtrs* ops,
+    const HostAndPort& source,
+    AtomicUInt32* fetchCount,
+    WorkerMultikeyPathInfo* workerMultikeyPathInfo) {
+    return _replicationCoordinatorExternalState->multiInitialSyncApply(
+        opCtx, ops, source, fetchCount, workerMultikeyPathInfo);
 }
 
 ReplicationCoordinator* DataReplicatorExternalStateImpl::getReplicationCoordinator() const {

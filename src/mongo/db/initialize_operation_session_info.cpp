@@ -31,20 +31,21 @@
 #include "mongo/db/initialize_operation_session_info.h"
 
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/operation_context.h"
 
 namespace mongo {
 
-void initializeOperationSessionInfo(OperationContext* opCtx,
-                                    const BSONObj& requestBody,
-                                    bool requiresAuth,
-                                    bool isReplSetMemberOrMongos,
-                                    bool supportsDocLocking) {
+boost::optional<OperationSessionInfoFromClient> initializeOperationSessionInfo(
+    OperationContext* opCtx,
+    const BSONObj& requestBody,
+    bool requiresAuth,
+    bool isReplSetMemberOrMongos,
+    bool supportsDocLocking) {
+
     if (!requiresAuth) {
-        return;
+        return boost::none;
     }
 
     {
@@ -54,7 +55,7 @@ void initializeOperationSessionInfo(OperationContext* opCtx,
         AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
         if (authSession && authSession->isUsingLocalhostBypass() &&
             !authSession->getAuthenticatedUserNames().more()) {
-            return;
+            return boost::none;
         }
     }
 
@@ -88,6 +89,14 @@ void initializeOperationSessionInfo(OperationContext* opCtx,
 
         opCtx->setTxnNumber(*osi.getTxnNumber());
     }
+
+    if (osi.getAutocommit()) {
+        uassert(ErrorCodes::IllegalOperation,
+                "Autocommit requires a transaction number to be specified",
+                opCtx->getTxnNumber());
+    }
+
+    return osi;
 }
 
 }  // namespace mongo

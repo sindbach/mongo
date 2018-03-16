@@ -289,8 +289,8 @@ Status NamespaceDetailsCollectionCatalogEntry::removeIndex(OperationContext* opC
     return Status::OK();
 }
 
-Status NamespaceDetailsCollectionCatalogEntry::prepareForIndexBuild(OperationContext* opCtx,
-                                                                    const IndexDescriptor* desc) {
+Status NamespaceDetailsCollectionCatalogEntry::prepareForIndexBuild(
+    OperationContext* opCtx, const IndexDescriptor* desc, bool isBackgroundSecondaryBuild) {
     BSONObj spec = desc->infoObj();
     // 1) entry in system.indexs
     // TODO SERVER-30638: using timestamp 0 for these inserts.
@@ -449,47 +449,15 @@ void NamespaceDetailsCollectionCatalogEntry::addUUID(OperationContext* opCtx,
     }
 }
 
-void NamespaceDetailsCollectionCatalogEntry::removeUUID(OperationContext* opCtx) {
-    // Remove the UUID from CollectionOptions if a UUID exists.
-    if (ns().coll() == "system.namespaces") {
-        return;
-    }
-    RecordData namespaceData;
-    invariant(_namespacesRecordStore->findRecord(opCtx, _namespacesRecordId, &namespaceData));
-    auto namespacesBson = namespaceData.releaseToBson();
-    if (!namespacesBson["options"].isABSONObj()) {
-        return;
-    }
-    auto optionsObj = namespacesBson["options"].Obj();
-
-    if (!optionsObj["uuid"].eoo()) {
-        CollectionUUID uuid = UUID::parse(optionsObj["uuid"]).getValue();
-        _updateSystemNamespaces(opCtx,
-                                BSON("$unset" << BSON("options.uuid"
-                                                      << "")));
-        UUIDCatalog& catalog = UUIDCatalog::get(opCtx->getServiceContext());
-        Collection* coll = catalog.lookupCollectionByUUID(uuid);
-        if (coll) {
-            catalog.onDropCollection(opCtx, uuid);
-        }
-    }
-}
-
 bool NamespaceDetailsCollectionCatalogEntry::isEqualToMetadataUUID(OperationContext* opCtx,
-                                                                   OptionalCollectionUUID uuid) {
+                                                                   CollectionUUID uuid) {
     if (ns().coll() != "system.namespaces") {
         RecordData namespaceData;
         invariant(_namespacesRecordStore->findRecord(opCtx, _namespacesRecordId, &namespaceData));
 
         auto namespacesBson = namespaceData.releaseToBson();
-        if (uuid && namespacesBson["options"].isABSONObj()) {
-            auto optionsObj = namespacesBson["options"].Obj();
-            return !optionsObj["uuid"].eoo() &&
-                UUID::parse(optionsObj["uuid"]).getValue() == uuid.get();
-        } else {
-            return !uuid && (!namespacesBson["options"].isABSONObj() ||
-                             namespacesBson["options"].Obj()["uuid"].eoo());
-        }
+        auto optionsObj = namespacesBson["options"].Obj();
+        return !optionsObj["uuid"].eoo() && UUID::parse(optionsObj["uuid"]).getValue() == uuid;
     } else {
         return true;
     }

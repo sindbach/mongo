@@ -21,7 +21,6 @@ load("jstests/replsets/rslib.js");
     conf.settings = conf.settings || {};
     conf.settings.chainingAllowed = false;
     conf.settings.catchUpTimeoutMillis = 0;
-    conf.protocolVersion = 1;
     replSet.initiate(conf);
 
     var primary = replSet.getPrimary();
@@ -130,4 +129,5 @@ load("jstests/replsets/rslib.js");
     // Check that all writes reached the secondary's op queue prior to
     // stepping down the original primary and got applied.
     assert.eq(secondary.getDB("foo").foo.find().itcount(), numDocuments);
+    replSet.stopSet();
 })();

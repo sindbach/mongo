@@ -72,8 +72,8 @@ class UpdateZoneKeyRangeCmd : public BasicCommand {
 public:
     UpdateZoneKeyRangeCmd() : BasicCommand("updateZoneKeyRange", "updatezonekeyRange") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -84,34 +84,30 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "assigns/remove a range of a sharded collection to a zone";
+    std::string help() const override {
+        return "assigns/remove a range of a sharded collection to a zone";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(ShardType::ConfigNS)),
-                ActionType::find)) {
+                ResourcePattern::forExactNamespace(ShardType::ConfigNS), ActionType::find)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(TagsType::ConfigNS)),
-                ActionType::find)) {
+                ResourcePattern::forExactNamespace(TagsType::ConfigNS), ActionType::find)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(TagsType::ConfigNS)),
-                ActionType::update)) {
+                ResourcePattern::forExactNamespace(TagsType::ConfigNS), ActionType::update)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(TagsType::ConfigNS)),
-                ActionType::remove)) {
+                ResourcePattern::forExactNamespace(TagsType::ConfigNS), ActionType::remove)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 

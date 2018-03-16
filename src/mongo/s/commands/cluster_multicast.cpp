@@ -66,10 +66,9 @@ class MulticastCmd : public BasicCommand {
 public:
     MulticastCmd() : BasicCommand("multicast") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
-
     bool adminOnly() const override {
         return true;
     }
@@ -79,14 +78,14 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "multicasts a command to hosts in a system";
+    std::string help() const override {
+        return "multicasts a command to hosts in a system";
     }
 
     // no privs because it's a test command
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {}
+                               std::vector<Privilege>* out) const override {}
 
     bool run(OperationContext* opCtx,
              const std::string& dbname,
@@ -148,7 +147,7 @@ public:
 };
 
 MONGO_INITIALIZER(RegisterMulticast)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
+    if (getTestCommandsEnabled()) {
         new MulticastCmd();
     }
     return Status::OK();

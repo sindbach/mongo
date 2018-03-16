@@ -41,7 +41,6 @@
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_executor_task_names.h"
 #include "mongo/transport/session.h"
-#include "mongo/transport/ticket.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
@@ -51,7 +50,6 @@
 #include "mongo/util/log.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/net/socket_exception.h"
-#include "mongo/util/net/thread_idle_callback.h"
 #include "mongo/util/quick_exit.h"
 
 namespace mongo {
@@ -229,9 +227,9 @@ ServiceStateMachine::ServiceStateMachine(ServiceContext* svcContext,
       _transportMode(transportMode),
       _serviceContext(svcContext),
       _sessionHandle(session),
-      _dbClient{svcContext->makeClient("conn", std::move(session))},
-      _dbClientPtr{_dbClient.get()},
-      _threadName{str::stream() << "conn" << _session()->id()} {}
+      _threadName{str::stream() << "conn" << _session()->id()},
+      _dbClient{svcContext->makeClient(_threadName, std::move(session))},
+      _dbClientPtr{_dbClient.get()} {}
 
 const transport::SessionHandle& ServiceStateMachine::_session() const {
     return _sessionHandle;
@@ -239,35 +237,48 @@ const transport::SessionHandle& ServiceStateMachine::_session() const {
 
 void ServiceStateMachine::_sourceMessage(ThreadGuard guard) {
     invariant(_inMessage.empty());
-    auto ticket = _session()->sourceMessage(&_inMessage);
-
+    invariant(_state.load() == State::Source);
     _state.store(State::SourceWait);
     guard.release();
 
-    if (_transportMode == transport::Mode::kSynchronous) {
-        _sourceCallback([this](auto ticket) {
+    auto sourceMsgImpl = [&] {
+        if (_transportMode == transport::Mode::kSynchronous) {
             MONGO_IDLE_THREAD_BLOCK;
-            return _session()->getTransportLayer()->wait(std::move(ticket));
-        }(std::move(ticket)));
-    } else if (_transportMode == transport::Mode::kAsynchronous) {
-        _session()->getTransportLayer()->asyncWait(
-            std::move(ticket), [this](Status status) { _sourceCallback(status); });
-    }
+            return Future<Message>::makeReady(_session()->sourceMessage());
+        } else {
+            invariant(_transportMode == transport::Mode::kAsynchronous);
+            return _session()->asyncSourceMessage();
+        }
+    };
+
+    sourceMsgImpl().getAsync([this](StatusWith<Message> msg) {
+        if (msg.isOK()) {
+            _inMessage = std::move(msg.getValue());
+            invariant(!_inMessage.empty());
+        }
+        _sourceCallback(msg.getStatus());
+    });
 }
 
 void ServiceStateMachine::_sinkMessage(ThreadGuard guard, Message toSink) {
     // Sink our response to the client
-    auto ticket = _session()->sinkMessage(toSink);
-
+    invariant(_state.load() == State::Process);
     _state.store(State::SinkWait);
     guard.release();
 
-    if (_transportMode == transport::Mode::kSynchronous) {
-        _sinkCallback(_session()->getTransportLayer()->wait(std::move(ticket)));
-    } else if (_transportMode == transport::Mode::kAsynchronous) {
-        _session()->getTransportLayer()->asyncWait(
-            std::move(ticket), [this](Status status) { _sinkCallback(status); });
-    }
+    auto sinkMsgImpl = [&] {
+        if (_transportMode == transport::Mode::kSynchronous) {
+            // We don't consider ourselves idle while sending the reply since we are still doing
+            // work on behalf of the client. Contrast that with sourceMessage() where we are waiting
+            // for the client to send us more work to do.
+            return Future<void>::makeReady(_session()->sinkMessage(std::move(toSink)));
+        } else {
+            invariant(_transportMode == transport::Mode::kAsynchronous);
+            return _session()->asyncSinkMessage(std::move(toSink));
+        }
+    };
+
+    sinkMsgImpl().getAsync([this](Status status) { _sinkCallback(std::move(status)); });
 }
 
 void ServiceStateMachine::_sourceCallback(Status status) {
@@ -487,7 +498,7 @@ void ServiceStateMachine::terminate() {
     if (state() == State::Ended)
         return;
 
-    _session()->getTransportLayer()->end(_session());
+    _session()->end();
 }
 
 void ServiceStateMachine::terminateIfTagsDontMatch(transport::Session::TagMask tags) {

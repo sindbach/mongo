@@ -491,7 +491,7 @@ int connect(socket_type s, const socket_addr_type* addr,
 }
 
 void sync_connect(socket_type s, const socket_addr_type* addr,
-    std::size_t addrlen, asio::error_code& ec)
+    std::size_t addrlen, int timeout_ms, asio::error_code& ec)
 {
   // Perform the connect operation.
   socket_ops::connect(s, addr, addrlen, ec);
@@ -503,8 +503,15 @@ void sync_connect(socket_type s, const socket_addr_type* addr,
   }
 
   // Wait for socket to become ready.
-  if (socket_ops::poll_connect(s, -1, ec) < 0)
+  int res = socket_ops::poll_connect(s, timeout_ms, ec);
+  if (res < 0)
     return;
+
+  if (res == 0)
+  {
+    ec = asio::error::timed_out;
+    return;
+  }
 
   // Get the error code from the connect operation.
   int connect_error = 0;
@@ -770,6 +777,8 @@ signed_size_type recv(socket_type s, buf* bufs, size_t count,
     ec = asio::error::connection_reset;
   else if (ec.value() == ERROR_PORT_UNREACHABLE)
     ec = asio::error::connection_refused;
+  else if (ec.value() == WSAEMSGSIZE || ec.value() == ERROR_MORE_DATA)
+    ec.assign(0, ec.category());
   if (result != 0)
     return socket_error_retval;
   ec = asio::error_code();
@@ -801,33 +810,19 @@ size_t sync_recv(socket_type s, state_type state, buf* bufs,
     return 0;
   }
 
-  // Read some data.
-  for (;;)
+  signed_size_type bytes = socket_ops::recv(s, bufs, count, flags, ec);
+
+  // Check if operation succeeded.
+  if (bytes > 0)
+    return bytes;
+
+  // Check for EOF.
+  if ((state & stream_oriented) && bytes == 0)
   {
-    // Try to complete the operation without blocking.
-    signed_size_type bytes = socket_ops::recv(s, bufs, count, flags, ec);
-
-    // Check if operation succeeded.
-    if (bytes > 0)
-      return bytes;
-
-    // Check for EOF.
-    if ((state & stream_oriented) && bytes == 0)
-    {
-      ec = asio::error::eof;
-      return 0;
-    }
-
-    // Operation failed.
-    if ((state & user_set_non_blocking)
-        || (ec != asio::error::would_block
-          && ec != asio::error::try_again))
-      return 0;
-
-    // Wait for socket to become ready.
-    if (socket_ops::poll_read(s, 0, -1, ec) < 0)
-      return 0;
+    ec = asio::error::eof;
   }
+
+  return 0;
 }
 
 #if defined(ASIO_HAS_IOCP)
@@ -847,6 +842,10 @@ void complete_iocp_recv(state_type state,
   else if (ec.value() == ERROR_PORT_UNREACHABLE)
   {
     ec = asio::error::connection_refused;
+  }
+  else if (ec.value() == WSAEMSGSIZE || ec.value() == ERROR_MORE_DATA)
+  {
+    ec.assign(0, ec.category());
   }
 
   // Check for connection closed.
@@ -918,6 +917,8 @@ signed_size_type recvfrom(socket_type s, buf* bufs, size_t count,
     ec = asio::error::connection_reset;
   else if (ec.value() == ERROR_PORT_UNREACHABLE)
     ec = asio::error::connection_refused;
+  else if (ec.value() == WSAEMSGSIZE || ec.value() == ERROR_MORE_DATA)
+    ec.assign(0, ec.category());
   if (result != 0)
     return socket_error_retval;
   ec = asio::error_code();
@@ -986,6 +987,10 @@ void complete_iocp_recvfrom(
   else if (ec.value() == ERROR_PORT_UNREACHABLE)
   {
     ec = asio::error::connection_refused;
+  }
+  else if (ec.value() == WSAEMSGSIZE || ec.value() == ERROR_MORE_DATA)
+  {
+    ec.assign(0, ec.category());
   }
 }
 
@@ -1100,6 +1105,10 @@ void complete_iocp_recvmsg(
   {
     ec = asio::error::connection_refused;
   }
+  else if (ec.value() == WSAEMSGSIZE || ec.value() == ERROR_MORE_DATA)
+  {
+    ec.assign(0, ec.category());
+  }
 }
 
 #else // defined(ASIO_HAS_IOCP)
@@ -1187,26 +1196,9 @@ size_t sync_send(socket_type s, state_type state, const buf* bufs,
     return 0;
   }
 
-  // Read some data.
-  for (;;)
-  {
-    // Try to complete the operation without blocking.
-    signed_size_type bytes = socket_ops::send(s, bufs, count, flags, ec);
-
-    // Check if operation succeeded.
-    if (bytes >= 0)
-      return bytes;
-
-    // Operation failed.
-    if ((state & user_set_non_blocking)
-        || (ec != asio::error::would_block
-          && ec != asio::error::try_again))
-      return 0;
-
-    // Wait for socket to become ready.
-    if (socket_ops::poll_write(s, 0, -1, ec) < 0)
-      return 0;
-  }
+  // Write some data
+  signed_size_type bytes = socket_ops::send(s, bufs, count, flags, ec);
+  return bytes > 0 ? bytes : 0;
 }
 
 #if defined(ASIO_HAS_IOCP)

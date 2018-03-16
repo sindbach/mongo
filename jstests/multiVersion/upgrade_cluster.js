@@ -46,7 +46,8 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
                 shardOptions: {binVersion: "last-stable"},
 
                 rsOptions: {binVersion: "last-stable"},
-                rs: isRSCluster
+                rs: isRSCluster,
+                shardAsReplicaSet: false
             }
         });
         st.configRS.awaitReplication();
@@ -99,7 +100,7 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
         version = st.s.getCollection('config.version').findOne();
         assert.eq(version.minCompatibleVersion, 5);
         assert.eq(version.currentVersion, 6);
-        assert.neq(clusterID, version.clusterId);
+        assert.eq(clusterID, version.clusterId);
         assert.eq(version.excluding, undefined);
 
         st.stop();

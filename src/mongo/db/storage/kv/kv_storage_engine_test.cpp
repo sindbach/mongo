@@ -37,7 +37,6 @@
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/repair_database.h"
 #include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_engine.h"
@@ -125,7 +124,8 @@ public:
 
         DatabaseCatalogEntry* dbce = _storageEngine->getDatabaseCatalogEntry(opCtx, collNs.db());
         CollectionCatalogEntry* cce = dbce->getCollectionCatalogEntry(collNs.ns());
-        auto ret = cce->prepareForIndexBuild(opCtx, descriptor.get());
+        const bool isBackgroundSecondaryBuild = false;
+        auto ret = cce->prepareForIndexBuild(opCtx, descriptor.get(), isBackgroundSecondaryBuild);
         if (!ret.isOK()) {
             return ret;
         }
@@ -178,8 +178,10 @@ TEST_F(KVStorageEngineTest, ReconcileIdentsTest) {
 }
 
 TEST_F(KVStorageEngineTest, RecreateIndexes) {
-    repl::setGlobalReplicationCoordinator(
-        new repl::ReplicationCoordinatorMock(getGlobalServiceContext(), repl::ReplSettings()));
+    repl::ReplicationCoordinator::set(
+        getGlobalServiceContext(),
+        std::unique_ptr<repl::ReplicationCoordinator>(
+            new repl::ReplicationCoordinatorMock(getGlobalServiceContext(), repl::ReplSettings())));
 
     auto opCtx = cc().makeOperationContext();
 

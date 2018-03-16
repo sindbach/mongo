@@ -27,11 +27,11 @@ if debugBuild:
 env.Append(CPPDEFINES=["HAVE_VERBOSE"])
 
 conf = Configure(env)
-if conf.CheckFunc("fallocate"):
+if conf.CheckFunc("fallocate", "fcntl.h"):
     conf.env.Append(CPPDEFINES=[
         "HAVE_FALLOCATE"
     ])
-if conf.CheckFunc("sync_file_range"):
+if conf.CheckFunc("sync_file_range", "fcntl.h"):
     conf.env.Append(CPPDEFINES=[
         "HAVE_SYNC_FILE_RANGE"
     ])
@@ -63,8 +63,12 @@ elif env.TargetOSIs('freebsd'):
 elif env.TargetOSIs('openbsd'):
     env.Append(CPPPATH=["build_openbsd"])
 elif env.TargetOSIs('linux'):
-    env.Append(CPPPATH=["build_linux"])
-    env.Append(CPPDEFINES=["_GNU_SOURCE"])
+    if env.TargetOSIs('android'):
+        env.Append(CPPPATH=["build_android"])
+        env.Append(CPPDEFINES=["_GNU_SOURCE"])
+    else:
+        env.Append(CPPPATH=["build_linux"])
+        env.Append(CPPDEFINES=["_GNU_SOURCE"])
 else:
     print("Wiredtiger is not supported on this platform. " +
         "Please generate an approriate wiredtiger_config.h")
@@ -122,7 +126,15 @@ env.Substfile(
     ],
     SUBST_DICT=replacements)
 
+env.Install(
+    target='.',
+    source=[
+        'src/include/wiredtiger_ext.h'
+    ],
+)
+
 env.Alias('generated-sources', "wiredtiger.h")
+env.Alias('generated-sources', "wiredtiger_ext.h")
 
 #
 # WiredTiger library

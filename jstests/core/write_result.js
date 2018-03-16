@@ -1,7 +1,12 @@
 // Cannot implicitly shard accessed collections because of following errmsg: A single
 // update/delete on a sharded collection must contain an exact match on _id or contain the shard
 // key.
-// @tags: [assumes_unsharded_collection, requires_non_retryable_writes]
+//
+// @tags: [
+//   assumes_unsharded_collection,
+//   assumes_write_concern_unchanged,
+//   requires_non_retryable_writes,
+// ]
 
 //
 // Tests the behavior of single writes using write commands
@@ -114,7 +119,7 @@ printjson(result = coll.update({foo: "bar"}, {$invalid: "expr"}));
 assert.eq(result.nUpserted, 0);
 assert.eq(result.nMatched, 0);
 if (coll.getMongo().writeMode() == "commands")
-    assert.eq(0, result.nModified, result);
+    assert.eq(0, result.nModified, tojson(result));
 assert(result.getWriteError());
 assert(result.getWriteError().errmsg);
 assert(!result.getUpsertedId());
@@ -133,7 +138,7 @@ printjson(result = coll.update({}, {$bit: {value: {and: NumberInt(0)}}}, {multi:
 assert.eq(result.nUpserted, 0);
 assert.eq(result.nMatched, 0);
 if (coll.getMongo().writeMode() == "commands")
-    assert.eq(0, result.nModified, result);
+    assert.eq(0, result.nModified, tojson(result));
 assert(result.getWriteError());
 assert(result.getWriteError().errmsg);
 assert(!result.getUpsertedId());

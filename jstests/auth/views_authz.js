@@ -1,6 +1,7 @@
 /**
  * Tests authorization special cases with views. These are special exceptions that prohibit certain
  * operations on views even if the user has an explicit privilege on that view.
+ * @tags: [requires_sharding]
  */
 (function() {
     "use strict";
@@ -142,8 +143,13 @@
     MongoRunner.stopMongod(mongod);
 
     // Run the test on a sharded cluster.
-    let cluster = new ShardingTest(
-        {shards: 1, mongos: 1, keyFile: "jstests/libs/key1", other: {shardOptions: {auth: ""}}});
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+    let cluster = new ShardingTest({
+        shards: 1,
+        mongos: 1,
+        keyFile: "jstests/libs/key1",
+        other: {shardOptions: {auth: ""}, shardAsReplicaSet: false}
+    });
     runTest(cluster);
     cluster.stop();
 }());

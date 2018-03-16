@@ -41,9 +41,9 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/thread_idle_callback.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/listen.h"
-#include "mongo/util/net/thread_idle_callback.h"
 
 namespace mongo {
 
@@ -179,6 +179,8 @@ public:
                 sub, "pageheap_reserve_count", "tcmalloc.pageheap_reserve_count");
             appendNumericPropertyIfAvailable(
                 sub, "pageheap_total_reserve_bytes", "tcmalloc.pageheap_total_reserve_bytes");
+            appendNumericPropertyIfAvailable(
+                sub, "spinlock_total_delay_ns", "tcmalloc.spinlock_total_delay_ns");
 
 #if MONGO_HAVE_GPERFTOOLS_SIZE_CLASS_STATS
             if (verbosity >= 2) {

@@ -33,7 +33,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_name.h"
-#include "mongo/db/commands/feature_compatibility_version_command_parser.h"
+#include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/operation_context.h"
 
@@ -54,6 +54,10 @@ SHA256Block getLogicalSessionUserDigestForLoggedInUser(const OperationContext* o
 
         const auto user = AuthorizationSession::get(client)->getSingleUser();
         invariant(user);
+
+        uassert(ErrorCodes::BadValue,
+                "Username too long to use with logical sessions",
+                user->getName().getFullName().length() < kMaximumUserNameLengthForLogicalSessions);
 
         return user->getDigest();
     } else {
@@ -189,7 +193,7 @@ Status SessionsCommandFCV34Status(StringData command) {
     StringBuilder sb;
     sb << command;
     sb << " is not available in featureCompatibilityVersion 3.4. See ";
-    sb << feature_compatibility_version::kDochubLink << " .";
+    sb << feature_compatibility_version_documentation::kCompatibilityLink << " .";
     return {ErrorCodes::InvalidOptions, sb.str()};
 }
 

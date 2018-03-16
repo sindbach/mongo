@@ -5,12 +5,10 @@ from __future__ import absolute_import
 
 import collections
 import random
-import sys
 import time
 import threading
 
 import bson
-import pymongo
 import pymongo.errors
 
 from buildscripts.resmokelib import errors
@@ -19,7 +17,7 @@ from buildscripts.resmokelib.testing.fixtures import replicaset
 from buildscripts.resmokelib.testing.fixtures import shardedcluster
 
 
-class ContinuousStepdown(interface.CustomBehavior):
+class ContinuousStepdown(interface.Hook):
     """The ContinuousStepdown hook regularly connects to replica sets and sends a replSetStepDown
     command.
     """
@@ -41,8 +39,8 @@ class ContinuousStepdown(interface.CustomBehavior):
             stepdown_duration_secs: the number of seconds to step down the primary.
             stepdown_interval_ms: the number of milliseconds between stepdowns.
         """
-        interface.CustomBehavior.__init__(self, hook_logger, fixture,
-                                          ContinuousStepdown.DESCRIPTION)
+        interface.Hook.__init__(self, hook_logger, fixture,
+                                ContinuousStepdown.DESCRIPTION)
 
         self._fixture = fixture
         self._config_stepdown = config_stepdown
@@ -67,25 +65,21 @@ class ContinuousStepdown(interface.CustomBehavior):
         self._stepdown_thread.stop()
 
     def before_test(self, test, test_report):
-        self._check_thread(test, test_report)
+        self._check_thread()
         self.logger.info("Resuming the stepdown thread.")
         self._stepdown_thread.resume()
 
     def after_test(self, test, test_report):
-        self._check_thread(test, test_report)
+        self._check_thread()
         self.logger.info("Pausing the stepdown thread.")
         self._stepdown_thread.pause()
         self.logger.info("Paused the stepdown thread.")
 
-    def _check_thread(self, test, test_report):
+    def _check_thread(self):
         if not self._stepdown_thread.is_alive():
             msg = "The stepdown thread is not running."
             self.logger.error(msg)
-            try:
-                raise errors.StopExecution(msg)
-            except errors.StopExecution:
-                test_report.addError(test, sys.exc_info())
-                raise
+            raise errors.ServerFailure(msg)
 
     def _add_fixture(self, fixture):
         if isinstance(fixture, replicaset.ReplicaSetFixture):

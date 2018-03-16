@@ -29,6 +29,9 @@
 #pragma once
 
 #include "mongo/base/status_with.h"
+#include "mongo/db/op_observer.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/roll_back_local_operations.h"
 #include "mongo/db/repl/rollback.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/stdx/functional.h"
@@ -61,19 +64,19 @@ class ReplicationProcess;
  * machinery. This class runs synchronously on the caller's thread.
  *
  * Order of actions:
- *   1. Transition to ROLLBACK
- *   2. Find the common point between the local and remote oplogs.
- *       a. Keep track of what is rolled back to provide a summary to the user
- *       b. Write rolled back documents to 'Rollback Files'
- *   3. Increment the Rollback ID (RBID)
- *   4. Write the common point as the 'OplogTruncateAfterPoint'
- *   5. Tell the storage engine to recover to the last stable timestamp
- *   6. Call recovery code
- *       a. Truncate the oplog at the common point
+ *   1. Transition to ROLLBACK.
+ *   2. Await background index completion.
+ *   3. Find the common point between the local and remote oplogs.
+ *       a. Keep track of what is rolled back to provide a summary to the user.
+ *       b. Write rolled back documents to 'Rollback Files'.
+ *   4. Increment the Rollback ID (RBID).
+ *   5. Tell the storage engine to recover to the last stable timestamp.
+ *   6. Write the oplog entry after the common point as the 'OplogTruncateAfterPoint'.
+ *   7. Call recovery code.
+ *       a. Truncate the oplog at the common point.
  *       b. Apply all oplog entries to the end of oplog.
- *   7. Check the shard identity document for roll back
- *   8. Clear the in-memory transaction table
- *   9. Transition to SECONDARY
+ *   8. Trigger the on-rollback op observer.
+ *   9. Transition to SECONDARY.
  *
  * If the node crashes while in rollback and the storage engine has not recovered to the last
  * stable timestamp yet, then rollback will simply restart against the new sync source upon restart.
@@ -112,12 +115,23 @@ public:
         /**
          * Function called after we recover to the stable timestamp.
          */
-        virtual void onRecoverToStableTimestamp() noexcept {}
+        virtual void onRecoverToStableTimestamp(Timestamp stableTimestamp) noexcept {}
+
+        /**
+         * Function called after we set the oplog truncate after point.
+         */
+        virtual void onSetOplogTruncateAfterPoint(Timestamp truncatePoint) noexcept {}
 
         /**
          * Function called after we recover from the oplog.
          */
         virtual void onRecoverFromOplog() noexcept {}
+
+        /**
+         * Function called after we have triggered the 'onRollback' OpObserver method.
+         */
+        virtual void onRollbackOpObserver(const OpObserver::RollbackObserverInfo& rbInfo) noexcept {
+        }
     };
 
     /**
@@ -145,6 +159,10 @@ public:
 
     /**
      * Runs the rollback algorithm.
+     *
+     * This method transitions to the ROLLBACK state and then performs the steps of the rollback
+     * process. It is required for this method to transition back to SECONDARY before returning,
+     * even if rollback did not complete successfully.
      */
     Status runRollback(OperationContext* opCtx);
 
@@ -152,6 +170,19 @@ public:
      * Cancels all outstanding work.
      */
     void shutdown();
+
+    /**
+     * Wrappers to expose private methods for testing.
+     */
+    StatusWith<std::set<NamespaceString>> _namespacesForOp_forTest(const OplogEntry& oplogEntry) {
+        return _namespacesForOp(oplogEntry);
+    }
+
+    /**
+     * Returns true if the rollback system should write out data files containing documents that
+     * will be deleted by rollback.
+     */
+    static bool shouldCreateDataFiles();
 
 private:
     /**
@@ -162,7 +193,15 @@ private:
     /**
      * Finds the common point between the local and remote oplogs.
      */
-    StatusWith<Timestamp> _findCommonPoint();
+    StatusWith<RollBackLocalOperations::RollbackCommonPoint> _findCommonPoint(
+        OperationContext* opCtx);
+
+    /**
+     * Finds the timestamp of the record after the common point to put into the oplog truncate
+     * after point.
+     */
+    Timestamp _findTruncateTimestamp(
+        OperationContext* opCtx, RollBackLocalOperations::RollbackCommonPoint commonPoint) const;
 
     /**
      * Uses the ReplicationCoordinator to transition the current member state to ROLLBACK.
@@ -185,31 +224,28 @@ private:
 
     /**
      * Recovers to the stable timestamp while holding the global exclusive lock.
+     * Returns the stable timestamp that the storage engine recovered to.
      */
-    Status _recoverToStableTimestamp(OperationContext* opCtx);
+    StatusWith<Timestamp> _recoverToStableTimestamp(OperationContext* opCtx);
 
     /**
      * Runs the oplog recovery logic. This involves applying oplog operations between the stable
      * timestamp and the common point.
      */
-    Status _oplogRecovery(OperationContext* opCtx);
+    Status _oplogRecovery(OperationContext* opCtx, Timestamp stableTimestamp);
 
     /**
-     * If we detected that we rolled back the shardIdentity document as part of this rollback
-     * then we must shut down the server to clear the in-memory ShardingState associated with the
-     * shardIdentity document.
-     *
-     * 'opCtx' cannot be null.
+     * Process a single oplog entry that is getting rolled back and update the necessary rollback
+     * info structures.
      */
-    void _checkShardIdentityRollback(OperationContext* opCtx);
+    Status _processRollbackOp(const OplogEntry& oplogEntry);
 
     /**
-     * In-memory sessions need to be reset after rollback, so they are forced to refetch from the
-     * transactions collection.
-     *
-     * 'opCtx' cannot be null.
+     * Called after we have successfully recovered to the stable timestamp and recovered from the
+     * oplog. Triggers the replication rollback OpObserver method, notifying other server subsystems
+     * that a rollback has occurred.
      */
-    void _resetSessions(OperationContext* opCtx);
+    Status _triggerOpObserver(OperationContext* opCtx);
 
     /**
      * Transitions the current member state from ROLLBACK to SECONDARY.
@@ -219,12 +255,20 @@ private:
      */
     void _transitionFromRollbackToSecondary(OperationContext* opCtx);
 
+    /**
+     * Returns a set of all collection namespaces affected by the given oplog operation. Does not
+     * handle 'applyOps' oplog entries, since it assumes their sub operations have already been
+     * extracted at a higher layer.
+     */
+    StatusWith<std::set<NamespaceString>> _namespacesForOp(const OplogEntry& oplogEntry);
+
     // All member variables are labeled with one of the following codes indicating the
     // synchronization rules for accessing them.
     //
     // (R)  Read-only in concurrent operation; no synchronization required.
     // (S)  Self-synchronizing; access in any way from any context.
     // (M)  Reads and writes guarded by _mutex.
+    // (N)  Should only ever be accessed by a single thread; no synchronization required.
 
     // Guards access to member variables.
     mutable stdx::mutex _mutex;  // (S)
@@ -252,6 +296,10 @@ private:
 
     // A listener that's called at various points throughout rollback.
     Listener* _listener;  // (R)
+
+    // Contains information about the rollback that will be passed along to the rollback OpObserver
+    // method.
+    OpObserver::RollbackObserverInfo _observerInfo = {};  // (N)
 };
 
 }  // namespace repl

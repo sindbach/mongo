@@ -4,6 +4,7 @@ import libdeps
 
 Import("env use_system_version_of_library usemozjs get_option")
 Import("wiredtiger")
+Import("mobile_se")
 
 boostSuffix = "-1.60.0"
 snappySuffix = '-1.1.3'
@@ -13,13 +14,13 @@ mozjsSuffix = '-45'
 yamlSuffix = '-0.5.3'
 icuSuffix = '-57.1'
 gperftoolsSuffix = '-2.5'
-timelibSuffix = '-2017.05'
-tomcryptSuffix = '-1.18.0-rc2'
+timelibSuffix = '-2018.01alpha1'
+tomcryptSuffix = '-1.18.1'
 benchmarkSuffix = '-1.3.0'
+sqliteSuffix = '-amalgamation-3190300'
 
 thirdPartyIncludePathList = [
     ('s2', '#/src/third_party/s2'),
-    ('tz', '#/src/third_party/tz'),
     ('timelib', '#/src/third_party/timelib' + timelibSuffix),
 ]
 
@@ -47,6 +48,10 @@ if not use_system_version_of_library('valgrind'):
 if not use_system_version_of_library('zlib'):
     thirdPartyIncludePathList.append(
         ('zlib', '#/src/third_party/zlib' + zlibSuffix))
+
+if not use_system_version_of_library('sqlite'):
+    thirdPartyIncludePathList.append(
+        ('sqlite', '#/src/third_party/sqlite' + sqliteSuffix))
 
 if not use_system_version_of_library('google-benchmark'):
     thirdPartyIncludePathList.append(
@@ -76,13 +81,9 @@ if not use_system_version_of_library('stemmer'):
 # Note that the wiredtiger.h header is generated, so
 # we want to look for it in the build directory not
 # the source directory.
-# The wiredtiger_ext.h is a static file in the source tree
-# In the system installs, wiredtiger.h and wiredtiger_ext.h are in the same directory
 if wiredtiger and not use_system_version_of_library('wiredtiger'):
     thirdPartyIncludePathList.append(
         ('wiredtiger', '$BUILD_DIR/third_party/wiredtiger'))
-    thirdPartyIncludePathList.append(
-        ('wiredtiger_ext', '#/src/third_party/wiredtiger/src/include'))
 
 if not use_system_version_of_library('yaml'):
     thirdPartyIncludePathList.append(
@@ -334,23 +335,6 @@ yamlEnv.Library(
         'shim_yaml.cpp',
     ])
 
-
-tzEnv = env.Clone()
-if env.TargetOSIs('solaris'):
-    tzEnv.InjectThirdPartyIncludePaths(libraries=['tz'])
-    tzEnv.SConscript('tz/SConscript', exports={ 'env' : tzEnv })
-    tzEnv = tzEnv.Clone(
-        LIBDEPS_INTERFACE=[
-            'tz/tz',
-        ])
-
-tzEnv.Library(
-    target='shim_tz',
-    source=[
-        'shim_tz.cpp',
-    ])
-
-
 timelibEnv = env.Clone();
 timelibEnv.InjectThirdPartyIncludePaths(libraries=['timelib'])
 timelibEnv.SConscript('timelib' + timelibSuffix + '/SConscript', exports={ 'env' : timelibEnv })
@@ -385,6 +369,26 @@ if wiredtiger:
         source=[
             'shim_wiredtiger.cpp'
         ])
+
+if use_system_version_of_library("sqlite"):
+    sqliteEnv = env.Clone(
+        SYSLIBDEPS=[
+            env['LIBDEPS_SQLITE_SYSLIBDEP']
+        ])
+else:
+    sqliteEnv = env.Clone()
+    sqliteEnv.InjectThirdPartyIncludePaths(libraries=['sqlite'])
+    sqliteEnv.SConscript('sqlite' + sqliteSuffix + '/SConscript', exports={ 'env' : sqliteEnv })
+    sqliteEnv = sqliteEnv.Clone(
+        LIBDEPS_INTERFACE=[
+            'sqlite' + sqliteSuffix + '/sqlite3',
+        ])
+
+sqliteEnv.Library(
+    target='shim_sqlite',
+    source=[
+        'shim_sqlite.cpp',
+    ])
 
 if use_system_version_of_library("asio"):
     # Normally, we would request LIBDEPS_ASIO_SYSLIBDEP here, but on most systems, the system asio

@@ -34,6 +34,7 @@
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/database_version_gen.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/notification.h"
@@ -171,6 +172,9 @@ private:
         bool shardingEnabled;
 
         StringMap<CollectionRoutingInfoEntry> collections;
+
+        // Optional while featureCompatibilityVersion 3.6 is supported.
+        boost::optional<DatabaseVersion> databaseVersion;
     };
 
     using DatabaseInfoMap = StringMap<std::shared_ptr<DatabaseInfoEntry>>;
@@ -242,15 +246,22 @@ private:
 class CachedDatabaseInfo {
 public:
     const ShardId& primaryId() const;
+    std::shared_ptr<Shard> primary() const {
+        return _primaryShard;
+    };
 
     bool shardingEnabled() const;
+
+    boost::optional<DatabaseVersion> databaseVersion() const;
 
 private:
     friend class CatalogCache;
 
-    CachedDatabaseInfo(std::shared_ptr<CatalogCache::DatabaseInfoEntry> db);
+    CachedDatabaseInfo(std::shared_ptr<CatalogCache::DatabaseInfoEntry> db,
+                       std::shared_ptr<Shard> primaryShard);
 
     std::shared_ptr<CatalogCache::DatabaseInfoEntry> _db;
+    std::shared_ptr<Shard> _primaryShard;
 };
 
 /**
@@ -260,12 +271,19 @@ private:
 class CachedCollectionRoutingInfo {
 public:
     /**
-     * Returns the ID of the primary shard for the database owining this collection, regardless of
-     * whether it is sharded or not.
+     * These serve the same purpose: to route to the primary shard for the collection's database.
+     * Paths that have been updated to attach a databaseVersion use db(). Once all paths have been
+     * updated, primaryId() and primary() can be deleted.
      */
     const ShardId& primaryId() const {
-        return _primaryId;
-    }
+        return _db.primaryId();
+    };
+    std::shared_ptr<Shard> primary() const {
+        return _db.primary();
+    };
+    CachedDatabaseInfo db() const {
+        return _db;
+    };
 
     /**
      * If the collection is sharded, returns a chunk manager for it. Otherwise, nullptr.
@@ -274,31 +292,22 @@ public:
         return _cm;
     }
 
-    /**
-     * If the collection is not sharded, returns its primary shard. Otherwise, nullptr.
-     */
-    std::shared_ptr<Shard> primary() const {
-        return _primary;
-    }
-
 private:
     friend class CatalogCache;
+    friend class CachedDatabaseInfo;
 
-    CachedCollectionRoutingInfo(ShardId primaryId, std::shared_ptr<ChunkManager> cm);
+    CachedCollectionRoutingInfo(NamespaceString nss,
+                                CachedDatabaseInfo db,
+                                std::shared_ptr<ChunkManager> cm);
 
-    CachedCollectionRoutingInfo(ShardId primaryId,
-                                NamespaceString nss,
-                                std::shared_ptr<Shard> primary);
-
-    // The id of the primary shard containing the database
-    ShardId _primaryId;
-
-    // Reference to the corresponding chunk manager (if sharded) or null
-    std::shared_ptr<ChunkManager> _cm;
-
-    // Reference to the primary of the database (if not sharded) or null
     NamespaceString _nss;
-    std::shared_ptr<Shard> _primary;
+
+    // Copy of the database's cached info.
+    CachedDatabaseInfo _db;
+
+    // Shared reference to the collection's cached chunk distribution if sharded, otherwise null.
+    // This is a shared reference rather than a copy because the chunk distribution can be large.
+    std::shared_ptr<ChunkManager> _cm;
 };
 
 }  // namespace mongo

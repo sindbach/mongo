@@ -33,6 +33,8 @@
 
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context_noop.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context_noop.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/record_store.h"
@@ -142,13 +144,19 @@ public:
 
     int itCountCommitted() {
         auto op = makeOperation();
-        ASSERT_OK(op->recoveryUnit()->setReadFromMajorityCommittedSnapshot());
+        op->recoveryUnit()->setReadConcernLevelAndReplicationMode(
+            repl::ReadConcernLevel::kMajorityReadConcern,
+            repl::ReplicationCoordinator::modeReplSet);
+        ASSERT_OK(op->recoveryUnit()->obtainMajorityCommittedSnapshot());
         return itCountOn(op);
     }
 
     boost::optional<Record> readRecordCommitted(RecordId id) {
         auto op = makeOperation();
-        ASSERT_OK(op->recoveryUnit()->setReadFromMajorityCommittedSnapshot());
+        op->recoveryUnit()->setReadConcernLevelAndReplicationMode(
+            repl::ReadConcernLevel::kMajorityReadConcern,
+            repl::ReplicationCoordinator::modeReplSet);
+        ASSERT_OK(op->recoveryUnit()->obtainMajorityCommittedSnapshot());
         auto cursor = rs->getCursor(op);
         auto record = cursor->seekExact(id);
         if (record)
@@ -190,50 +198,55 @@ private:
 
 TEST_F(SnapshotManagerTests, ConsistentIfNotSupported) {
     if (snapshotManager)
-        return;  // This test is only for engines that DON'T support SnapshotMangers.
+        return;  // This test is only for engines that DON'T support SnapshotManagers.
 
     auto op = makeOperation();
     auto ru = op->recoveryUnit();
-    ASSERT(!ru->isReadingFromMajorityCommittedSnapshot());
-    ASSERT(!ru->getMajorityCommittedSnapshot());
+    auto readConcernLevel = ru->getReadConcernLevel();
+    ASSERT(readConcernLevel != repl::ReadConcernLevel::kMajorityReadConcern &&
+           readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
 }
 
 TEST_F(SnapshotManagerTests, FailsWithNoCommittedSnapshot) {
     if (!snapshotManager)
-        return;  // This test is only for engines that DO support SnapshotMangers.
+        return;  // This test is only for engines that DO support SnapshotManagers.
 
     auto op = makeOperation();
     auto ru = op->recoveryUnit();
+    ru->setReadConcernLevelAndReplicationMode(repl::ReadConcernLevel::kMajorityReadConcern,
+                                              repl::ReplicationCoordinator::modeReplSet);
 
     // Before first snapshot is created.
-    ASSERT_EQ(ru->setReadFromMajorityCommittedSnapshot(),
+    ASSERT_EQ(ru->obtainMajorityCommittedSnapshot(),
               ErrorCodes::ReadConcernMajorityNotAvailableYet);
 
     // There is a snapshot but it isn't committed.
     auto snap = fetchAndIncrementTimestamp();
-    ASSERT_EQ(ru->setReadFromMajorityCommittedSnapshot(),
+    ASSERT_EQ(ru->obtainMajorityCommittedSnapshot(),
               ErrorCodes::ReadConcernMajorityNotAvailableYet);
 
     // Now there is a committed snapshot.
     snapshotManager->setCommittedSnapshot(snap);
-    ASSERT_OK(ru->setReadFromMajorityCommittedSnapshot());
+    ASSERT_OK(ru->obtainMajorityCommittedSnapshot());
 
     // Not anymore!
     snapshotManager->dropAllSnapshots();
-    ASSERT_EQ(ru->setReadFromMajorityCommittedSnapshot(),
+    ASSERT_EQ(ru->obtainMajorityCommittedSnapshot(),
               ErrorCodes::ReadConcernMajorityNotAvailableYet);
 }
 
 TEST_F(SnapshotManagerTests, FailsAfterDropAllSnapshotsWhileYielded) {
     if (!snapshotManager)
-        return;  // This test is only for engines that DO support SnapshotMangers.
+        return;  // This test is only for engines that DO support SnapshotManagers.
 
     auto op = makeOperation();
+    op->recoveryUnit()->setReadConcernLevelAndReplicationMode(
+        repl::ReadConcernLevel::kMajorityReadConcern, repl::ReplicationCoordinator::modeReplSet);
 
     // Start an operation using a committed snapshot.
     auto snap = fetchAndIncrementTimestamp();
     snapshotManager->setCommittedSnapshot(snap);
-    ASSERT_OK(op->recoveryUnit()->setReadFromMajorityCommittedSnapshot());
+    ASSERT_OK(op->recoveryUnit()->obtainMajorityCommittedSnapshot());
     ASSERT_EQ(itCountOn(op), 0);  // acquires a snapshot.
 
     // Everything still works until we abandon our snapshot.
@@ -248,7 +261,7 @@ TEST_F(SnapshotManagerTests, FailsAfterDropAllSnapshotsWhileYielded) {
 
 TEST_F(SnapshotManagerTests, BasicFunctionality) {
     if (!snapshotManager)
-        return;  // This test is only for engines that DO support SnapshotMangers.
+        return;  // This test is only for engines that DO support SnapshotManagers.
 
     auto snap0 = fetchAndIncrementTimestamp();
     snapshotManager->setCommittedSnapshot(snap0);
@@ -284,7 +297,9 @@ TEST_F(SnapshotManagerTests, BasicFunctionality) {
 
     // This op should keep its original snapshot until abandoned.
     auto longOp = makeOperation();
-    ASSERT_OK(longOp->recoveryUnit()->setReadFromMajorityCommittedSnapshot());
+    longOp->recoveryUnit()->setReadConcernLevelAndReplicationMode(
+        repl::ReadConcernLevel::kMajorityReadConcern, repl::ReplicationCoordinator::modeReplSet);
+    ASSERT_OK(longOp->recoveryUnit()->obtainMajorityCommittedSnapshot());
     ASSERT_EQ(itCountOn(longOp), 3);
 
     // If this fails, the snapshot contains writes that were rolled back.
@@ -301,7 +316,7 @@ TEST_F(SnapshotManagerTests, BasicFunctionality) {
 
 TEST_F(SnapshotManagerTests, UpdateAndDelete) {
     if (!snapshotManager)
-        return;  // This test is only for engines that DO support SnapshotMangers.
+        return;  // This test is only for engines that DO support SnapshotManagers.
 
     auto snapBeforeInsert = fetchAndIncrementTimestamp();
 

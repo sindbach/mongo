@@ -38,7 +38,7 @@
 
 namespace mongo {
 
-extern bool enableCollectionUUIDs;  // TODO(SERVER-27993) Replace based on upgrade/downgrade state.
+class CollatorFactoryInterface;
 
 /**
  * A CollectionUUID is a 128-bit unique identifier, per RFC 4122, v4. for a database collection.
@@ -74,6 +74,7 @@ struct CollectionOptions {
      */
     Status parse(const BSONObj& obj, ParseKind kind = parseForCommand);
 
+    void appendBSON(BSONObjBuilder* builder) const;
     BSONObj toBSON() const;
 
     /**
@@ -82,9 +83,21 @@ struct CollectionOptions {
      */
     static bool validMaxCappedDocs(long long* max);
 
+    /**
+     * Returns true if given options matches to this.
+     *
+     * Uses the collatorFactory to normalize the collation property being compared.
+     *
+     * Note: ignores idIndex property.
+     */
+    bool matchesStorageOptions(const CollectionOptions& other,
+                               CollatorFactoryInterface* collatorFactory) const;
+
     // ----
 
-    // Collection UUID. Will exist if featureCompatibilityVersion >= 3.6.
+    // Collection UUID. Present for all CollectionOptions parsed for storage, except for those
+    // corresponding to the system.namespaces and system.indexes collections on MMAP (see
+    // SERVER-29926, SERVER-30095).
     OptionalCollectionUUID uuid;
 
     bool capped = false;
@@ -120,6 +133,9 @@ struct CollectionOptions {
 
     // Default options for indexes created on the collection. Always owned or empty.
     BSONObj indexOptionDefaults;
+
+    // Index specs for the _id index.
+    BSONObj idIndex;
 
     // Always owned or empty.
     BSONObj validator;

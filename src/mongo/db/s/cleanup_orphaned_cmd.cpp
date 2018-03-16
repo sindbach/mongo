@@ -37,7 +37,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/field_parser.h"
 #include "mongo/db/jsobj.h"
@@ -45,6 +45,7 @@
 #include "mongo/db/range_arithmetic.h"
 #include "mongo/db/s/chunk_move_write_concern_options.h"
 #include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
@@ -164,8 +165,8 @@ class CleanupOrphanedCommand : public ErrmsgCommandDeprecated {
 public:
     CleanupOrphanedCommand() : ErrmsgCommandDeprecated("cleanupOrphaned") {}
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -174,7 +175,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::cleanupOrphaned)) {
             return Status(ErrorCodes::Unauthorized, "Not authorized for cleanupOrphaned command.");
@@ -226,8 +227,7 @@ public:
             return false;
         }
 
-        ChunkVersion unusedShardVersion;
-        uassertStatusOK(shardingState->refreshMetadataNow(opCtx, nss, &unusedShardVersion));
+        forceShardFilteringMetadataRefresh(opCtx, nss);
 
         BSONObj stoppedAtKey;
         CleanupResult cleanupResult =

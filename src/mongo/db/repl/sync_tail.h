@@ -35,26 +35,38 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/repl/multiapplier.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/stdx/functional.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/thread_pool.h"
 
 namespace mongo {
 
 class Database;
 class OperationContext;
+struct MultikeyPathInfo;
 
 namespace repl {
-class BackgroundSync;
 class ReplicationCoordinator;
 class OpTime;
 
 /**
- * "Normal" replica set syncing
+ * Used for oplog application on a replica set secondary.
+ * Primarily used to apply batches of operations fetched from a sync source during steady state
+ * replication and initial sync.
+ *
+ * When used for steady state replication, runs a thread that reads batches of operations from
+ * an oplog buffer (through the BackgroundSync interface) and applies the batch of operations.
  */
 class SyncTail {
 public:
-    using MultiSyncApplyFunc = stdx::function<void(MultiApplier::OperationPtrs* ops, SyncTail* st)>;
+    using MultiSyncApplyFunc =
+        stdx::function<Status(OperationContext* opCtx,
+                              MultiApplier::OperationPtrs* ops,
+                              SyncTail* st,
+                              WorkerMultikeyPathInfo* workerMultikeyPathInfo)>;
 
     /**
      * Type of function to increment "repl.apply.ops" server status metric.
@@ -88,14 +100,23 @@ public:
     using ApplyCommandInLockFn = stdx::function<Status(
         OperationContext*, const BSONObj&, OplogApplication::Mode oplogApplicationMode)>;
 
-    SyncTail(BackgroundSync* q, MultiSyncApplyFunc func);
-    SyncTail(BackgroundSync* q, MultiSyncApplyFunc func, std::unique_ptr<OldThreadPool> writerPool);
+    /**
+     *
+     * Constructs a SyncTail.
+     * During steady state replication, oplogApplication() obtains batches of operations to apply
+     * from 'observer'. It is not required to provide 'observer' at construction if we do not plan
+     * on using oplogApplication(). During the oplog application phase, the batch of operations is
+     * distributed across writer threads in 'writerPool'. Each writer thread applies its own vector
+     * of operations using 'func'. The writer thread pool is not owned by us.
+     */
+    SyncTail(OplogApplier::Observer* observer, MultiSyncApplyFunc func, ThreadPool* writerPool);
     virtual ~SyncTail();
 
     /**
      * Creates thread pool for writer tasks.
      */
-    static std::unique_ptr<OldThreadPool> makeWriterPool();
+    static std::unique_ptr<ThreadPool> makeWriterPool();
+    static std::unique_ptr<ThreadPool> makeWriterPool(int threadCount);
 
     /**
      * Applies the operation that is in param o.
@@ -113,8 +134,23 @@ public:
                             const BSONObj& o,
                             OplogApplication::Mode oplogApplicationMode);
 
-    void oplogApplication(ReplicationCoordinator* replCoord);
-    bool peek(OperationContext* opCtx, BSONObj* obj);
+    /**
+     * Runs oplog application in a loop until shutdown() is called.
+     * Retrieves operations from the OplogBuffer in batches that will be applied in parallel using
+     * multiApply().
+     */
+    void oplogApplication(OplogBuffer* oplogBuffer, ReplicationCoordinator* replCoord);
+
+    /**
+     * Shuts down oplogApplication() processing.
+     */
+    void shutdown();
+
+    /**
+     * Returns true if we are shutting down.
+     */
+    bool inShutdown() const;
+
 
     class OpQueue {
     public:
@@ -199,7 +235,10 @@ public:
      * If ops is empty on entry and nothing can be added yet, will wait up to a second before
      * returning true.
      */
-    bool tryPopAndWaitForMore(OperationContext* opCtx, OpQueue* ops, const BatchLimits& limits);
+    bool tryPopAndWaitForMore(OperationContext* opCtx,
+                              OplogBuffer* oplogBuffer,
+                              OpQueue* ops,
+                              const BatchLimits& limits);
 
     /**
      * Fetch a single document referenced in the operation from the sync source.
@@ -216,83 +255,67 @@ public:
 
     void setHostname(const std::string& hostname);
 
-    /**
-     * Returns writer thread pool.
-     * Used by ReplicationCoordinatorExternalStateImpl only.
-     */
-    OldThreadPool* getWriterPool();
-
     static AtomicInt32 replBatchLimitOperations;
+
+    /**
+     * Applies a batch of oplog entries by writing the oplog entries to the local oplog and then
+     * using a set of threads to apply the operations.
+     *
+     * If the batch application is successful, returns the optime of the last op applied, which
+     * should be the last op in the batch.
+     * Returns ErrorCodes::CannotApplyOplogWhilePrimary if the node has become primary.
+     *
+     * To provide crash resilience, this function will advance the persistent value of 'minValid'
+     * to at least the last optime of the batch. If 'minValid' is already greater than or equal
+     * to the last optime of this batch, it will not be updated.
+     */
+    StatusWith<OpTime> multiApply(OperationContext* opCtx, MultiApplier::Operations ops);
 
 protected:
     static const unsigned int replBatchLimitBytes = 100 * 1024 * 1024;
     static const int replBatchLimitSeconds = 1;
 
-    // Apply a batch of operations, using multiple threads.
-    // Returns the last OpTime applied during the apply batch, ops.end["ts"] basically.
-    OpTime multiApply(OperationContext* opCtx, MultiApplier::Operations ops);
-
 private:
+    /**
+     * Pops the operation at the front of the OplogBuffer.
+     * Updates stats on BackgroundSync.
+     */
+    void _consume(OperationContext* opCtx, OplogBuffer* oplogBuffer);
+
     class OpQueueBatcher;
 
     std::string _hostname;
 
-    BackgroundSync* _networkQueue;
+    OplogApplier::Observer* const _observer;
 
     // Function to use during applyOps
     MultiSyncApplyFunc _applyFunc;
 
-    // persistent pool of worker threads for writing ops to the databases
-    std::unique_ptr<OldThreadPool> _writerPool;
-};
+    // Pool of worker threads for writing ops to the databases.
+    // Not owned by us.
+    ThreadPool* const _writerPool;
 
-/**
- * Applies the operations described in the oplog entries contained in "ops" using the
- * "applyOperation" function.
- *
- * Returns ErrorCodes::CannotApplyOplogWhilePrimary if the node has become primary, and the OpTime
- * of the final operation applied otherwise.
- *
- * Shared between here and MultiApplier.
- */
-StatusWith<OpTime> multiApply(OperationContext* opCtx,
-                              OldThreadPool* workerPool,
-                              MultiApplier::Operations ops,
-                              MultiApplier::ApplyOperationFn applyOperation);
+    // Protects member data of SyncTail.
+    mutable stdx::mutex _mutex;
+
+    // Set to true if shutdown() has been called.
+    bool _inShutdown = false;
+};
 
 // These free functions are used by the thread pool workers to write ops to the db.
 // They consume the passed in OperationPtrs and callers should not make any assumptions about the
 // state of the container after calling. However, these functions cannot modify the pointed-to
 // operations because the OperationPtrs container contains const pointers.
-void multiSyncApply(MultiApplier::OperationPtrs* ops, SyncTail* st);
+Status multiSyncApply(OperationContext* opCtx,
+                      MultiApplier::OperationPtrs* ops,
+                      SyncTail* st,
+                      WorkerMultikeyPathInfo* workerMultikeyPathInfo);
 
-// Used by 3.2 initial sync.
-void multiInitialSyncApply_abortOnFailure(MultiApplier::OperationPtrs* ops, SyncTail* st);
-
-// Used by 3.4 initial sync.
-Status multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
+Status multiInitialSyncApply(OperationContext* opCtx,
+                             MultiApplier::OperationPtrs* ops,
                              SyncTail* st,
-                             AtomicUInt32* fetchCount);
-
-/**
- * Testing-only version of multiSyncApply that returns an error instead of aborting.
- * Accepts an external operation context and a function with the same argument list as
- * SyncTail::syncApply.
- */
-using SyncApplyFn = stdx::function<Status(
-    OperationContext* opCtx, const BSONObj& o, OplogApplication::Mode oplogApplicationMode)>;
-Status multiSyncApply_noAbort(OperationContext* opCtx,
-                              MultiApplier::OperationPtrs* ops,
-                              SyncApplyFn syncApply);
-
-/**
- * Testing-only version of multiInitialSyncApply that accepts an external operation context and
- * returns an error instead of aborting.
- */
-Status multiInitialSyncApply_noAbort(OperationContext* opCtx,
-                                     MultiApplier::OperationPtrs* ops,
-                                     SyncTail* st,
-                                     AtomicUInt32* fetchCount);
+                             AtomicUInt32* fetchCount,
+                             WorkerMultikeyPathInfo* workerMultikeyPathInfo);
 
 }  // namespace repl
 }  // namespace mongo

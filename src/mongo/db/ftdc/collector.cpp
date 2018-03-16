@@ -66,7 +66,8 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
     // batches. This is desirable because we want to be able to collect data in the middle of
     // batches that are taking a long time.
     auto opCtx = client->makeOperationContext();
-    opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
+    ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(opCtx->lockState());
+    opCtx->lockState()->setShouldAcquireTicket(false);
 
     for (auto& collector : _collectors) {
         BSONObjBuilder subObjBuilder(builder.subobjStart(collector->name()));

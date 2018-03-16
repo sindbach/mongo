@@ -43,7 +43,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/fsync.h"
+#include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
@@ -52,7 +52,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/util/background.h"
@@ -134,6 +134,7 @@ private:
 
         // Get all TTL indexes from every collection.
         for (const std::string& collectionNS : ttlCollections) {
+            UninterruptibleLockGuard noInterrupt(opCtx.lockState());
             NamespaceString collectionNSS(collectionNS);
             AutoGetCollection autoGetCollection(&opCtx, collectionNSS, MODE_IS);
             Collection* coll = autoGetCollection.getCollection();

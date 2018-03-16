@@ -38,6 +38,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -81,7 +82,7 @@ Status DurableViewCatalogImpl::iterate(OperationContext* opCtx, Callback callbac
         // Check the document is valid BSON, with only the expected fields.
         // Use the latest BSON validation version. Existing view definitions are allowed to contain
         // decimal data even if decimal is disabled.
-        fassertStatusOK(40224, validateBSON(data.data(), data.size(), BSONVersion::kLatest));
+        fassert(40224, validateBSON(data.data(), data.size(), BSONVersion::kLatest));
         BSONObj viewDef = data.toBson();
 
         // Check read definitions for correct structure, and refuse reading past invalid

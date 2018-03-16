@@ -63,7 +63,6 @@ public:
         const bool _locksReleased;
     };
 
-
     /**
      * General purpose RAII wrapper for a resource managed by the lock manager
      *
@@ -171,10 +170,9 @@ public:
      * Global lock.
      *
      * Grabs global resource lock. Allows further (recursive) acquisition of the global lock
-     * in any mode, see LockMode. An outermost GlobalLock calls abandonSnapshot() on destruction, so
-     * that the storage engine can release resources, such as snapshots or locks, that it may have
-     * acquired during the transaction. Note that any writes are committed in nested WriteUnitOfWork
-     * scopes, so write conflicts cannot happen when releasing the GlobalLock.
+     * in any mode, see LockMode. An outermost GlobalLock, when not in a WriteUnitOfWork, calls
+     * abandonSnapshot() on destruction. This allows the storage engine to release resources, such
+     * as snapshots or locks, that it may have acquired during the transaction.
      *
      * NOTE: Does not acquire flush lock.
      */
@@ -182,24 +180,29 @@ public:
     public:
         class EnqueueOnly {};
 
-        GlobalLock(OperationContext* opCtx, LockMode lockMode, unsigned timeoutMs);
+        GlobalLock(OperationContext* opCtx, LockMode lockMode, Date_t deadline);
         GlobalLock(GlobalLock&&);
 
         /**
          * Enqueues lock but does not block on lock acquisition.
-         * Call waitForLock() to complete locking process.
+         * Call waitForLockUntil() to complete locking process.
          *
          * Does not set that the global lock was taken on the GlobalLockAcquisitionTracker. Call
-         * waitForLock to do so.
+         * waitForLockUntil to do so.
          */
         GlobalLock(OperationContext* opCtx,
                    LockMode lockMode,
-                   unsigned timeoutMs,
+                   Date_t deadline,
                    EnqueueOnly enqueueOnly);
 
         ~GlobalLock() {
-            if (_result != LOCK_INVALID) {
-                if (isLocked() && _isOutermostLock) {
+            if (isLocked()) {
+                // Abandon our snapshot if destruction of the GlobalLock object results in actually
+                // unlocking the global lock. Recursive locking and the two-phase locking protocol
+                // may prevent lock release.
+                const bool willReleaseLock = _isOutermostLock &&
+                    !(_opCtx->lockState() && _opCtx->lockState()->inAWriteUnitOfWork());
+                if (willReleaseLock) {
                     _opCtx->recoveryUnit()->abandonSnapshot();
                 }
                 _unlock();
@@ -210,14 +213,14 @@ public:
          * Waits for lock to be granted. Sets that the global lock was taken on the
          * GlobalLockAcquisitionTracker.
          */
-        void waitForLock(unsigned timeoutMs);
+        void waitForLockUntil(Date_t deadline);
 
         bool isLocked() const {
             return _result == LOCK_OK;
         }
 
     private:
-        void _enqueue(LockMode lockMode, unsigned timeoutMs);
+        void _enqueue(LockMode lockMode, Date_t deadline);
         void _unlock();
 
         OperationContext* const _opCtx;
@@ -225,7 +228,6 @@ public:
         ResourceLock _pbwm;
         const bool _isOutermostLock;
     };
-
 
     /**
      * Global exclusive lock
@@ -236,14 +238,13 @@ public:
      */
     class GlobalWrite : public GlobalLock {
     public:
-        explicit GlobalWrite(OperationContext* opCtx, unsigned timeoutMs = UINT_MAX)
-            : GlobalLock(opCtx, MODE_X, timeoutMs) {
+        explicit GlobalWrite(OperationContext* opCtx, Date_t deadline = Date_t::max())
+            : GlobalLock(opCtx, MODE_X, deadline) {
             if (isLocked()) {
                 opCtx->lockState()->lockMMAPV1Flush();
             }
         }
     };
-
 
     /**
      * Global shared lock
@@ -254,14 +255,13 @@ public:
      */
     class GlobalRead : public GlobalLock {
     public:
-        explicit GlobalRead(OperationContext* opCtx, unsigned timeoutMs = UINT_MAX)
-            : GlobalLock(opCtx, MODE_S, timeoutMs) {
+        explicit GlobalRead(OperationContext* opCtx, Date_t deadline = Date_t::max())
+            : GlobalLock(opCtx, MODE_S, deadline) {
             if (isLocked()) {
                 opCtx->lockState()->lockMMAPV1Flush();
             }
         }
     };
-
 
     /**
      * Database lock with support for collection- and document-level locking
@@ -279,7 +279,10 @@ public:
      */
     class DBLock {
     public:
-        DBLock(OperationContext* opCtx, StringData db, LockMode mode);
+        DBLock(OperationContext* opCtx,
+               StringData db,
+               LockMode mode,
+               Date_t deadline = Date_t::max());
         DBLock(DBLock&&);
         ~DBLock();
 
@@ -291,9 +294,14 @@ public:
          */
         void relockWithMode(LockMode newMode);
 
+        bool isLocked() const {
+            return _result == LOCK_OK;
+        }
+
     private:
         const ResourceId _id;
         OperationContext* const _opCtx;
+        LockResult _result;
 
         // May be changed through relockWithMode. The global lock mode won't change though,
         // because we never change from IS/S to IX/X or vice versa, just convert locks from
@@ -303,7 +311,6 @@ public:
         // Acquires the global lock on our behalf.
         GlobalLock _globalLock;
     };
-
 
     /**
      * Collection lock with support for document-level locking
@@ -323,7 +330,11 @@ public:
         MONGO_DISALLOW_COPYING(CollectionLock);
 
     public:
-        CollectionLock(Locker* lockState, StringData ns, LockMode mode);
+        CollectionLock(Locker* lockState,
+                       StringData ns,
+                       LockMode mode,
+                       Date_t deadline = Date_t::max());
+        CollectionLock(CollectionLock&&);
         ~CollectionLock();
 
         /**
@@ -337,9 +348,14 @@ public:
          */
         void relockAsDatabaseExclusive(Lock::DBLock& dbLock);
 
+        bool isLocked() const {
+            return _result == LOCK_OK;
+        }
+
     private:
         const ResourceId _id;
-        Locker* const _lockState;
+        LockResult _result;
+        Locker* _lockState;
     };
 
     /**
@@ -361,7 +377,6 @@ public:
         bool _serialized;
     };
 
-
     /**
      * Turn on "parallel batch writer mode" by locking the global ParallelBatchWriterMode
      * resource in exclusive mode. This mode is off by default.
@@ -373,12 +388,11 @@ public:
 
     public:
         explicit ParallelBatchWriterMode(Locker* lockState);
-        ~ParallelBatchWriterMode();
 
     private:
         ResourceLock _pbwm;
-        Locker* const _lockState;
-        const bool _orginalShouldConflict;
+        ShouldNotConflictWithSecondaryBatchApplicationBlock _shouldNotConflictBlock;
     };
 };
-}
+
+}  // namespace mongo

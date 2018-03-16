@@ -1,5 +1,6 @@
 (function() {
     "use strict";
+    load("jstests/libs/feature_compatibility_version.js");
     var standalone = MongoRunner.runMongod();
     var adminDB = standalone.getDB("admin");
 
@@ -17,7 +18,7 @@
     var insertFCVDocument = {
         op: "i",
         ns: "admin.system.version",
-        o: {_id: "featureCompatibilityVersion", version: "3.6"}
+        o: {_id: "featureCompatibilityVersion", version: latestFCV}
     };
     var dropOriginalAdminSystemVersionCollection =
         {op: "c", ns: "admin.$cmd", ui: originalUUID, o: {drop: "admin.tmp_system_version"}};
@@ -36,4 +37,5 @@
     assert.eq(1, res.cursor.firstBatch.length);
     assert.eq(newUUID, res.cursor.firstBatch[0].info.uuid);
 
+    MongoRunner.stopMongod(standalone);
 })();

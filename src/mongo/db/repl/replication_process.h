@@ -78,7 +78,8 @@ public:
     /**
      * Rollback ID is an increasing counter of how many rollbacks have occurred on this server.
      */
-    StatusWith<int> getRollbackID(OperationContext* opCtx);
+    Status refreshRollbackID(OperationContext* opCtx);
+    int getRollbackID() const;
     Status initializeRollbackID(OperationContext* opCtx);
     Status incrementRollbackID(OperationContext* opCtx);
 
@@ -101,7 +102,7 @@ private:
     // (M)  Reads and writes guarded by _mutex.
 
     // Guards access to member variables.
-    stdx::mutex _mutex;
+    mutable stdx::mutex _mutex;
 
     // Used to access the storage layer.
     StorageInterface* const _storageInterface;  // (R)

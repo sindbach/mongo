@@ -237,6 +237,7 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
 
     if (!startSetIfSupportsReadMajority(replTest)) {
         jsTest.log("skipping test since storage engine doesn't support committed reads");
+        replTest.stopSet();
         return;
     }
 
@@ -349,4 +350,6 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
             threads.forEach(thread => thread.join());
         }
     }
+
+    replTest.stopSet();
 }());

@@ -66,11 +66,12 @@ MONGO_FP_DECLARE(maxTimeNeverTimeOut);
 //
 // {configureFailPoint: "checkForInterruptFail",
 //  mode: "alwaysOn",
-//  data: {conn: 17, chance: .01}}
+//  data: {threadName: "threadName", chance: .01}}
 //
-// Both data fields must be specified.  In the above example, all interrupt points on connection 17
-// will generate a kill on the current operation with probability p(.01), including interrupt points
-// of nested operations.  "chance" must be a double between 0 and 1, inclusive.
+// Both data fields must be specified. In the above example, all interrupt points on the thread with
+// name 'threadName' will generate a kill on the current operation with probability p(.01),
+// including interrupt points of nested operations. "chance" must be a double between 0 and 1,
+// inclusive.
 MONGO_FP_DECLARE(checkForInterruptFail);
 
 }  // namespace
@@ -99,17 +100,6 @@ Microseconds OperationContext::computeMaxTimeFromDeadline(Date_t when) {
         }
     }
     return maxTime;
-}
-
-OperationContext::DeadlineStash::DeadlineStash(OperationContext* opCtx)
-    : _opCtx(opCtx), _originalDeadline(_opCtx->getDeadline()) {
-    _opCtx->_deadline = Date_t::max();
-    _opCtx->_maxTime = _opCtx->computeMaxTimeFromDeadline(Date_t::max());
-}
-
-OperationContext::DeadlineStash::~DeadlineStash() {
-    _opCtx->_deadline = _originalDeadline;
-    _opCtx->_maxTime = _opCtx->computeMaxTimeFromDeadline(_originalDeadline);
 }
 
 void OperationContext::setDeadlineByDate(Date_t when) {
@@ -179,17 +169,15 @@ namespace {
 // Helper function for checkForInterrupt fail point.  Decides whether the operation currently
 // being run by the given Client meet the (probabilistic) conditions for interruption as
 // specified in the fail point info.
-bool opShouldFail(const OperationContext* opCtx, const BSONObj& failPointInfo) {
+bool opShouldFail(Client* client, const BSONObj& failPointInfo) {
     // Only target the client with the specified connection number.
-    if (opCtx->getClient()->getConnectionId() != failPointInfo["conn"].safeNumberLong()) {
+    if (client->desc() != failPointInfo["threadName"].valuestrsafe()) {
         return false;
     }
 
     // Return true with (approx) probability p = "chance".  Recall: 0 <= chance <= 1.
-    double next = static_cast<double>(std::abs(opCtx->getClient()->getPrng().nextInt64()));
-    double upperBound =
-        std::numeric_limits<int64_t>::max() * failPointInfo["chance"].numberDouble();
-    if (next > upperBound) {
+    double next = client->getPrng().nextCanonicalDouble();
+    if (next > failPointInfo["chance"].numberDouble()) {
         return false;
     }
     return true;
@@ -211,7 +199,7 @@ Status OperationContext::checkForInterruptNoAssert() {
     }
 
     MONGO_FAIL_POINT_BLOCK(checkForInterruptFail, scopedFailPoint) {
-        if (opShouldFail(this, scopedFailPoint.getData())) {
+        if (opShouldFail(getClient(), scopedFailPoint.getData())) {
             log() << "set pending kill on op " << getOpID() << ", for checkForInterruptFail";
             markKilled();
         }
@@ -393,15 +381,17 @@ OperationContext::RecoveryUnitState OperationContext::setRecoveryUnit(RecoveryUn
     return oldState;
 }
 
-std::unique_ptr<Locker> OperationContext::releaseLockState() {
-    dassert(_locker);
-    return std::move(_locker);
+void OperationContext::setLockState(std::unique_ptr<Locker> locker) {
+    invariant(!_locker);
+    invariant(locker);
+    _locker = std::move(locker);
 }
 
-void OperationContext::setLockState(std::unique_ptr<Locker> locker) {
-    dassert(!_locker);
-    dassert(locker);
-    _locker = std::move(locker);
+std::unique_ptr<Locker> OperationContext::swapLockState(std::unique_ptr<Locker> locker) {
+    invariant(_locker);
+    invariant(locker);
+    _locker.swap(locker);
+    return locker;
 }
 
 Date_t OperationContext::getExpirationDateForWaitForValue(Milliseconds waitFor) {

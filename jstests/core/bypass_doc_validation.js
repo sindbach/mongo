@@ -15,6 +15,11 @@
 (function() {
     'use strict';
 
+    // For isWiredTiger.
+    load("jstests/concurrency/fsm_workload_helpers/server_types.js");
+    // For isReplSet
+    load("jstests/libs/fixture_helpers.js");
+
     function assertFailsValidation(res) {
         if (res instanceof WriteResult || res instanceof BulkWriteResult) {
             assert.writeErrorWithCode(res, ErrorCodes.DocumentValidationFailure, tojson(res));
@@ -43,19 +48,24 @@
         const isMongos = db.runCommand({isdbgrid: 1}).isdbgrid;
         // Test applyOps with a simple insert if not on mongos.
         if (!isMongos) {
-            const op = [{h: 1, v: 2, op: 'i', ns: coll.getFullName(), o: {_id: 9}}];
+            const op = [{op: 'i', ns: coll.getFullName(), o: {_id: 9}}];
             assertFailsValidation(myDb.runCommand({applyOps: op, bypassDocumentValidation: false}));
             assert.eq(0, coll.count({_id: 9}));
             assert.commandWorked(myDb.runCommand({applyOps: op, bypassDocumentValidation: true}));
             assert.eq(1, coll.count({_id: 9}));
         }
 
-        // Test doTxn with a simple insert if not on mongos.
-        if (!isMongos) {
-            const op = [{h: 1, v: 2, op: 'i', ns: coll.getFullName(), o: {_id: 10}}];
-            assertFailsValidation(myDb.runCommand({doTxn: op, bypassDocumentValidation: false}));
+        // Test doTxn with a simple insert if a replica set, not on mongos and the storage engine
+        // is WiredTiger.
+        if (FixtureHelpers.isReplSet(db) && !isMongos && isWiredTiger(db)) {
+            const session = db.getMongo().startSession();
+            const sessionDb = session.getDatabase(myDb.getName());
+            const op = [{op: 'i', ns: coll.getFullName(), o: {_id: 10}}];
+            assertFailsValidation(sessionDb.runCommand(
+                {doTxn: op, bypassDocumentValidation: false, txnNumber: NumberLong("0")}));
             assert.eq(0, coll.count({_id: 10}));
-            assert.commandWorked(myDb.runCommand({doTxn: op, bypassDocumentValidation: true}));
+            assert.commandWorked(sessionDb.runCommand(
+                {doTxn: op, bypassDocumentValidation: true, txnNumber: NumberLong("1")}));
             assert.eq(1, coll.count({_id: 10}));
         }
 

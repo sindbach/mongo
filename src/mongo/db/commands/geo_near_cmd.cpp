@@ -54,7 +54,6 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -74,11 +73,8 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    bool slaveOk() const {
-        return true;
-    }
-    bool slaveOverrideOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     bool supportsReadConcern(const std::string& dbName,
                              const BSONObj& cmdObj,
@@ -94,13 +90,13 @@ public:
         return FindCommon::kInitReplyBufferSize;
     }
 
-    void help(stringstream& h) const {
-        h << "http://dochub.mongodb.org/core/geo#GeospatialIndexing-geoNearCommand";
+    std::string help() const override {
+        return "http://dochub.mongodb.org/core/geo#GeospatialIndexing-geoNearCommand";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
@@ -307,9 +303,8 @@ public:
 
             return CommandHelpers::appendCommandStatus(
                 result,
-                Status(ErrorCodes::OperationFailed,
-                       str::stream() << "Executor error during geoNear command: "
-                                     << WorkingSetCommon::toStatusString(currObj)));
+                WorkingSetCommon::getMemberObjectStatus(currObj).withContext(
+                    "Executor error during geoNear command"));
         }
 
         PlanSummaryStats summary;

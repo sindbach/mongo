@@ -9,7 +9,6 @@ import os
 import os.path
 import unittest
 
-from ... import config
 from ... import logging
 from ...utils import registry
 
@@ -23,7 +22,7 @@ def make_test_case(test_kind, *args, **kwargs):
     """
 
     if test_kind not in _TEST_CASES:
-        raise ValueError("Unknown test kind '%s'" % (test_kind))
+        raise ValueError("Unknown test kind '%s'" % test_kind)
     return _TEST_CASES[test_kind](*args, **kwargs)
 
 
@@ -56,6 +55,9 @@ class TestCase(unittest.TestCase):
         # logger is an instance of TestQueueLogger. When the TestCase is created by a hook
         # implementation it is an instance of BaseLogger.
         self.logger = logger
+        # Used to store the logger when overridden by a test logger in Report.startTest().
+        self._original_logger = None
+
         self.test_kind = test_kind
         self.test_name = test_name
 
@@ -88,7 +90,23 @@ class TestCase(unittest.TestCase):
     def shortDescription(self):
         return "%s %s" % (self.test_kind, self.test_name)
 
-    def configure(self, fixture, *args, **kwargs):
+    def override_logger(self, new_logger):
+        """
+        Overrides this instance's logger with a new logger.
+
+        This method is used by the repport to set the test logger.
+        """
+        assert not self._original_logger, "Logger already overridden"
+        self._original_logger = self.logger
+        self.logger = new_logger
+
+    def reset_logger(self):
+        """Resets this instance's logger to its original value."""
+        assert self._original_logger, "Logger was not overridden"
+        self.logger = self._original_logger
+        self._original_logger = None
+
+    def configure(self, fixture, *args, **kwargs):  # pylint: disable=unused-argument
         """
         Stores 'fixture' as an attribute for later use during execution.
         """
@@ -103,6 +121,27 @@ class TestCase(unittest.TestCase):
         Runs the specified test.
         """
         raise NotImplementedError("run_test must be implemented by TestCase subclasses")
+
+    def as_command(self):
+        """
+        Returns the command invocation used to run the test.
+        """
+        raise NotImplementedError("as_command must be implemented by TestCase subclasses")
+
+
+class ProcessTestCase(TestCase):  # pylint: disable=abstract-method
+    """Base class for TestCases that executes an external process."""
+
+    def run_test(self):
+        try:
+            shell = self._make_process()
+            self._execute(shell)
+        except self.failureException:
+            raise
+        except:
+            self.logger.exception("Encountered an error running %s %s",
+                                  self.test_kind, self.basename())
+            raise
 
     def as_command(self):
         """

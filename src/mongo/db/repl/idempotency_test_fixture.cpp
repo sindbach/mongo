@@ -52,7 +52,6 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_interface_local.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/util/md5.hpp"
@@ -83,6 +82,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                             object,                           // o
                             object2,                          // o2
                             sessionInfo,                      // sessionInfo
+                            boost::none,                      // upsert
                             wallClockTime,                    // wall clock time
                             stmtId,                           // statement id
                             boost::none,   // optime of previous write within same transaction

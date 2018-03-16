@@ -34,8 +34,8 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/db/bson/dotted_path_support.h"
-#include "mongo/db/catalog/catalog_raii.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -215,9 +215,8 @@ StatusWith<std::vector<BSONObj>> splitVector(OperationContext* opCtx,
             }
 
             if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
-                return {ErrorCodes::OperationFailed,
-                        "Executor error during splitVector command: " +
-                            WorkingSetCommon::toStatusString(currKey)};
+                return WorkingSetCommon::getMemberObjectStatus(currKey).withContext(
+                    "Executor error during splitVector command");
             }
 
             if (!force)

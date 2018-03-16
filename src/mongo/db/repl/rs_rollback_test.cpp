@@ -33,8 +33,8 @@
 #include <initializer_list>
 #include <utility>
 
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_create.h"
@@ -77,7 +77,6 @@ private:
 
 void RSRollbackTest::setUp() {
     RollbackTest::setUp();
-    enableCollectionUUIDs = true;
     auto observerRegistry = stdx::make_unique<OpObserverRegistry>();
     observerRegistry->addObserver(stdx::make_unique<UUIDCatalogObserver>());
     _serviceContextMongoDTest.getServiceContext()->setOpObserver(

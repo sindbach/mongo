@@ -69,6 +69,7 @@ public:
             HostTypeRequirement::kNone,
             _mergingPresorted ? DiskUseRequirement::kNoDiskUse : DiskUseRequirement::kWritesTmpData,
             _mergingPresorted ? FacetRequirement::kNotAllowed : FacetRequirement::kAllowed,
+            TransactionRequirement::kAllowed,
             _mergingPresorted ? ChangeStreamRequirement::kWhitelist
                               : ChangeStreamRequirement::kBlacklist);
 
@@ -155,9 +156,6 @@ protected:
     void doDispose() final;
 
 private:
-    // This is used to merge pre-sorted results from a DocumentSourceMergeCursors.
-    class IteratorFromCursor;
-
     using MySorter = Sorter<Value, Document>;
 
     // For MySorter.

@@ -41,7 +41,7 @@ ClusterClientCursorMock::ClusterClientCursorMock(boost::optional<LogicalSessionI
     : _killCallback(std::move(killCallback)), _lsid(lsid) {}
 
 ClusterClientCursorMock::~ClusterClientCursorMock() {
-    invariant(_exhausted || _killed);
+    invariant((_exhausted && _remotesExhausted) || _killed);
 }
 
 StatusWith<ClusterQueryResult> ClusterClientCursorMock::next(
@@ -64,6 +64,10 @@ StatusWith<ClusterQueryResult> ClusterClientCursorMock::next(
     return out.getValue();
 }
 
+BSONObj ClusterClientCursorMock::getOriginatingCommand() const {
+    return _originatingCommand;
+}
+
 long long ClusterClientCursorMock::getNumReturnedSoFar() const {
     return _numReturnedSoFar;
 }
@@ -81,14 +85,6 @@ bool ClusterClientCursorMock::isTailable() const {
 
 bool ClusterClientCursorMock::isTailableAndAwaitData() const {
     return false;
-}
-
-namespace {
-const std::vector<UserName> emptyAuthenticatedUsers{};
-}  // namespace
-
-UserNameIterator ClusterClientCursorMock::getAuthenticatedUsers() const {
-    return makeUserNameIterator(emptyAuthenticatedUsers.begin(), emptyAuthenticatedUsers.end());
 }
 
 void ClusterClientCursorMock::queueResult(const ClusterQueryResult& result) {

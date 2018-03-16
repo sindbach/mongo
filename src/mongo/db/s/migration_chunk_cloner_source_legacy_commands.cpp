@@ -35,13 +35,13 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/migration_chunk_cloner_source_legacy.h"
 #include "mongo/db/s/migration_source_manager.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/write_concern.h"
 
 /**
@@ -60,9 +60,7 @@ class AutoGetActiveCloner {
 
 public:
     AutoGetActiveCloner(OperationContext* opCtx, const MigrationSessionId& migrationSessionId) {
-        ShardingState* const gss = ShardingState::get(opCtx);
-
-        const auto nss = gss->getActiveDonateChunkNss();
+        const auto nss = ActiveMigrationsRegistry::get(opCtx).getActiveDonateChunkNss();
         uassert(ErrorCodes::NotYetInitialized, "No active migrations were found", nss);
 
         // Once the collection is locked, the migration status cannot change
@@ -117,16 +115,16 @@ class InitialCloneCommand : public BasicCommand {
 public:
     InitialCloneCommand() : BasicCommand("_migrateClone") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool adminOnly() const {
@@ -135,7 +133,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
@@ -179,16 +177,16 @@ class TransferModsCommand : public BasicCommand {
 public:
     TransferModsCommand() : BasicCommand("_transferMods") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool adminOnly() const {
@@ -197,7 +195,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
@@ -228,16 +226,16 @@ class MigrateSessionCommand : public BasicCommand {
 public:
     MigrateSessionCommand() : BasicCommand("_getNextSessionMods") {}
 
-    void help(std::stringstream& h) const {
-        h << "internal";
+    std::string help() const override {
+        return "internal";
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool adminOnly() const {
@@ -246,7 +244,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));

@@ -1,6 +1,6 @@
 /**
  *  Starts standalone RS with skipShardingConfigurationChecks.
- *  @tags: [requires_persistence]
+ *  @tags: [requires_persistence, requires_replication, requires_sharding]
  */
 (function() {
     'use strict';
@@ -49,4 +49,5 @@
     shardRS.startSet({}, true);
     expectState(shardRS, ReplSetTest.State.PRIMARY);
     shardRS.stopSet();
+    MongoRunner.stopMongos(st.s);
 })();

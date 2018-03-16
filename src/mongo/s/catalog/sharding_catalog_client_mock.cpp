@@ -80,7 +80,7 @@ StatusWith<repl::OpTimeWith<DatabaseType>> ShardingCatalogClientMock::getDatabas
 }
 
 StatusWith<repl::OpTimeWith<CollectionType>> ShardingCatalogClientMock::getCollection(
-    OperationContext* opCtx, const string& collNs, repl::ReadConcernLevel readConcernLevel) {
+    OperationContext* opCtx, const NamespaceString& nss, repl::ReadConcernLevel readConcernLevel) {
     return {ErrorCodes::InternalError, "Method not implemented"};
 }
 
@@ -90,6 +90,11 @@ StatusWith<std::vector<CollectionType>> ShardingCatalogClientMock::getCollection
     repl::OpTime* optime,
     repl::ReadConcernLevel readConcernLevel) {
     return {ErrorCodes::InternalError, "Method not implemented"};
+}
+
+std::vector<NamespaceString> ShardingCatalogClientMock::getAllShardedCollectionsForDb(
+    OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) {
+    return {};
 }
 
 StatusWith<std::vector<std::string>> ShardingCatalogClientMock::getDatabasesForShard(
@@ -108,7 +113,7 @@ StatusWith<std::vector<ChunkType>> ShardingCatalogClientMock::getChunks(
 }
 
 StatusWith<std::vector<TagsType>> ShardingCatalogClientMock::getTagsForCollection(
-    OperationContext* opCtx, const string& collectionNs) {
+    OperationContext* opCtx, const NamespaceString& nss) {
     return {ErrorCodes::InternalError, "Method not implemented"};
 }
 
@@ -135,7 +140,7 @@ bool ShardingCatalogClientMock::runUserManagementReadCommand(OperationContext* o
 Status ShardingCatalogClientMock::applyChunkOpsDeprecated(OperationContext* opCtx,
                                                           const BSONArray& updateOps,
                                                           const BSONArray& preCondition,
-                                                          const std::string& nss,
+                                                          const NamespaceString& nss,
                                                           const ChunkVersion& lastChunkVersion,
                                                           const WriteConcernOptions& writeConcern,
                                                           repl::ReadConcernLevel readConcern) {
@@ -150,8 +155,8 @@ Status ShardingCatalogClientMock::logAction(OperationContext* opCtx,
 }
 
 Status ShardingCatalogClientMock::logChange(OperationContext* opCtx,
-                                            const string& what,
-                                            const string& ns,
+                                            const std::string& what,
+                                            const std::string& ns,
                                             const BSONObj& detail,
                                             const WriteConcernOptions& writeConcern) {
     return {ErrorCodes::InternalError, "Method not implemented"};
@@ -172,7 +177,7 @@ void ShardingCatalogClientMock::writeConfigServerDirect(OperationContext* opCtx,
                                                         BatchedCommandResponse* response) {}
 
 Status ShardingCatalogClientMock::insertConfigDocument(OperationContext* opCtx,
-                                                       const std::string& ns,
+                                                       const NamespaceString& nss,
                                                        const BSONObj& doc,
                                                        const WriteConcernOptions& writeConcern) {
     return {ErrorCodes::InternalError, "Method not implemented"};
@@ -180,7 +185,7 @@ Status ShardingCatalogClientMock::insertConfigDocument(OperationContext* opCtx,
 
 StatusWith<bool> ShardingCatalogClientMock::updateConfigDocument(
     OperationContext* opCtx,
-    const std::string& ns,
+    const NamespaceString& nss,
     const BSONObj& query,
     const BSONObj& update,
     bool upsert,
@@ -189,7 +194,7 @@ StatusWith<bool> ShardingCatalogClientMock::updateConfigDocument(
 }
 
 Status ShardingCatalogClientMock::removeConfigDocuments(OperationContext* opCtx,
-                                                        const std::string& ns,
+                                                        const NamespaceString& nss,
                                                         const BSONObj& query,
                                                         const WriteConcernOptions& writeConcern) {
     return {ErrorCodes::InternalError, "Method not implemented"};

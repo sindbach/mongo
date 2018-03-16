@@ -30,6 +30,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/op_observer_noop.h"
 #include "mongo/db/repl/sync_tail.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 
@@ -41,22 +42,81 @@ class OperationContext;
 namespace repl {
 
 class ReplicationProcess;
-class StorageInterfaceMock;
+
+/**
+ * OpObserver for SyncTail test fixture.
+ */
+class SyncTailOpObserver : public OpObserverNoop {
+public:
+    /**
+     * This function is called whenever SyncTail inserts documents into a collection.
+     */
+    void onInserts(OperationContext* opCtx,
+                   const NamespaceString& nss,
+                   OptionalCollectionUUID uuid,
+                   std::vector<InsertStatement>::const_iterator begin,
+                   std::vector<InsertStatement>::const_iterator end,
+                   bool fromMigrate) override;
+
+    /**
+     * This function is called whenever SyncTail deletes a document from a collection.
+     */
+    void onDelete(OperationContext* opCtx,
+                  const NamespaceString& nss,
+                  OptionalCollectionUUID uuid,
+                  StmtId stmtId,
+                  bool fromMigrate,
+                  const boost::optional<BSONObj>& deletedDoc) override;
+
+    /**
+     * Called when SyncTail creates a collection.
+     */
+    void onCreateCollection(OperationContext* opCtx,
+                            Collection* coll,
+                            const NamespaceString& collectionName,
+                            const CollectionOptions& options,
+                            const BSONObj& idIndex) override;
+
+    // Hooks for OpObserver functions. Defaults to a no-op function but may be overridden to check
+    // actual documents mutated.
+    std::function<void(OperationContext*, const NamespaceString&, const std::vector<BSONObj>&)>
+        onInsertsFn;
+
+    std::function<void(OperationContext*,
+                       const NamespaceString&,
+                       OptionalCollectionUUID,
+                       StmtId,
+                       bool,
+                       const boost::optional<BSONObj>&)>
+        onDeleteFn;
+
+    std::function<void(OperationContext*,
+                       Collection*,
+                       const NamespaceString&,
+                       const CollectionOptions&,
+                       const BSONObj&)>
+        onCreateCollectionFn;
+};
 
 class SyncTailTest : public ServiceContextMongoDTest {
 protected:
-    void _testSyncApplyInsertDocument(ErrorCodes::Error expectedError,
-                                      const BSONObj* explicitOp = nullptr);
+    void _testSyncApplyCrudOperation(ErrorCodes::Error expectedError,
+                                     const BSONObj& op,
+                                     bool expectedApplyOpCalled);
+    void _testSyncApplyInsertDocument(ErrorCodes::Error expectedError);
     ServiceContext::UniqueOperationContext _opCtx;
     unsigned int _opsApplied;
     SyncTail::ApplyOperationInLockFn _applyOp;
     SyncTail::ApplyCommandInLockFn _applyCmd;
     SyncTail::IncrementOpsAppliedStatsFn _incOps;
-    StorageInterfaceMock* _storageInterface = nullptr;
     ReplicationProcess* _replicationProcess = nullptr;
+    SyncTailOpObserver* _opObserver = nullptr;
 
-    // Implements the MultiApplier::ApplyOperationFn interface and does nothing.
-    static Status noopApplyOperationFn(MultiApplier::OperationPtrs*) {
+    // Implements the SyncTail::MultiSyncApplyFn interface and does nothing.
+    static Status noopApplyOperationFn(OperationContext*,
+                                       MultiApplier::OperationPtrs*,
+                                       SyncTail* st,
+                                       WorkerMultikeyPathInfo*) {
         return Status::OK();
     }
 
@@ -69,6 +129,7 @@ protected:
     void tearDown() override;
 
     Status runOpSteadyState(const OplogEntry& op);
+    Status runOpsSteadyState(std::vector<OplogEntry> ops);
     Status runOpInitialSync(const OplogEntry& entry);
     Status runOpsInitialSync(std::vector<OplogEntry> ops);
 };

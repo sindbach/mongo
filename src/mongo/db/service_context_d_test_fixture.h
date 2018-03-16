@@ -28,12 +28,11 @@
 
 #pragma once
 
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
-
-class ServiceContext;
-class OperationContext;
 
 /**
  * Test fixture class for tests that use either the "ephemeralForTest" or "devnull" storage engines.

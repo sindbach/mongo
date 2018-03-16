@@ -31,14 +31,16 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/crypto/sha1_block.h"
+#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/restriction_set.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -60,6 +62,7 @@ class User {
     MONGO_DISALLOW_COPYING(User);
 
 public:
+    template <typename HashBlock>
     struct SCRAMCredentials {
         SCRAMCredentials() : iterationCount(0), salt(""), serverKey(""), storedKey("") {}
 
@@ -69,24 +72,33 @@ public:
         std::string storedKey;
 
         bool isValid() const {
-            // 160bit -> 20octets -> * 4/3 -> 26.667 -> padded to 28
-            const size_t kEncodedSHA1Length = 28;
-            // 128bit -> 16octets -> * 4/3 -> 21.333 -> padded to 24
-            const size_t kEncodedSaltLength = 24;
+            constexpr auto kEncodedHashLength = base64::encodedLength(HashBlock::kHashLength);
+            constexpr auto kEncodedSaltLength = base64::encodedLength(HashBlock::kHashLength - 4);
 
-            return (salt.size() == kEncodedSaltLength) && base64::validate(salt) &&
-                (serverKey.size() == kEncodedSHA1Length) && base64::validate(serverKey) &&
-                (storedKey.size() == kEncodedSHA1Length) && base64::validate(storedKey);
+            return (iterationCount > 0) && (salt.size() == kEncodedSaltLength) &&
+                base64::validate(salt) && (serverKey.size() == kEncodedHashLength) &&
+                base64::validate(serverKey) && (storedKey.size() == kEncodedHashLength) &&
+                base64::validate(storedKey);
         }
     };
     struct CredentialData {
-        CredentialData() : scram(), isExternal(false) {}
+        CredentialData() : scram_sha1(), scram_sha256(), isExternal(false) {}
 
-        SCRAMCredentials scram;
+        SCRAMCredentials<SHA1Block> scram_sha1;
+        SCRAMCredentials<SHA256Block> scram_sha256;
         bool isExternal;
+
+        // Select the template determined version of SCRAMCredentials.
+        // For example: creds.scram<SHA1Block>().isValid()
+        // is equivalent to creds.scram_sha1.isValid()
+        template <typename HashBlock>
+        SCRAMCredentials<HashBlock>& scram();
+
+        template <typename HashBlock>
+        const SCRAMCredentials<HashBlock>& scram() const;
     };
 
-    typedef unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
+    typedef stdx::unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
 
     explicit User(const UserName& name);
     ~User();
@@ -237,7 +249,7 @@ private:
     ResourcePrivilegeMap _privileges;
 
     // Roles the user has privileges from
-    unordered_set<RoleName> _roles;
+    stdx::unordered_set<RoleName> _roles;
 
     // Roles that the user indirectly has privileges from, due to role inheritance.
     std::vector<RoleName> _indirectRoles;

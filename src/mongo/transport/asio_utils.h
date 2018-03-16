@@ -30,8 +30,14 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/system_error.h"
+#include "mongo/util/errno_util.h"
+#include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/sockaddr.h"
+
+#ifndef _WIN32
+#include <sys/poll.h>
+#endif  // ndef _WIN32
 
 #include <asio.hpp>
 
@@ -54,6 +60,17 @@ inline Status errorCodeToStatus(const std::error_code& ec) {
     if (!ec)
         return Status::OK();
 
+#ifdef _WIN32
+    if (ec == asio::error::timed_out) {
+#else
+    if (ec == asio::error::try_again || ec == asio::error::would_block) {
+#endif
+        return {ErrorCodes::NetworkTimeout, "Socket operation timed out"};
+    } else if (ec == asio::error::eof || ec == asio::error::connection_reset ||
+               ec == asio::error::network_reset) {
+        return {ErrorCodes::HostUnreachable, "Connection was closed"};
+    }
+
     // If the ec.category() is a mongoErrorCategory() then this error was propogated from
     // mongodb code and we should just pass the error cdoe along as-is.
     ErrorCodes::Error errorCode = (ec.category() == mongoErrorCategory())
@@ -65,5 +82,205 @@ inline Status errorCodeToStatus(const std::error_code& ec) {
     return {errorCode, ec.message()};
 }
 
+/*
+ * The ASIO implementation of poll (i.e. socket.wait()) cannot poll for a mask of events, and
+ * doesn't support timeouts.
+ *
+ * This wraps up ::select/::poll for Windows/POSIX for a single socket and handles EINTR on POSIX
+ *
+ * - On timeout: it returns Status(ErrorCodes::NetworkTimeout)
+ * - On poll returning with an event: it returns the EventsMask for the socket, the caller must
+ * check whether it matches the expected events mask.
+ * - On error: it returns a Status(ErrorCodes::InternalError)
+ */
+template <typename Socket, typename EventsMask>
+StatusWith<EventsMask> pollASIOSocket(Socket& socket, EventsMask mask, Milliseconds timeout) {
+#ifdef _WIN32
+    fd_set readfds;
+    fd_set writefds;
+    fd_set errfds;
+
+    FD_ZERO(&readfds);
+    FD_ZERO(&writefds);
+    FD_ZERO(&errfds);
+
+    auto fd = socket.native_handle();
+    if (mask & POLLIN) {
+        FD_SET(fd, &readfds);
+    }
+    if (mask & POLLOUT) {
+        FD_SET(fd, &writefds);
+    }
+    FD_SET(fd, &errfds);
+
+    timeval timeoutTv{};
+    auto timeoutUs = duration_cast<Microseconds>(timeout);
+    if (timeoutUs >= Seconds{1}) {
+        auto timeoutSec = duration_cast<Seconds>(timeoutUs);
+        timeoutTv.tv_sec = timeoutSec.count();
+        timeoutUs -= timeoutSec;
+    }
+    timeoutTv.tv_usec = timeoutUs.count();
+    int result = ::select(1, &readfds, &writefds, &errfds, &timeoutTv);
+    if (result == SOCKET_ERROR) {
+        auto errDesc = errnoWithDescription(WSAGetLastError());
+        return {ErrorCodes::InternalError, errDesc};
+    }
+    int revents = (FD_ISSET(fd, &readfds) ? POLLIN : 0) | (FD_ISSET(fd, &writefds) ? POLLOUT : 0) |
+        (FD_ISSET(fd, &errfds) ? POLLERR : 0);
+#else
+    pollfd pollItem;
+    pollItem.fd = socket.native_handle();
+    pollItem.events = mask;
+
+    int result;
+    boost::optional<Date_t> expiration;
+    if (timeout.count() > 0) {
+        expiration = Date_t::now() + timeout;
+    }
+    do {
+        Milliseconds curTimeout;
+        if (expiration) {
+            curTimeout = *expiration - Date_t::now();
+            if (curTimeout.count() <= 0) {
+                result = 0;
+                break;
+            }
+        } else {
+            curTimeout = timeout;
+        }
+        result = ::poll(&pollItem, 1, curTimeout.count());
+    } while (result == -1 && errno == EINTR);
+
+    if (result == -1) {
+        int errCode = errno;
+        return {ErrorCodes::InternalError, errnoWithDescription(errCode)};
+    }
+    int revents = pollItem.revents;
+#endif
+
+    if (result == 0) {
+        return {ErrorCodes::NetworkTimeout, "Timed out waiting for poll"};
+    } else {
+        return revents;
+    }
+}
+
+/**
+ * Pass this to asio functions in place of a callback to have them return a Future<T>. This behaves
+ * similarly to asio::use_future_t, however it returns a mongo::Future<T> rather than a
+ * std::future<T>.
+ *
+ * The type of the Future will be determined by the arguments that the callback would have if one
+ * was used. If the arguments start with std::error_code, it will be used to set the Status of the
+ * Future and will not affect the Future's type. For the remaining arguments:
+ *  - if none: Future<void>
+ *  - if one: Future<T>
+ *  - more than one: Future<std::tuple<A, B, ...>>
+ *
+ * Example:
+ *    Future<size_t> future = my_socket.async_read_some(my_buffer, UseFuture{});
+ */
+struct UseFuture {};
+
+namespace use_future_details {
+
+template <typename... Args>
+struct AsyncHandlerHelper {
+    using Result = std::tuple<Args...>;
+    static void complete(Promise<Result>* promise, Args... args) {
+        promise->emplaceValue(args...);
+    }
+};
+
+template <>
+struct AsyncHandlerHelper<> {
+    using Result = void;
+    static void complete(SharedPromise<Result>* promise) {
+        promise->emplaceValue();
+    }
+};
+
+template <typename Arg>
+struct AsyncHandlerHelper<Arg> {
+    using Result = Arg;
+    static void complete(SharedPromise<Result>* promise, Arg arg) {
+        promise->emplaceValue(arg);
+    }
+};
+
+template <typename... Args>
+struct AsyncHandlerHelper<std::error_code, Args...> {
+    using Helper = AsyncHandlerHelper<Args...>;
+    using Result = typename Helper::Result;
+
+    template <typename... Args2>
+    static void complete(SharedPromise<Result>* promise, std::error_code ec, Args2&&... args) {
+        if (ec) {
+            promise->setError(errorCodeToStatus(ec));
+        } else {
+            Helper::complete(promise, std::forward<Args2>(args)...);
+        }
+    }
+};
+
+template <>
+struct AsyncHandlerHelper<std::error_code> {
+    using Result = void;
+    static void complete(SharedPromise<Result>* promise, std::error_code ec) {
+        if (ec) {
+            promise->setError(errorCodeToStatus(ec));
+        } else {
+            promise->emplaceValue();
+        }
+    }
+};
+
+template <typename... Args>
+struct AsyncHandler {
+    using Helper = AsyncHandlerHelper<Args...>;
+    using Result = typename Helper::Result;
+
+    explicit AsyncHandler(UseFuture) {}
+
+    template <typename... Args2>
+    void operator()(Args2&&... args) {
+        Helper::complete(&promise, std::forward<Args2>(args)...);
+    }
+
+    SharedPromise<Result> promise;
+};
+
+template <typename... Args>
+struct AsyncResult {
+    using completion_handler_type = AsyncHandler<Args...>;
+    using RealResult = typename AsyncHandler<Args...>::Result;
+    using return_type = Future<RealResult>;
+
+    explicit AsyncResult(completion_handler_type& handler) {
+        Promise<RealResult> promise;
+        fut = promise.getFuture();
+        handler.promise = promise.share();
+    }
+
+    auto get() {
+        return std::move(fut);
+    }
+
+    Future<RealResult> fut;
+};
+
+}  // namespace use_future_details
 }  // namespace transport
 }  // namespace mongo
+
+namespace asio {
+template <typename Comp, typename Sig>
+class async_result;
+
+template <typename Result, typename... Args>
+class async_result<::mongo::transport::UseFuture, Result(Args...)>
+    : public ::mongo::transport::use_future_details::AsyncResult<Args...> {
+    using ::mongo::transport::use_future_details::AsyncResult<Args...>::AsyncResult;
+};
+}  // namespace asio

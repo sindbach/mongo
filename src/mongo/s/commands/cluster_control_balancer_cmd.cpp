@@ -50,8 +50,8 @@ public:
           _configsvrCommandName(configsvrCommandName),
           _authorizationAction(authorizationAction) {}
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -62,13 +62,13 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "Starts or stops the sharding balancer.";
+    std::string help() const override {
+        return "Starts or stops the sharding balancer.";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString("config", "settings")),
                 _authorizationAction)) {

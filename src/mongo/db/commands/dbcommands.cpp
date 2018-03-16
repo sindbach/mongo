@@ -30,12 +30,9 @@
 
 #include "mongo/platform/basic.h"
 
-#include <array>
 #include <time.h>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/simple_string_data_comparator.h"
-#include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -50,12 +47,12 @@
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/background.h"
 #include "mongo/db/catalog/coll_mod.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/create_collection.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/drop_database.h"
 #include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/server_status.h"
@@ -86,12 +83,10 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/write_concern.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/fail_point_service.h"
@@ -106,16 +101,17 @@ using std::string;
 using std::stringstream;
 using std::unique_ptr;
 
+namespace {
 
 class CmdShutdownMongoD : public CmdShutdown {
 public:
-    virtual void help(stringstream& help) const {
-        help << "shutdown the database.  must be ran against admin db and "
-             << "either (1) ran from localhost or (2) authenticated. If "
-             << "this is a primary in a replica set and there is no member "
-             << "within 10 seconds of its optime, it will not shutdown "
-             << "without force : true.  You can also specify timeoutSecs : "
-             << "N to wait N seconds for other members to catch up.";
+    std::string help() const override {
+        return "shutdown the database.  must be ran against admin db and "
+               "either (1) ran from localhost or (2) authenticated. If "
+               "this is a primary in a replica set and there is no member "
+               "within 10 seconds of its optime, it will not shutdown "
+               "without force : true.  You can also specify timeoutSecs : "
+               "N to wait N seconds for other members to catch up.";
     }
 
     virtual bool run(OperationContext* opCtx,
@@ -136,7 +132,7 @@ public:
         }
 
         // Never returns
-        shutdownHelper();
+        shutdownHelper(cmdObj);
         return true;
     }
 
@@ -144,16 +140,16 @@ public:
 
 class CmdDropDatabase : public BasicCommand {
 public:
-    virtual void help(stringstream& help) const {
-        help << "drop (delete) this database";
+    std::string help() const override {
+        return "drop (delete) this database";
     }
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::dropDatabase);
         out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
@@ -182,7 +178,7 @@ public:
 
         if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
              repl::ReplicationCoordinator::modeNone) &&
-            ((dbname == NamespaceString::kLocalDb) || (dbname == NamespaceString::kAdminDb))) {
+            (dbname == NamespaceString::kLocalDb)) {
             return CommandHelpers::appendCommandStatus(
                 result,
                 Status(ErrorCodes::IllegalOperation,
@@ -210,14 +206,14 @@ public:
 
 class CmdRepairDatabase : public ErrmsgCommandDeprecated {
 public:
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool maintenanceMode() const {
         return true;
     }
-    virtual void help(stringstream& help) const {
-        help << "repair database.  also compacts. note: slow.";
+    std::string help() const override {
+        return "repair database.  also compacts. note: slow.";
     }
 
 
@@ -227,7 +223,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::repairDatabase);
         out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
@@ -248,7 +244,16 @@ public:
 
         // Closing a database requires a global lock.
         Lock::GlobalWrite lk(opCtx);
-        if (!dbHolder().get(opCtx, dbname)) {
+        auto db = dbHolder().get(opCtx, dbname);
+        if (db) {
+            if (db->isDropPending(opCtx)) {
+                return CommandHelpers::appendCommandStatus(
+                    result,
+                    Status(ErrorCodes::DatabaseDropPending,
+                           str::stream() << "Cannot repair database " << dbname
+                                         << " since it is pending being dropped."));
+            }
+        } else {
             // If the name doesn't make an exact match, check for a case insensitive match.
             std::set<std::string> otherCasing = dbHolder().getNamesWithConflictingCasing(dbname);
             if (otherCasing.empty()) {
@@ -295,16 +300,16 @@ public:
 */
 class CmdProfile : public ErrmsgCommandDeprecated {
 public:
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "enable or disable performance profiling\n";
-        help << "{ profile : <n> }\n";
-        help << "0=off 1=log slow ops 2=log all\n";
-        help << "-1 to get current values\n";
-        help << "http://docs.mongodb.org/manual/reference/command/profile/#dbcmd.profile";
+    std::string help() const override {
+        return "enable or disable performance profiling\n"
+               "{ profile : <n> }\n"
+               "0=off 1=log slow ops 2=log all\n"
+               "-1 to get current values\n"
+               "http://docs.mongodb.org/manual/reference/command/profile/#dbcmd.profile";
     }
 
 
@@ -314,7 +319,7 @@ public:
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
 
         if (cmdObj.firstElement().numberInt() == -1 && !cmdObj.hasField("slowms") &&
@@ -396,21 +401,21 @@ public:
 class CmdDrop : public ErrmsgCommandDeprecated {
 public:
     CmdDrop() : ErrmsgCommandDeprecated("drop") {}
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool adminOnly() const {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::dropCollection);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
-    virtual void help(stringstream& help) const {
-        help << "drop a collection\n{drop : <collectionName>}";
+    std::string help() const override {
+        return "drop a collection\n{drop : <collectionName>}";
     }
 
 
@@ -423,9 +428,9 @@ public:
                            const BSONObj& cmdObj,
                            string& errmsg,
                            BSONObjBuilder& result) {
-        const NamespaceString nsToDrop = CommandHelpers::parseNsCollectionRequired(dbname, cmdObj);
+        const NamespaceString nsToDrop(CommandHelpers::parseNsCollectionRequired(dbname, cmdObj));
 
-        if (NamespaceString::virtualized(nsToDrop.ns())) {
+        if (nsToDrop.isVirtualized()) {
             errmsg = "can't drop a virtual collection";
             return false;
         }
@@ -452,8 +457,8 @@ public:
 class CmdCreate : public BasicCommand {
 public:
     CmdCreate() : BasicCommand("create") {}
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool adminOnly() const {
         return false;
@@ -464,13 +469,13 @@ public:
         return true;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "create a collection explicitly\n"
-                "{ create: <ns>[, capped: <bool>, size: <collSizeInBytes>, max: <nDocs>] }";
+    std::string help() const override {
+        return "create a collection explicitly\n"
+               "{ create: <ns>[, capped: <bool>, size: <collSizeInBytes>, max: <nDocs>] }";
     }
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         const NamespaceString nss(parseNs(dbname, cmdObj));
         return AuthorizationSession::get(client)->checkAuthForCreate(nss, cmdObj, false);
     }
@@ -565,17 +570,16 @@ public:
     }
 } cmdCreate;
 
-
 class CmdFileMD5 : public BasicCommand {
 public:
     CmdFileMD5() : BasicCommand("filemd5") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(stringstream& help) const {
-        help << " example: { filemd5 : ObjectId(aaaaaaa) , root : \"fs\" }";
+    std::string help() const override {
+        return " example: { filemd5 : ObjectId(aaaaaaa) , root : \"fs\" }";
     }
 
 
@@ -599,7 +603,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), ActionType::find));
     }
 
@@ -705,9 +709,8 @@ public:
             if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
                 return CommandHelpers::appendCommandStatus(
                     result,
-                    Status(ErrorCodes::OperationFailed,
-                           str::stream() << "Executor error during filemd5 command: "
-                                         << WorkingSetCommon::toStatusString(obj)));
+                    WorkingSetCommon::getMemberObjectStatus(obj).withContext(
+                        "Executor error during filemd5 command"));
             }
 
             if (partialOk)
@@ -738,7 +741,6 @@ public:
 
 } cmdFileMD5;
 
-
 class CmdDatasize : public ErrmsgCommandDeprecated {
     virtual string parseNs(const string& dbname, const BSONObj& cmdObj) const {
         return CommandHelpers::parseNsFullyQualified(dbname, cmdObj);
@@ -747,28 +749,28 @@ class CmdDatasize : public ErrmsgCommandDeprecated {
 public:
     CmdDatasize() : ErrmsgCommandDeprecated("dataSize", "datasize") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(stringstream& help) const {
-        help << "determine data size for a set of data in a certain range"
-                "\nexample: { dataSize:\"blog.posts\", keyPattern:{x:1}, min:{x:10}, max:{x:55} }"
-                "\nmin and max parameters are optional. They must either both be included or both "
-                "omitted"
-                "\nkeyPattern is an optional parameter indicating an index pattern that would be "
-                "useful"
-                "for iterating over the min/max bounds. If keyPattern is omitted, it is inferred "
-                "from "
-                "the structure of min. "
-                "\nnote: This command may take a while to run";
+    std::string help() const override {
+        return "determine data size for a set of data in a certain range"
+               "\nexample: { dataSize:\"blog.posts\", keyPattern:{x:1}, min:{x:10}, max:{x:55} }"
+               "\nmin and max parameters are optional. They must either both be included or both "
+               "omitted"
+               "\nkeyPattern is an optional parameter indicating an index pattern that would be "
+               "useful"
+               "for iterating over the min/max bounds. If keyPattern is omitted, it is inferred "
+               "from "
+               "the structure of min. "
+               "\nnote: This command may take a while to run";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
@@ -874,9 +876,8 @@ public:
             warning() << "Internal error while reading " << ns;
             return CommandHelpers::appendCommandStatus(
                 result,
-                Status(ErrorCodes::OperationFailed,
-                       str::stream() << "Executor error while reading during dataSize command: "
-                                     << WorkingSetCommon::toStatusString(obj)));
+                WorkingSetCommon::getMemberObjectStatus(obj).withContext(
+                    "Executor error while reading during dataSize command"));
         }
 
         ostringstream os;
@@ -897,21 +898,20 @@ class CollectionStats : public ErrmsgCommandDeprecated {
 public:
     CollectionStats() : ErrmsgCommandDeprecated("collStats", "collstats") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(stringstream& help) const {
-        help
-            << "{ collStats:\"blog.posts\" , scale : 1 } scale divides sizes e.g. for KB use 1024\n"
+    std::string help() const override {
+        return "{ collStats:\"blog.posts\" , scale : 1 } scale divides sizes e.g. for KB use 1024\n"
                "    avgObjSize - in bytes";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::collStats);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
@@ -945,22 +945,22 @@ class CollectionModCommand : public BasicCommand {
 public:
     CollectionModCommand() : BasicCommand("collMod") {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
-    virtual void help(stringstream& help) const {
-        help << "Sets collection options.\n"
-                "Example: { collMod: 'foo', usePowerOf2Sizes:true }\n"
-                "Example: { collMod: 'foo', index: {keyPattern: {a: 1}, expireAfterSeconds: 600} "
-                "Example: { collMod: 'foo', index: {name: 'bar', expireAfterSeconds: 600} }\n";
+    std::string help() const override {
+        return "Sets collection options.\n"
+               "Example: { collMod: 'foo', usePowerOf2Sizes:true }\n"
+               "Example: { collMod: 'foo', index: {keyPattern: {a: 1}, expireAfterSeconds: 600} "
+               "Example: { collMod: 'foo', index: {name: 'bar', expireAfterSeconds: 600} }\n";
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         const NamespaceString nss(parseNs(dbname, cmdObj));
         return AuthorizationSession::get(client)->checkAuthForCollMod(nss, cmdObj, false);
     }
@@ -979,21 +979,21 @@ class DBStats : public ErrmsgCommandDeprecated {
 public:
     DBStats() : ErrmsgCommandDeprecated("dbStats", "dbstats") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(stringstream& help) const {
-        help << "Get stats on a database. Not instantaneous. Slower for databases with large "
-                ".ns files.\n"
-                "Example: { dbStats:1, scale:1 }";
+    std::string help() const override {
+        return "Get stats on a database. Not instantaneous. Slower for databases with large "
+               ".ns files.\n"
+               "Example: { dbStats:1, scale:1 }";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::dbStats);
         out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
@@ -1075,18 +1075,18 @@ public:
 class CmdWhatsMyUri : public BasicCommand {
 public:
     CmdWhatsMyUri() : BasicCommand("whatsmyuri") {}
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(stringstream& help) const {
-        help << "{whatsmyuri:1}";
+    std::string help() const override {
+        return "{whatsmyuri:1}";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
@@ -1100,15 +1100,15 @@ class AvailableQueryOptions : public BasicCommand {
 public:
     AvailableQueryOptions() : BasicCommand("availableQueryOptions", "availablequeryoptions") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         return Status::OK();
     }
 
@@ -1121,4 +1121,5 @@ public:
     }
 } availableQueryOptionsCmd;
 
+}  // namespace
 }  // namespace mongo

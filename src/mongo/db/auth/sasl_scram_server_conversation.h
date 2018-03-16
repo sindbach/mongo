@@ -1,5 +1,5 @@
 /*
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,26 +28,26 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-
-#include "mongo/base/disallow_copying.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/crypto/mechanism_scram.h"
-#include "mongo/db/auth/sasl_server_conversation.h"
+#include "mongo/db/auth/sasl_mechanism_policies.h"
+#include "mongo/db/auth/sasl_mechanism_registry.h"
+#include "mongo/util/icu.h"
 
 namespace mongo {
+
 /**
  *  Server side authentication session for SASL SCRAM-SHA-1.
  */
-class SaslSCRAMServerConversation : public SaslServerConversation {
-    MONGO_DISALLOW_COPYING(SaslSCRAMServerConversation);
-
+template <typename Policy>
+class SaslSCRAMServerMechanism : public MakeServerMechanism<Policy> {
 public:
-    explicit SaslSCRAMServerConversation(SaslAuthenticationSession* session)
-        : SaslServerConversation(session) {}
-    ~SaslSCRAMServerConversation() override = default;
+    using HashBlock = typename Policy::HashBlock;
+    static const bool isInternal = true;
+
+    explicit SaslSCRAMServerMechanism(std::string authenticationDatabase)
+        : MakeServerMechanism<Policy>(std::move(authenticationDatabase)) {}
+
+    ~SaslSCRAMServerMechanism() final = default;
 
     /**
      * Take one step in a SCRAM-SHA-1 conversation.
@@ -56,59 +56,51 @@ public:
      * authentication conversation is finished or not.
      *
      **/
-    StatusWith<bool> step(StringData inputData, std::string* outputData) override;
+    StatusWith<std::tuple<bool, std::string>> stepImpl(OperationContext* opCtx,
+                                                       StringData inputData);
 
-    /**
-     * Verify proof submitted by authenticating client.
-     */
-    virtual bool verifyClientProof(StringData) = 0;
-
-    /**
-     * Generate a signature to prove ourselves.
-     */
-    virtual std::string generateServerSignature() const = 0;
+    StatusWith<std::string> saslPrep(StringData str) const {
+        if (std::is_same<SHA1Block, HashBlock>::value) {
+            return str.toString();
+        } else {
+            return mongo::saslPrep(str);
+        }
+    }
 
 private:
     /**
      * Parse client-first-message and generate server-first-message
      **/
-    StatusWith<bool> _firstStep(std::vector<std::string>& input, std::string* outputData);
+    StatusWith<std::tuple<bool, std::string>> _firstStep(OperationContext* opCtx, StringData input);
 
     /**
      * Parse client-final-message and generate server-final-message
      **/
-    StatusWith<bool> _secondStep(const std::vector<std::string>& input, std::string* outputData);
+    StatusWith<std::tuple<bool, std::string>> _secondStep(OperationContext* opCtx,
+                                                          StringData input);
 
-protected:
     int _step{0};
     std::string _authMessage;
-    User::CredentialData _creds;
+    User::SCRAMCredentials<HashBlock> _scramCredentials;
+    scram::Secrets<HashBlock> _secrets;
 
     // client and server nonce concatenated
     std::string _nonce;
 };
 
-template <typename HashBlock>
-class SaslSCRAMServerConversationImpl : public SaslSCRAMServerConversation {
+template <typename ScramMechanism>
+class SCRAMServerFactory : public MakeServerFactory<ScramMechanism> {
 public:
-    explicit SaslSCRAMServerConversationImpl(SaslAuthenticationSession* session)
-        : SaslSCRAMServerConversation(session) {}
-    ~SaslSCRAMServerConversationImpl() override = default;
-
-    bool verifyClientProof(StringData clientProof) final {
-        _credentials = scram::Secrets<HashBlock>(
-            "", base64::decode(_creds.scram.storedKey), base64::decode(_creds.scram.serverKey));
-        return _credentials.verifyClientProof(_authMessage, clientProof);
+    bool canMakeMechanismForUser(const User* user) const final {
+        auto credentials = user->getCredentials();
+        return credentials.scram<typename ScramMechanism::HashBlock>().isValid();
     }
-
-    std::string generateServerSignature() const final {
-        return _credentials.generateServerSignature(_authMessage);
-    }
-
-private:
-    scram::Secrets<HashBlock> _credentials;
 };
 
-using SaslSCRAMSHA1ServerConversation = SaslSCRAMServerConversationImpl<SHA1Block>;
+using SaslSCRAMSHA1ServerMechanism = SaslSCRAMServerMechanism<SCRAMSHA1Policy>;
+using SCRAMSHA1ServerFactory = SCRAMServerFactory<SaslSCRAMSHA1ServerMechanism>;
+
+using SaslSCRAMSHA256ServerMechanism = SaslSCRAMServerMechanism<SCRAMSHA256Policy>;
+using SCRAMSHA256ServerFactory = SCRAMServerFactory<SaslSCRAMSHA256ServerMechanism>;
 
 }  // namespace mongo

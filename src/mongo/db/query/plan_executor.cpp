@@ -84,7 +84,8 @@ std::unique_ptr<PlanYieldPolicy> makeYieldPolicy(PlanExecutor* exec,
         case PlanExecutor::YieldPolicy::YIELD_AUTO:
         case PlanExecutor::YieldPolicy::YIELD_MANUAL:
         case PlanExecutor::YieldPolicy::NO_YIELD:
-        case PlanExecutor::YieldPolicy::WRITE_CONFLICT_RETRY_ONLY: {
+        case PlanExecutor::YieldPolicy::WRITE_CONFLICT_RETRY_ONLY:
+        case PlanExecutor::YieldPolicy::INTERRUPT_ONLY: {
             return stdx::make_unique<PlanYieldPolicy>(exec, policy);
         }
         case PlanExecutor::YieldPolicy::ALWAYS_TIME_OUT: {
@@ -357,7 +358,7 @@ Status PlanExecutor::restoreState() {
             throw;
 
         // Handles retries by calling restoreStateWithoutRetrying() in a loop.
-        return _yieldPolicy->yield();
+        return _yieldPolicy->yieldOrInterrupt();
     }
 }
 
@@ -369,9 +370,7 @@ Status PlanExecutor::restoreStateWithoutRetrying() {
     }
 
     _currentState = kUsable;
-    return isMarkedAsKilled()
-        ? Status{ErrorCodes::QueryPlanKilled, "query killed during yield: " + *_killReason}
-        : Status::OK();
+    return _killStatus;
 }
 
 void PlanExecutor::detachFromOperationContext() {
@@ -469,7 +468,7 @@ PlanExecutor::ExecState PlanExecutor::waitForInserts(CappedInsertNotifierData* n
     ON_BLOCK_EXIT([curOp] { curOp->resumeTimer(); });
     auto opCtx = _opCtx;
     uint64_t currentNotifierVersion = notifierData->notifier->getVersion();
-    auto yieldResult = _yieldPolicy->yield(nullptr, [opCtx, notifierData] {
+    auto yieldResult = _yieldPolicy->yieldOrInterrupt(nullptr, [opCtx, notifierData] {
         const auto deadline = awaitDataState(opCtx).waitForInsertsDeadline;
         notifierData->notifier->waitUntil(notifierData->lastEOFVersion, deadline);
     });
@@ -489,7 +488,7 @@ PlanExecutor::ExecState PlanExecutor::waitForInserts(CappedInsertNotifierData* n
 
 PlanExecutor::ExecState PlanExecutor::getNextImpl(Snapshotted<BSONObj>* objOut, RecordId* dlOut) {
     if (MONGO_FAIL_POINT(planExecutorAlwaysFails)) {
-        Status status(ErrorCodes::OperationFailed,
+        Status status(ErrorCodes::InternalError,
                       str::stream() << "PlanExecutor hit planExecutorAlwaysFails fail point");
         *objOut =
             Snapshotted<BSONObj>(SnapshotId(), WorkingSetCommon::buildMemberStatusObject(status));
@@ -500,10 +499,8 @@ PlanExecutor::ExecState PlanExecutor::getNextImpl(Snapshotted<BSONObj>* objOut, 
     invariant(_currentState == kUsable);
     if (isMarkedAsKilled()) {
         if (NULL != objOut) {
-            Status status(ErrorCodes::OperationFailed,
-                          str::stream() << "Operation aborted because: " << *_killReason);
             *objOut = Snapshotted<BSONObj>(SnapshotId(),
-                                           WorkingSetCommon::buildMemberStatusObject(status));
+                                           WorkingSetCommon::buildMemberStatusObject(_killStatus));
         }
         return PlanExecutor::DEAD;
     }
@@ -537,8 +534,8 @@ PlanExecutor::ExecState PlanExecutor::getNextImpl(Snapshotted<BSONObj>* objOut, 
         //   2) some stage requested a yield due to a document fetch, or
         //   3) we need to yield and retry due to a WriteConflictException.
         // In all cases, the actual yielding happens here.
-        if (_yieldPolicy->shouldYield()) {
-            auto yieldStatus = _yieldPolicy->yield(fetcher.get());
+        if (_yieldPolicy->shouldYieldOrInterrupt()) {
+            auto yieldStatus = _yieldPolicy->yieldOrInterrupt(fetcher.get());
             if (!yieldStatus.isOK()) {
                 if (objOut) {
                     *objOut = Snapshotted<BSONObj>(
@@ -645,8 +642,12 @@ bool PlanExecutor::isEOF() {
     return isMarkedAsKilled() || (_stash.empty() && _root->isEOF());
 }
 
-void PlanExecutor::markAsKilled(string reason) {
-    _killReason = std::move(reason);
+void PlanExecutor::markAsKilled(Status killStatus) {
+    invariant(!killStatus.isOK());
+    // If killed multiple times, only retain the first status.
+    if (_killStatus.isOK()) {
+        _killStatus = killStatus;
+    }
 }
 
 void PlanExecutor::dispose(OperationContext* opCtx, CursorManager* cursorManager) {
@@ -677,8 +678,7 @@ Status PlanExecutor::executePlan() {
 
     if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
         if (isMarkedAsKilled()) {
-            return Status(ErrorCodes::QueryPlanKilled,
-                          str::stream() << "Operation aborted because: " << *_killReason);
+            return _killStatus;
         }
 
         auto errorStatus = WorkingSetCommon::getMemberObjectStatus(obj);

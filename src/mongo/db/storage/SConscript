@@ -10,6 +10,7 @@ env.SConscript(
         'kv',
         'mmap_v1',
         'wiredtiger',
+        'mobile',
     ],
     exports=[
         'env'
@@ -183,6 +184,17 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/commands/server_status',
         "storage_options",
+    ],
+)
+
+env.Library(
+    target="write_unit_of_work",
+    source=[
+        "write_unit_of_work.cpp",
+    ],
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/base",
+        "$BUILD_DIR/mongo/db/storage/storage_options",
     ],
 )
 

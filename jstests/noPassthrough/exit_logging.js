@@ -1,5 +1,6 @@
 /**
  * Tests that various forms of normal and abnormal shutdown write to the log files as expected.
+ * @tags: [requires_sharding]
  */
 
 (function() {
@@ -109,6 +110,7 @@
         };
 
         runAllTests(mongosLauncher);
+        st.stop();
     }());
 
 }());

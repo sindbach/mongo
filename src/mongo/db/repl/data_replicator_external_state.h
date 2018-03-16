@@ -37,12 +37,11 @@
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
-
-class OldThreadPool;
 
 namespace executor {
 class TaskExecutor;
@@ -79,7 +78,7 @@ public:
     /**
      * Returns shared db worker thread pool for collection cloning.
      */
-    virtual OldThreadPool* getDbWorkThreadPool() const = 0;
+    virtual ThreadPool* getDbWorkThreadPool() const = 0;
 
     /**
      * Returns the current term and last committed optime.
@@ -113,12 +112,6 @@ public:
         OperationContext* opCtx) const = 0;
 
     /**
-     * Creates an oplog buffer suitable for steady state replication.
-     */
-    virtual std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(
-        OperationContext* opCtx) const = 0;
-
-    /**
      * Returns the current replica set config if there is one, or an error why there isn't.
      */
     virtual StatusWith<ReplSetConfig> getCurrentConfig() const = 0;
@@ -135,21 +128,18 @@ private:
                                            MultiApplier::ApplyOperationFn applyOperation) = 0;
 
     /**
-     * Used by _multiApply() to write operations to database during steady state replication.
-     *
-     * Used exclusively by the InitialSyncer to construct a MultiApplier.
-     */
-    virtual Status _multiSyncApply(MultiApplier::OperationPtrs* ops) = 0;
-
-    /**
      * Used by _multiApply() to write operations to database during initial sync. `fetchCount` is a
      * pointer to a counter that is incremented every time we fetch a missing document.
+     * `workerMultikeyPathInfo` is a pointer to a list of objects tracking which indexes to set as
+     * multikey at the end of the batch. It should never be null.
      *
      * Used exclusively by the InitialSyncer to construct a MultiApplier.
      */
-    virtual Status _multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
+    virtual Status _multiInitialSyncApply(OperationContext* opCtx,
+                                          MultiApplier::OperationPtrs* ops,
                                           const HostAndPort& source,
-                                          AtomicUInt32* fetchCount) = 0;
+                                          AtomicUInt32* fetchCount,
+                                          WorkerMultikeyPathInfo* workerMultikeyPathInfo) = 0;
 
     // Provides InitialSyncer with access to _multiApply, _multiSyncApply and
     // _multiInitialSyncApply.

@@ -7,6 +7,7 @@
 // at initiation and the 3.6 node will refuse to initial sync from it. For 3.8, we will be able
 // to send 'replSetInitiate' to the 3.6 node and it will write the document at initiate in fCV
 // 3.6 (since this changed between 3.4 and 3.6), and the 3.8 node will initial sync from it.
+// TODO(SERVER-33180) update this test to use replica set shards.
 //
 
 load('./jstests/multiVersion/libs/verify_versions.js');
@@ -28,7 +29,8 @@ load('./jstests/multiVersion/libs/verify_versions.js');
             mongosOptions: {binVersion: versionsToCheckMongos},
             configOptions: {binVersion: versionsToCheckConfig},
             shardOptions: {binVersion: versionsToCheck},
-            enableBalancer: true
+            enableBalancer: true,
+            shardAsReplicaSet: false
         }
     });
 

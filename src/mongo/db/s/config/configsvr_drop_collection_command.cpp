@@ -34,9 +34,8 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
@@ -48,7 +47,6 @@
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
-
 namespace {
 
 MONGO_FP_DECLARE(setDropCollDistLockWait);
@@ -60,8 +58,8 @@ class ConfigSvrDropCollectionCommand : public BasicCommand {
 public:
     ConfigSvrDropCollectionCommand() : BasicCommand("_configsvrDropCollection") {}
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -72,14 +70,14 @@ public:
         return true;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Drops a collection from a database.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Drops a collection from a database.";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -129,8 +127,8 @@ public:
         ON_BLOCK_EXIT(
             [opCtx, nss] { Grid::get(opCtx)->catalogCache()->invalidateShardedCollection(nss); });
 
-        auto collStatus = catalogClient->getCollection(
-            opCtx, nss.toString(), repl::ReadConcernLevel::kLocalReadConcern);
+        auto collStatus =
+            catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kLocalReadConcern);
         if (collStatus == ErrorCodes::NamespaceNotFound) {
             // We checked the sharding catalog and found that this collection doesn't exist.
             // This may be because it never existed, or because a drop command was sent
@@ -205,6 +203,7 @@ private:
                 shardId, cmdDropResult.response["writeConcernError"], *result);
         }
     };
+
 } configsvrDropCollectionCmd;
 
 }  // namespace

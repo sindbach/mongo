@@ -95,10 +95,6 @@ void createOplog(OperationContext* opCtx, const std::string& oplogCollectionName
  */
 void createOplog(OperationContext* opCtx);
 
-extern std::string masterSlaveOplogName;
-
-extern int OPLOG_VERSION;
-
 /**
  * Log insert(s) to the local oplog.
  * Returns the OpTime of every insert.
@@ -155,6 +151,14 @@ void oplogCheckCloseDatabase(OperationContext* opCtx, Database* db);
  */
 void acquireOplogCollectionForLogging(OperationContext* opCtx);
 
+/**
+ * Use 'oplog' as the new cached pointer to the local oplog.
+ *
+ * Called by catalog::openCatalog() to re-establish the oplog collection pointer while holding onto
+ * the global lock in exclusive mode.
+ */
+void establishOplogCollectionForLogging(OperationContext* opCtx, Collection* oplog);
+
 using IncrementOpsAppliedStatsFn = stdx::function<void()>;
 /**
  * Take the object field of a BSONObj, the BSONObj, and the namespace of
@@ -175,7 +179,6 @@ std::pair<BSONObj, NamespaceString> prepForApplyOpsIndexInsert(const BSONElement
 class OplogApplication {
 public:
     static constexpr StringData kInitialSyncOplogApplicationMode = "InitialSync"_sd;
-    static constexpr StringData kMasterSlaveOplogApplicationMode = "MasterSlave"_sd;
     static constexpr StringData kRecoveringOplogApplicationMode = "Recovering"_sd;
     static constexpr StringData kSecondaryOplogApplicationMode = "Secondary"_sd;
     static constexpr StringData kApplyOpsCmdOplogApplicationMode = "ApplyOps"_sd;
@@ -183,9 +186,6 @@ public:
     enum class Mode {
         // Used during the oplog application phase of the initial sync process.
         kInitialSync,
-
-        // Used when a slave is applying operations from a master node in master-slave.
-        kMasterSlave,
 
         // Used when we are applying oplog operations to recover the database state following an
         // unclean shutdown, or when we are recovering from the oplog after we rollback to a

@@ -39,12 +39,13 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog/uuid_catalog.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
@@ -52,6 +53,7 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/logical_session_id.h"
+#include "mongo/db/logical_time_validator.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/update_lifecycle_impl.h"
@@ -606,7 +608,7 @@ void checkRbidAndUpdateMinValid(OperationContext* opCtx,
     // online until we get to that point in freshness. In other words, we do not transition from
     // RECOVERING state to SECONDARY state until we have reached the minValid oplog entry.
 
-    OpTime minValid = fassertStatusOK(40492, OpTime::parseFromOplogEntry(newMinValidDoc));
+    OpTime minValid = fassert(40492, OpTime::parseFromOplogEntry(newMinValidDoc));
     log() << "Setting minvalid to " << minValid;
 
     // This method is only used with storage engines that do not support recover to stable
@@ -741,45 +743,47 @@ void dropCollection(OperationContext* opCtx,
                     NamespaceString nss,
                     Collection* collection,
                     Database* db) {
-    Helpers::RemoveSaver removeSaver("rollback", "", nss.ns());
+    if (RollbackImpl::shouldCreateDataFiles()) {
+        Helpers::RemoveSaver removeSaver("rollback", "", nss.ns());
 
-    // Performs a collection scan and writes all documents in the collection to disk
-    // in order to keep an archive of items that were rolled back.
-    auto exec = InternalPlanner::collectionScan(
-        opCtx, nss.toString(), collection, PlanExecutor::YIELD_AUTO);
-    BSONObj curObj;
-    PlanExecutor::ExecState execState;
-    while (PlanExecutor::ADVANCED == (execState = exec->getNext(&curObj, NULL))) {
-        auto status = removeSaver.goingToDelete(curObj);
-        if (!status.isOK()) {
-            severe() << "Rolling back createCollection on " << nss
-                     << " failed to write document to remove saver file: " << redact(status);
-            throw RSFatalException(
-                "Rolling back createCollection. Failed to write document to remove saver "
-                "file.");
+        // Performs a collection scan and writes all documents in the collection to disk
+        // in order to keep an archive of items that were rolled back.
+        auto exec = InternalPlanner::collectionScan(
+            opCtx, nss.toString(), collection, PlanExecutor::YIELD_AUTO);
+        BSONObj curObj;
+        PlanExecutor::ExecState execState;
+        while (PlanExecutor::ADVANCED == (execState = exec->getNext(&curObj, NULL))) {
+            auto status = removeSaver.goingToDelete(curObj);
+            if (!status.isOK()) {
+                severe() << "Rolling back createCollection on " << nss
+                         << " failed to write document to remove saver file: " << redact(status);
+                throw RSFatalException(
+                    "Rolling back createCollection. Failed to write document to remove saver "
+                    "file.");
+            }
         }
-    }
 
-    // If we exited the above for loop with any other execState than IS_EOF, this means that
-    // a FAILURE or DEAD state was returned. If a DEAD state occurred, the collection or
-    // database that we are attempting to save may no longer be valid. If a FAILURE state
-    // was returned, either an unrecoverable error was thrown by exec, or we attempted to
-    // retrieve data that could not be provided by the PlanExecutor. In both of these cases
-    // it is necessary for a full resync of the server.
+        // If we exited the above for loop with any other execState than IS_EOF, this means that
+        // a FAILURE or DEAD state was returned. If a DEAD state occurred, the collection or
+        // database that we are attempting to save may no longer be valid. If a FAILURE state
+        // was returned, either an unrecoverable error was thrown by exec, or we attempted to
+        // retrieve data that could not be provided by the PlanExecutor. In both of these cases
+        // it is necessary for a full resync of the server.
 
-    if (execState != PlanExecutor::IS_EOF) {
-        if (execState == PlanExecutor::FAILURE &&
-            WorkingSetCommon::isValidStatusMemberObject(curObj)) {
-            Status errorStatus = WorkingSetCommon::getMemberObjectStatus(curObj);
-            severe() << "Rolling back createCollection on " << nss << " failed with "
-                     << redact(errorStatus) << ". A full resync is necessary.";
-            throw RSFatalException(
-                "Rolling back createCollection failed. A full resync is necessary.");
-        } else {
-            severe() << "Rolling back createCollection on " << nss
-                     << " failed. A full resync is necessary.";
-            throw RSFatalException(
-                "Rolling back createCollection failed. A full resync is necessary.");
+        if (execState != PlanExecutor::IS_EOF) {
+            if (execState == PlanExecutor::FAILURE &&
+                WorkingSetCommon::isValidStatusMemberObject(curObj)) {
+                Status errorStatus = WorkingSetCommon::getMemberObjectStatus(curObj);
+                severe() << "Rolling back createCollection on " << nss << " failed with "
+                         << redact(errorStatus) << ". A full resync is necessary.";
+                throw RSFatalException(
+                    "Rolling back createCollection failed. A full resync is necessary.");
+            } else {
+                severe() << "Rolling back createCollection on " << nss
+                         << " failed. A full resync is necessary.";
+                throw RSFatalException(
+                    "Rolling back createCollection failed. A full resync is necessary.");
+            }
         }
     }
 
@@ -788,7 +792,7 @@ void dropCollection(OperationContext* opCtx,
     // We permanently drop the collection rather than 2-phase drop the collection
     // here. By not passing in an opTime to dropCollectionEvenIfSystem() the collection
     // is immediately dropped.
-    fassertStatusOK(40504, db->dropCollectionEvenIfSystem(opCtx, nss));
+    fassert(40504, db->dropCollectionEvenIfSystem(opCtx, nss));
     wunit.commit();
 }
 
@@ -943,7 +947,7 @@ Status _syncRollback(OperationContext* opCtx,
     try {
         ON_BLOCK_EXIT([&] {
             auto status = replicationProcess->incrementRollbackID(opCtx);
-            fassertStatusOK(40497, status);
+            fassert(40497, status);
         });
         syncFixUp(opCtx, how, rollbackSource, replCoord, replicationProcess);
     } catch (const RSFatalException& e) {
@@ -1252,7 +1256,9 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
 
         NamespaceString nss = catalog.lookupNSSByUUID(uuid);
 
-        removeSaver.reset(new Helpers::RemoveSaver("rollback", "", nss.ns()));
+        if (RollbackImpl::shouldCreateDataFiles()) {
+            removeSaver = std::make_unique<Helpers::RemoveSaver>("rollback", "", nss.ns());
+        }
 
         const auto& goodVersionsByDocID = nsAndGoodVersionsByDocID.second;
         for (const auto& idAndDoc : goodVersionsByDocID) {
@@ -1418,6 +1424,10 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
     // If necessary, clear the memory of existing sessions.
     if (fixUpInfo.refetchTransactionDocs) {
         SessionCatalog::get(opCtx)->invalidateSessions(opCtx, boost::none);
+    }
+
+    if (auto validator = LogicalTimeValidator::get(opCtx)) {
+        validator->resetKeyManagerCache();
     }
 
     // Reload the lastAppliedOpTime and lastDurableOpTime value in the replcoord and the

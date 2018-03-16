@@ -52,13 +52,13 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         ActionSet actions;
         actions.addAction(ActionType::find);
         Privilege p(parseResourcePattern(dbname, cmdObj), actions);
@@ -105,7 +105,7 @@ public:
             {std::move(exec),
              ns,
              AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
-             opCtx->recoveryUnit()->isReadingFromMajorityCommittedSnapshot(),
+             opCtx->recoveryUnit()->getReadConcernLevel(),
              cmdObj});
 
         appendCursorResponseObject(

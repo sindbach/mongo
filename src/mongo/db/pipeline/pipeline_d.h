@@ -35,7 +35,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_request.h"
-#include "mongo/db/pipeline/mongo_process_interface.h"
+#include "mongo/db/pipeline/mongo_process_common.h"
 #include "mongo/db/query/plan_executor.h"
 
 namespace mongo {
@@ -61,7 +61,7 @@ struct DepsTracker;
  */
 class PipelineD {
 public:
-    class MongoDInterface final : public MongoProcessInterface {
+    class MongoDInterface final : public MongoProcessCommon {
     public:
         MongoDInterface(OperationContext* opCtx);
 
@@ -97,10 +97,6 @@ public:
             const MakePipelineOptions opts = MakePipelineOptions{}) final;
         Status attachCursorSourceToPipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                             Pipeline* pipeline) final;
-        std::vector<BSONObj> getCurrentOps(OperationContext* opCtx,
-                                           CurrentOpConnectionsMode connMode,
-                                           CurrentOpUserMode userMode,
-                                           CurrentOpTruncateMode truncateMode) const final;
         std::string getShardName(OperationContext* opCtx) const final;
         std::vector<FieldPath> collectDocumentKeyFields(OperationContext* opCtx,
                                                         const NamespaceString& nss,
@@ -114,6 +110,11 @@ public:
         std::vector<GenericCursor> getCursors(
             const boost::intrusive_ptr<ExpressionContext>& expCtx) const final;
 
+    protected:
+        BSONObj _reportCurrentOpForClient(OperationContext* opCtx,
+                                          Client* client,
+                                          CurrentOpTruncateMode truncateOps) const final;
+
     private:
         /**
          * Looks up the collection default collator for the collection given by 'collectionUUID'. A
@@ -123,7 +124,7 @@ public:
          * collation.
          */
         std::unique_ptr<CollatorInterface> _getCollectionDefaultCollator(OperationContext* opCtx,
-                                                                         const NamespaceString& nss,
+                                                                         StringData dbName,
                                                                          UUID collectionUUID);
 
         DBDirectClient _client;

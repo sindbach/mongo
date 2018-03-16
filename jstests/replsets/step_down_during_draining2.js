@@ -24,7 +24,6 @@
     conf.settings = conf.settings || {};
     conf.settings.chainingAllowed = false;
     conf.settings.catchUpTimeoutMillis = 0;
-    conf.protocolVersion = 1;
     replSet.initiate(conf);
 
     var primary = replSet.getPrimary();
@@ -170,4 +169,5 @@
     assert.writeOK(secondary.getDB("foo").flag.insert({sentinel: 1}, {writeConcern: {w: 3}}));
     // Check that no writes were lost.
     assert.eq(secondary.getDB("foo").foo.find().itcount(), numDocuments);
+    replSet.stopSet();
 })();

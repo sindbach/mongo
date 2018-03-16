@@ -34,18 +34,20 @@
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/client/remote_command_targeter.h"
-#include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/getmore_request.h"
 #include "mongo/db/query/killcursors_request.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
+
+constexpr StringData AsyncResultsMerger::kSortKeyField;
+const BSONObj AsyncResultsMerger::kWholeSortKeySortPattern = BSON(kSortKeyField << 1);
+
 namespace {
 
 // Maximum number of retries for network and replication notMaster errors (per host).
@@ -56,7 +58,7 @@ const int kMaxNumFailedHostRetryAttempts = 3;
  * {'': 'firstSortKey', '': 'secondSortKey', ...}.
  */
 BSONObj extractSortKey(BSONObj obj, bool compareWholeSortKey) {
-    auto key = obj[ClusterClientCursorParams::kSortKeyField];
+    auto key = obj[AsyncResultsMerger::kSortKeyField];
     invariant(key);
     if (compareWholeSortKey) {
         return key.wrap();
@@ -95,13 +97,6 @@ AsyncResultsMerger::AsyncResultsMerger(OperationContext* opCtx,
         // it will be stored in the remote and the first call to ready() will return true.
         _addBatchToBuffer(WithLock::withoutLock(), remoteIndex, remote.cursorResponse);
         ++remoteIndex;
-    }
-
-    // Initialize command metadata to handle the read preference. We do this in case the readPref
-    // is primaryOnly, in which case if the remote host for one of the cursors changes roles, the
-    // remote will return an error.
-    if (_params->readPreference) {
-        _metadataObj = _params->readPreference->toContainingBSON();
     }
 }
 
@@ -353,7 +348,7 @@ Status AsyncResultsMerger::_askForNextBatch(WithLock, size_t remoteIndex) {
                          .toBSON();
 
     executor::RemoteCommandRequest request(
-        remote.getTargetHost(), _params->nsString.db().toString(), cmdObj, _metadataObj, _opCtx);
+        remote.getTargetHost(), _params->nsString.db().toString(), cmdObj, _opCtx);
 
     auto callbackStatus =
         _executor->scheduleRemoteCommand(request, [this, remoteIndex](auto const& cbData) {
@@ -453,8 +448,8 @@ void AsyncResultsMerger::updateRemoteMetadata(RemoteCursorData* remote,
     remote->cursorId = response.getCursorId();
     if (response.getLastOplogTimestamp() && !response.getLastOplogTimestamp()->isNull()) {
         // We only expect to see this for change streams.
-        invariant(SimpleBSONObjComparator::kInstance.evaluate(
-            _params->sort == DocumentSourceChangeStream::kSortSpec));
+        invariant(SimpleBSONObjComparator::kInstance.evaluate(_params->sort ==
+                                                              change_stream_constants::kSortSpec));
 
         auto newLatestTimestamp = *response.getLastOplogTimestamp();
         if (remote->promisedMinSortKey) {
@@ -484,7 +479,7 @@ void AsyncResultsMerger::updateRemoteMetadata(RemoteCursorData* remote,
 
         remote->promisedMinSortKey =
             (compareSortKeys(
-                 newPromisedMin, maxSortKeyFromResponse, DocumentSourceChangeStream::kSortSpec) < 0
+                 newPromisedMin, maxSortKeyFromResponse, change_stream_constants::kSortSpec) < 0
                  ? maxSortKeyFromResponse.getOwned()
                  : newPromisedMin.getOwned());
     }
@@ -588,18 +583,18 @@ bool AsyncResultsMerger::_addBatchToBuffer(WithLock lk,
     for (const auto& obj : response.getBatch()) {
         // If there's a sort, we're expecting the remote node to have given us back a sort key.
         if (!_params->sort.isEmpty()) {
-            auto key = obj[ClusterClientCursorParams::kSortKeyField];
+            auto key = obj[AsyncResultsMerger::kSortKeyField];
             if (!key) {
-                remote.status = Status(ErrorCodes::InternalError,
-                                       str::stream() << "Missing field '"
-                                                     << ClusterClientCursorParams::kSortKeyField
-                                                     << "' in document: "
-                                                     << obj);
+                remote.status =
+                    Status(ErrorCodes::InternalError,
+                           str::stream() << "Missing field '" << AsyncResultsMerger::kSortKeyField
+                                         << "' in document: "
+                                         << obj);
                 return false;
             } else if (!_params->compareWholeSortKey && key.type() != BSONType::Object) {
                 remote.status =
                     Status(ErrorCodes::InternalError,
-                           str::stream() << "Field '" << ClusterClientCursorParams::kSortKeyField
+                           str::stream() << "Field '" << AsyncResultsMerger::kSortKeyField
                                          << "' was not of type Object in document: "
                                          << obj);
                 return false;
@@ -675,7 +670,7 @@ executor::TaskExecutor::EventHandle AsyncResultsMerger::kill(OperationContext* o
         }
         return executor::TaskExecutor::EventHandle();
     }
-    fassertStatusOK(28716, statusWithEvent);
+    fassert(28716, statusWithEvent);
     _killCompleteEvent = statusWithEvent.getValue();
 
     _scheduleKillCursors(lk, opCtx);
@@ -721,10 +716,6 @@ bool AsyncResultsMerger::RemoteCursorData::exhausted() const {
     return cursorId == 0;
 }
 
-std::shared_ptr<Shard> AsyncResultsMerger::RemoteCursorData::getShard() {
-    return grid.shardRegistry()->getShardNoReload(shardHostAndPort.toString());
-}
-
 //
 // AsyncResultsMerger::MergingComparator
 //
@@ -736,6 +727,38 @@ bool AsyncResultsMerger::MergingComparator::operator()(const size_t& lhs, const 
     return compareSortKeys(extractSortKey(*leftDoc.getResult(), _compareWholeSortKey),
                            extractSortKey(*rightDoc.getResult(), _compareWholeSortKey),
                            _sort) > 0;
+}
+
+void AsyncResultsMerger::blockingKill(OperationContext* opCtx) {
+    auto killEvent = kill(opCtx);
+    if (!killEvent) {
+        // We are shutting down.
+        return;
+    }
+    _executor->waitForEvent(killEvent);
+}
+
+StatusWith<ClusterQueryResult> AsyncResultsMerger::blockingNext() {
+    while (!ready()) {
+        auto nextEventStatus = nextEvent();
+        if (!nextEventStatus.isOK()) {
+            return nextEventStatus.getStatus();
+        }
+        auto event = nextEventStatus.getValue();
+
+        // Block until there are further results to return.
+        auto status = _executor->waitForEvent(_opCtx, event);
+
+        if (!status.isOK()) {
+            return status.getStatus();
+        }
+
+        // We have not provided a deadline, so if the wait returns without interruption, we do not
+        // expect to have timed out.
+        invariant(status.getValue() == stdx::cv_status::no_timeout);
+    }
+
+    return nextReady();
 }
 
 }  // namespace mongo

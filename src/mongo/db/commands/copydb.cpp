@@ -95,8 +95,8 @@ public:
         return true;
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -105,14 +105,14 @@ public:
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         return copydb::checkAuthForCopydbCommand(client, dbname, cmdObj);
     }
 
-    virtual void help(stringstream& help) const {
-        help << "copy a database from another host to this host\n";
-        help << "usage: {copydb: 1, fromhost: <connection string>, fromdb: <db>, todb: <db>"
-             << "[, slaveOk: <bool>, username: <username>, nonce: <nonce>, key: <key>]}";
+    std::string help() const override {
+        return "copy a database from another host to this host\n"
+               "usage: {copydb: 1, fromhost: <connection string>, fromdb: <db>, todb: <db>"
+               "[, slaveOk: <bool>, username: <username>, nonce: <nonce>, key: <key>]}";
     }
 
     virtual bool errmsgRun(OperationContext* opCtx,

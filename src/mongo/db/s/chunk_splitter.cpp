@@ -37,12 +37,11 @@
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/split_chunk.h"
 #include "mongo/db/s/split_vector.h"
+#include "mongo/db/service_context.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_manager.h"
@@ -117,7 +116,7 @@ void moveChunk(OperationContext* opCtx, const NamespaceString& nss, const BSONOb
     const auto suggestedChunk = routingInfo.cm()->findIntersectingChunkWithSimpleCollation(minKey);
 
     ChunkType chunkToMove;
-    chunkToMove.setNS(nss.ns());
+    chunkToMove.setNS(nss);
     chunkToMove.setShard(suggestedChunk->getShardId());
     chunkToMove.setMin(suggestedChunk->getMin());
     chunkToMove.setMax(suggestedChunk->getMax());
@@ -201,7 +200,7 @@ bool isAutoBalanceEnabled(OperationContext* opCtx,
     if (!balancerConfig->shouldBalanceForAutoSplit())
         return false;
 
-    auto collStatus = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss.ns());
+    auto collStatus = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
     if (!collStatus.isOK()) {
         log() << "Auto-split for " << nss << " failed to load collection metadata"
               << causedBy(redact(collStatus.getStatus()));
@@ -211,9 +210,11 @@ bool isAutoBalanceEnabled(OperationContext* opCtx,
     return collStatus.getValue().value.getAllowBalance();
 }
 
+const auto getChunkSplitter = ServiceContext::declareDecoration<ChunkSplitter>();
+
 }  // namespace
 
-ChunkSplitter::ChunkSplitter() : _isPrimary(false), _threadPool(makeDefaultThreadPoolOptions()) {
+ChunkSplitter::ChunkSplitter() : _threadPool(makeDefaultThreadPoolOptions()) {
     _threadPool.startup();
 }
 
@@ -222,13 +223,21 @@ ChunkSplitter::~ChunkSplitter() {
     _threadPool.join();
 }
 
+ChunkSplitter& ChunkSplitter::get(OperationContext* opCtx) {
+    return get(opCtx->getServiceContext());
+}
+
+ChunkSplitter& ChunkSplitter::get(ServiceContext* serviceContext) {
+    return getChunkSplitter(serviceContext);
+}
+
 void ChunkSplitter::setReplicaSetMode(bool isPrimary) {
     stdx::lock_guard<stdx::mutex> scopedLock(_mutex);
     _isPrimary = isPrimary;
 }
 
-void ChunkSplitter::initiateChunkSplitter() {
-    stdx::lock_guard<stdx::mutex> scopedLock(_mutex);
+void ChunkSplitter::onStepUp() {
+    stdx::lock_guard<stdx::mutex> lg(_mutex);
     if (_isPrimary) {
         return;
     }
@@ -238,8 +247,8 @@ void ChunkSplitter::initiateChunkSplitter() {
     // TODO: Re-enable this log line when auto split is actively running on shards.
 }
 
-void ChunkSplitter::interruptChunkSplitter() {
-    stdx::lock_guard<stdx::mutex> scopedLock(_mutex);
+void ChunkSplitter::onStepDown() {
+    stdx::lock_guard<stdx::mutex> lg(_mutex);
     if (!_isPrimary) {
         return;
     }

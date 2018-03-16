@@ -35,6 +35,8 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/snapshot.h"
 
 namespace mongo {
@@ -90,12 +92,11 @@ public:
      * transaction resources while minimizing the critical section between generating a new
      * timestamp and setting it using setTimestamp.
      */
-    virtual void prepareSnapshot() {}
+    virtual void preallocateSnapshot() {}
 
     /**
-     * Informs this RecoveryUnit that all future reads through it should be from a snapshot
-     * marked as Majority Committed. Snapshots should still be separately acquired and newer
-     * committed snapshots should be used if available whenever implementations would normally
+     * Obtains a majority committed snapshot. Snapshots should still be separately acquired and
+     * newer committed snapshots should be used if available whenever implementations would normally
      * change snapshots.
      *
      * If no snapshot has yet been marked as Majority Committed, returns a status with error code
@@ -107,28 +108,38 @@ public:
      * StorageEngines that don't support a SnapshotManager should use the default
      * implementation.
      */
-    virtual Status setReadFromMajorityCommittedSnapshot() {
+    virtual Status obtainMajorityCommittedSnapshot() {
         return {ErrorCodes::CommandNotSupported,
                 "Current storage engine does not support majority readConcerns"};
     }
 
     /**
-     * Returns true if setReadFromMajorityCommittedSnapshot() has been called.
+     * Set this operation's readConcern level and replication mode on the recovery unit.
      */
-    virtual bool isReadingFromMajorityCommittedSnapshot() const {
-        return false;
+    void setReadConcernLevelAndReplicationMode(repl::ReadConcernLevel readConcernLevel,
+                                               repl::ReplicationCoordinator::Mode replicationMode) {
+        _readConcernLevel = readConcernLevel;
+        _replicationMode = replicationMode;
+    }
+
+    /**
+     * Returns the readConcern level of this recovery unit.
+     */
+    repl::ReadConcernLevel getReadConcernLevel() const {
+        return _readConcernLevel;
     }
 
     /**
      * Returns the Timestamp being used by this recovery unit or boost::none if not reading from
-     * a majority committed snapshot.
-     *
-     * It is possible for reads to occur from later snapshots, but they may not occur from earlier
-     * snapshots.
+     * a point in time. Any point in time returned will reflect either:
+     *  - A timestamp set via call to setPointInTimeReadTimestamp()
+     *  - A majority committed snapshot timestamp (chosen by the storage engine when read-majority
+     *    has been enabled via call to obtainMajorityCommittedSnapshot())
      */
-    virtual boost::optional<Timestamp> getMajorityCommittedSnapshot() const {
-        dassert(!isReadingFromMajorityCommittedSnapshot());
-        return {};
+    virtual boost::optional<Timestamp> getPointInTimeReadTimestamp() const {
+        invariant(_readConcernLevel != repl::ReadConcernLevel::kMajorityReadConcern &&
+                  _readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
+        return boost::none;
     }
 
     /**
@@ -169,9 +180,9 @@ public:
     }
 
     /**
-     * Chooses which timestamp to use for read transactions.
+     * Sets which timestamp to use for read transactions.
      */
-    virtual Status selectSnapshot(Timestamp timestamp) {
+    virtual Status setPointInTimeReadTimestamp(Timestamp timestamp) {
         return Status(ErrorCodes::CommandNotSupported,
                       "point-in-time reads are not implemented for this storage engine");
     }
@@ -296,6 +307,8 @@ public:
 
 protected:
     RecoveryUnit() {}
+    repl::ReplicationCoordinator::Mode _replicationMode = repl::ReplicationCoordinator::modeNone;
+    repl::ReadConcernLevel _readConcernLevel = repl::ReadConcernLevel::kLocalReadConcern;
 };
 
 }  // namespace mongo

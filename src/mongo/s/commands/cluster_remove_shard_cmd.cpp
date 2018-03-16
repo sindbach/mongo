@@ -45,12 +45,12 @@ class RemoveShardCmd : public BasicCommand {
 public:
     RemoveShardCmd() : BasicCommand("removeShard", "removeshard") {}
 
-    void help(std::stringstream& help) const override {
-        help << "remove a shard from the system.";
+    std::string help() const override {
+        return "remove a shard from the system.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -63,7 +63,7 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::removeShard);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));

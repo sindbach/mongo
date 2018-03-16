@@ -65,12 +65,8 @@ public:
         return false;
     }
 
-    bool slaveOk() const final {
-        return false;
-    }
-
-    bool slaveOverrideOk() const final {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kOptIn;
     }
 
     bool maintenanceOk() const final {
@@ -85,8 +81,8 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const final {
-        help << "query for documents";
+    std::string help() const override {
+        return "query for documents";
     }
 
     /**
@@ -95,17 +91,18 @@ public:
      */
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) final {
+                               const BSONObj& cmdObj) const final {
         const NamespaceString nss(parseNs(dbname, cmdObj));
         auto hasTerm = cmdObj.hasField(kTermField);
         return AuthorizationSession::get(client)->checkAuthForFind(nss, hasTerm);
     }
 
     Status explain(OperationContext* opCtx,
-                   const std::string& dbname,
-                   const BSONObj& cmdObj,
+                   const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    BSONObjBuilder* out) const final {
+        std::string dbname = request.getDatabase().toString();
+        const BSONObj& cmdObj = request.body;
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbname, cmdObj));
         // Parse the command BSON to a QueryRequest.
         bool isExplain = true;

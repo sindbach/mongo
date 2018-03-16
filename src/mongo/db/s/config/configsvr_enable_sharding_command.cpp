@@ -39,7 +39,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/grid.h"
@@ -61,8 +61,8 @@ class ConfigSvrEnableShardingCommand : public BasicCommand {
 public:
     ConfigSvrEnableShardingCommand() : BasicCommand("_configsvrEnableSharding") {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool adminOnly() const {
@@ -73,14 +73,14 @@ public:
         return true;
     }
 
-    virtual void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Enable sharding on a database.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Enable sharding on a database.";
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) override {
+                                       const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(parseNs(dbname, cmdObj)), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -127,15 +127,9 @@ public:
         // Make sure to force update of any stale metadata
         ON_BLOCK_EXIT([opCtx, dbname] { Grid::get(opCtx)->catalogCache()->purgeDatabase(dbname); });
 
-        // Remove the backwards compatible lock after 3.6 ships.
-        auto const catalogClient = Grid::get(opCtx)->catalogClient();
-        auto backwardsCompatibleDbDistLock = uassertStatusOK(
-            catalogClient->getDistLockManager()->lock(opCtx,
-                                                      dbname + "-movePrimary",
-                                                      "enableSharding",
-                                                      DistLockManager::kDefaultLockTimeout));
-        auto dbDistLock = uassertStatusOK(catalogClient->getDistLockManager()->lock(
-            opCtx, dbname, "enableSharding", DistLockManager::kDefaultLockTimeout));
+        auto dbDistLock =
+            uassertStatusOK(Grid::get(opCtx)->catalogClient()->getDistLockManager()->lock(
+                opCtx, dbname, "enableSharding", DistLockManager::kDefaultLockTimeout));
 
         ShardingCatalogManager::get(opCtx)->enableSharding(opCtx, dbname);
         audit::logEnableSharding(Client::getCurrent(), dbname);

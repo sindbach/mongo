@@ -1,6 +1,7 @@
 /**
  * This tests that updates to user and role definitions made on one mongos propagate properly
  * to other mongoses.
+ * @tags: [requires_sharding]
  */
 
 var authzErrorCode = 13;
@@ -9,6 +10,7 @@ var hasAuthzError = function(result) {
     assert.eq(authzErrorCode, result.code);
 };
 
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 var st = new ShardingTest({
     shards: 2,
     config: 3,
@@ -17,7 +19,8 @@ var st = new ShardingTest({
         {setParameter: "userCacheInvalidationIntervalSecs=5"},
         {setParameter: "userCacheInvalidationIntervalSecs=600"}
     ],
-    keyFile: 'jstests/libs/key1'
+    keyFile: 'jstests/libs/key1',
+    other: {shardAsReplicaSet: false}
 });
 
 st.s1.getDB('admin').createUser({user: 'root', pwd: 'pwd', roles: ['root']});

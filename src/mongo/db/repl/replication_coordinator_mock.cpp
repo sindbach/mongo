@@ -78,15 +78,12 @@ const ReplSettings& ReplicationCoordinatorMock::getSettings() const {
 }
 
 bool ReplicationCoordinatorMock::isReplEnabled() const {
-    return _settings.usingReplSets() || _settings.isMaster() || _settings.isSlave();
+    return _settings.usingReplSets();
 }
 
 ReplicationCoordinator::Mode ReplicationCoordinatorMock::getReplicationMode() const {
     if (_settings.usingReplSets()) {
         return modeReplSet;
-    }
-    if (_settings.isMaster() || _settings.isSlave()) {
-        return modeMasterSlave;
     }
     return modeNone;
 }
@@ -141,7 +138,7 @@ bool ReplicationCoordinatorMock::canAcceptWritesForDatabase(OperationContext* op
     if (_alwaysAllowWrites) {
         return true;
     }
-    return dbName == "local" || _memberState.primary() || _settings.isMaster();
+    return dbName == "local" || _memberState.primary();
 }
 
 bool ReplicationCoordinatorMock::canAcceptWritesForDatabase_UNSAFE(OperationContext* opCtx,
@@ -176,10 +173,6 @@ Status ReplicationCoordinatorMock::checkCanServeReadsFor_UNSAFE(OperationContext
 bool ReplicationCoordinatorMock::shouldRelaxIndexConstraints(OperationContext* opCtx,
                                                              const NamespaceString& ns) {
     return !canAcceptWritesFor(opCtx, ns);
-}
-
-Status ReplicationCoordinatorMock::setLastOptimeForSlave(const OID& rid, const Timestamp& ts) {
-    return Status::OK();
 }
 
 void ReplicationCoordinatorMock::setMyHeartbeatMessage(const std::string& msg) {
@@ -361,11 +354,6 @@ Status ReplicationCoordinatorMock::processReplSetUpdatePosition(const UpdatePosi
     return Status::OK();
 }
 
-Status ReplicationCoordinatorMock::processHandshake(OperationContext* opCtx,
-                                                    const HandshakeArgs& handshake) {
-    return Status::OK();
-}
-
 bool ReplicationCoordinatorMock::buildsIndexes() {
     // TODO
     return true;
@@ -423,8 +411,7 @@ Status ReplicationCoordinatorMock::processReplSetRequestVotes(
     return Status::OK();
 }
 
-void ReplicationCoordinatorMock::prepareReplMetadata(OperationContext* opCtx,
-                                                     const BSONObj& metadataRequestObj,
+void ReplicationCoordinatorMock::prepareReplMetadata(const BSONObj& metadataRequestObj,
                                                      const OpTime& lastOpTimeFromClient,
                                                      BSONObjBuilder* builder) const {}
 
@@ -493,10 +480,6 @@ Status ReplicationCoordinatorMock::stepUpIfEligible() {
 
 void ReplicationCoordinatorMock::alwaysAllowWrites(bool allowWrites) {
     _alwaysAllowWrites = allowWrites;
-}
-
-void ReplicationCoordinatorMock::setMaster(bool isMaster) {
-    _settings.setMaster(isMaster);
 }
 
 Status ReplicationCoordinatorMock::abortCatchupIfNeeded() {

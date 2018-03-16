@@ -3,9 +3,6 @@
  * - When non-'available' read concern is specified (local in this case), the secondary participates
  *   in the shard versioning protocol and filters returned documents using its routing table cache.
  *
- * Since some commands are unversioned even against primaries or cannot be run on sharded
- * collections, this file declaratively defines the expected behavior for each command.
- *
  * If versioned secondary reads do not apply to a command, it should specify "skip" with the reason.
  *
  * The following fields are required for each command that is not skipped:
@@ -16,8 +13,8 @@
  * - checkResults: A function that asserts whether the command should succeed or fail. If the
  *                 command is expected to succeed, the function should assert the expected results
  *                 *when the range has been deleted on the donor.*
- * - behavior: Must be one of "unshardedOnly", "targetsPrimaryUsesConnectionVersioning",
- *             "unversioned", or "versioned". Determines what system profiler checks are performed.
+ * - behavior: Must be one of "unshardedOnly", "targetsPrimaryUsesConnectionVersioning" or
+ * "versioned". Determines what system profiler checks are performed.
  */
 (function() {
     "use strict";
@@ -28,35 +25,18 @@
     let coll = "foo";
     let nss = db + "." + coll;
 
-    // Given a command, build its expected shape in the system profiler.
-    let buildCommandProfile = function(command) {
-        let commandProfile = {ns: nss};
-        if (command.mapReduce) {
-            // Unlike other read commands, mapReduce is rewritten to a different format when sent to
-            // shards if the input collection is sharded, because it is executed in two phases.
-            // We do not check for the 'map' and 'reduce' fields, because they are functions, and
-            // we cannot compaare functions for equality.
-            commandProfile["command.out"] = {$regex: "^tmp.mrs"};
-            commandProfile["command.shardedFirstPass"] = true;
-        } else {
-            for (let key in command) {
-                commandProfile["command." + key] = command[key];
-            }
-        }
-        return commandProfile;
-    };
-
     // Check that a test case is well-formed.
     let validateTestCase = function(test) {
         assert(test.setUp && typeof(test.setUp) === "function");
         assert(test.command && typeof(test.command) === "object");
         assert(test.checkResults && typeof(test.checkResults) === "function");
-        assert(test.behavior === "unshardedOnly" || test.behavior === "unversioned" ||
+        assert(test.behavior === "unshardedOnly" ||
                test.behavior === "targetsPrimaryUsesConnectionVersioning" ||
                test.behavior === "versioned");
     };
 
     let testCases = {
+        _cloneCatalogData: {skip: "primary only"},
         _configsvrAddShard: {skip: "primary only"},
         _configsvrAddShardToZone: {skip: "primary only"},
         _configsvrBalancerStart: {skip: "primary only"},
@@ -65,6 +45,7 @@
         _configsvrCommitChunkMerge: {skip: "primary only"},
         _configsvrCommitChunkMigration: {skip: "primary only"},
         _configsvrCommitChunkSplit: {skip: "primary only"},
+        _configsvrCommitMovePrimary: {skip: "primary only"},
         _configsvrDropCollection: {skip: "primary only"},
         _configsvrDropDatabase: {skip: "primary only"},
         _configsvrMoveChunk: {skip: "primary only"},
@@ -78,11 +59,13 @@
         _isSelf: {skip: "does not return user data"},
         _mergeAuthzCollections: {skip: "primary only"},
         _migrateClone: {skip: "primary only"},
+        _movePrimary: {skip: "primary only"},
         _recvChunkAbort: {skip: "primary only"},
         _recvChunkCommit: {skip: "primary only"},
         _recvChunkStart: {skip: "primary only"},
         _recvChunkStatus: {skip: "primary only"},
         _transferMods: {skip: "primary only"},
+        abortTransaction: {skip: "primary only"},
         addShard: {skip: "primary only"},
         addShardToZone: {skip: "primary only"},
         aggregate: {
@@ -114,6 +97,7 @@
         cloneCollectionAsCapped: {skip: "primary only"},
         collMod: {skip: "primary only"},
         collStats: {skip: "does not return user data"},
+        commitTransaction: {skip: "primary only"},
         compact: {skip: "does not return user data"},
         configureFailPoint: {skip: "does not return user data"},
         connPoolStats: {skip: "does not return user data"},
@@ -185,7 +169,6 @@
         },
         findAndModify: {skip: "primary only"},
         flushRouterConfig: {skip: "does not return user data"},
-        forceerror: {skip: "does not return user data"},
         fsync: {skip: "does not return user data"},
         fsyncUnlock: {skip: "does not return user data"},
         geoNear: {
@@ -196,11 +179,11 @@
             },
             command: {geoNear: coll, near: [1, 1]},
             checkResults: function(res) {
+                // The command should work and return correct results due to rerouting
                 assert.commandWorked(res);
-                // Expect the command not to find any results, since the chunk moved.
-                assert.eq(0, res.results.length, tojson(res));
+                assert.eq(1, res.results.length, tojson(res));
             },
-            behavior: "unversioned"
+            behavior: "versioned"
         },
         geoSearch: {skip: "not supported in mongos"},
         getCmdLineOpts: {skip: "does not return user data"},
@@ -319,6 +302,7 @@
         replSetUpdatePosition: {skip: "does not return user data"},
         replSetResizeOplog: {skip: "does not return user data"},
         resetError: {skip: "does not return user data"},
+        restartCatalog: {skip: "internal-only command"},
         resync: {skip: "primary only"},
         revokePrivilegesFromRole: {skip: "primary only"},
         revokeRolesFromRole: {skip: "primary only"},
@@ -419,30 +403,13 @@
         test.checkResults(res);
 
         // Build the query to identify the operation in the system profiler.
-        let commandProfile = buildCommandProfile(test.command);
+        let commandProfile = buildCommandProfile(test.command, true /* sharded */);
 
         if (test.behavior === "unshardedOnly") {
             // Check that neither the donor shard secondary nor recipient shard secondary
             // received the request.
             profilerHasZeroMatchingEntriesOrThrow(
                 {profileDB: donorShardSecondary.getDB(db), filter: commandProfile});
-            profilerHasZeroMatchingEntriesOrThrow(
-                {profileDB: recipientShardSecondary.getDB(db), filter: commandProfile});
-        } else if (test.behavior === "unversioned") {
-            // Check that the donor shard secondary received the request *without* an attached
-            // shardVersion and returned success.
-            profilerHasSingleMatchingEntryOrThrow({
-                profileDB: donorShardSecondary.getDB(db),
-                filter: Object.extend({
-                    "command.shardVersion": {"$exists": false},
-                    "command.$readPreference": {"mode": "secondary"},
-                    "command.readConcern": {"level": "local"},
-                    "exceptionCode": {"$ne": ErrorCodes.StaleConfig},
-                },
-                                      commandProfile)
-            });
-
-            // Check that the recipient shard secondary did not receive the request.
             profilerHasZeroMatchingEntriesOrThrow(
                 {profileDB: recipientShardSecondary.getDB(db), filter: commandProfile});
         } else if (test.behavior === "targetsPrimaryUsesConnectionVersioning") {
@@ -454,7 +421,7 @@
                     "command.shardVersion": {"$exists": false},
                     "command.$readPreference": {$exists: false},
                     "command.readConcern": {"level": "local"},
-                    "exceptionCode": {"$exists": false},
+                    "errCode": {"$exists": false},
                 },
                                       commandProfile)
             });
@@ -466,7 +433,7 @@
                     "command.shardVersion": {"$exists": true},
                     "command.$readPreference": {"mode": "secondary"},
                     "command.readConcern": {"level": "local"},
-                    "exceptionCode": ErrorCodes.StaleConfig
+                    "errCode": ErrorCodes.StaleConfig
                 },
                                       commandProfile)
             });
@@ -480,7 +447,7 @@
                     "command.shardVersion": {"$exists": true},
                     "command.$readPreference": {"mode": "secondary"},
                     "command.readConcern": {"level": "local"},
-                    "exceptionCode": ErrorCodes.StaleConfig
+                    "errCode": ErrorCodes.StaleConfig
                 },
                                       commandProfile)
             });
@@ -493,7 +460,7 @@
                     "command.shardVersion": {"$exists": true},
                     "command.$readPreference": {"mode": "secondary"},
                     "command.readConcern": {"level": "local"},
-                    "exceptionCode": {"$ne": ErrorCodes.StaleConfig},
+                    "errCode": {"$ne": ErrorCodes.StaleConfig},
                 },
                                       commandProfile)
             });

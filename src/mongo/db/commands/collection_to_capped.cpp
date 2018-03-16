@@ -40,7 +40,7 @@
 #include "mongo/db/op_observer.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 
 namespace mongo {
@@ -52,18 +52,18 @@ using std::stringstream;
 class CmdCloneCollectionAsCapped : public ErrmsgCommandDeprecated {
 public:
     CmdCloneCollectionAsCapped() : ErrmsgCommandDeprecated("cloneCollectionAsCapped") {}
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
-    virtual void help(stringstream& help) const {
-        help << "{ cloneCollectionAsCapped:<fromName>, toCollection:<toName>, size:<sizeInBytes> }";
+    std::string help() const override {
+        return "{ cloneCollectionAsCapped:<fromName>, toCollection:<toName>, size:<sizeInBytes> }";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet sourceActions;
         sourceActions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), sourceActions));
@@ -151,18 +151,18 @@ public:
 class CmdConvertToCapped : public ErrmsgCommandDeprecated {
 public:
     CmdConvertToCapped() : ErrmsgCommandDeprecated("convertToCapped") {}
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
-    virtual void help(stringstream& help) const {
-        help << "{ convertToCapped:<fromCollectionName>, size:<sizeInBytes> }";
+    std::string help() const override {
+        return "{ convertToCapped:<fromCollectionName>, size:<sizeInBytes> }";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::convertToCapped);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));

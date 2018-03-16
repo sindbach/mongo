@@ -30,13 +30,9 @@
 
 #include "mongo/platform/basic.h"
 
-#include <vector>
-
-#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -44,9 +40,6 @@
 #include "mongo/util/log.h"
 
 namespace mongo {
-
-using std::string;
-
 namespace {
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference{ReadPreference::PrimaryOnly};
@@ -69,37 +62,36 @@ class AddShardToZoneCmd : public BasicCommand {
 public:
     AddShardToZoneCmd() : BasicCommand("addShardToZone", "addshardtozone") {}
 
-    virtual bool slaveOk() const {
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool adminOnly() const {
-        return true;
-    }
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "adds a shard to zone";
+    std::string help() const override {
+        return "adds a shard to zone";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(ShardType::ConfigNS)),
-                ActionType::update)) {
+                ResourcePattern::forExactNamespace(ShardType::ConfigNS), ActionType::update)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
     }
 
-    virtual bool run(OperationContext* opCtx,
-                     const std::string& dbname,
-                     const BSONObj& cmdObj,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
         auto parsedRequest = uassertStatusOK(AddShardToZoneRequest::parseFromMongosCommand(cmdObj));
 
         BSONObjBuilder cmdBuilder;

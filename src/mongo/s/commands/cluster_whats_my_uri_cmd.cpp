@@ -38,8 +38,8 @@ class WhatsMyUriCmd : public BasicCommand {
 public:
     WhatsMyUriCmd() : BasicCommand("whatsmyuri") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
 
@@ -47,13 +47,13 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "{whatsmyuri:1}";
+    std::string help() const override {
+        return "{whatsmyuri:1}";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         // No auth required
     }
 

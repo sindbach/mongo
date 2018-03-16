@@ -51,8 +51,8 @@ class StartSessionCommand final : public BasicCommand {
 public:
     StartSessionCommand() : BasicCommand("startSession") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     bool adminOnly() const override {
         return false;
@@ -60,12 +60,12 @@ public:
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    void help(std::stringstream& help) const override {
-        help << "start a logical session";
+    std::string help() const override {
+        return "start a logical session";
     }
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const std::string& dbname,
-                                 const BSONObj& cmdObj) override {
+                                 const BSONObj& cmdObj) const override {
         return Status::OK();
     }
 

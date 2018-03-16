@@ -45,9 +45,8 @@
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/password_digest.h"
 #include "mongo/util/stringutils.h"
 
 namespace mongo {
@@ -57,7 +56,7 @@ using std::vector;
 
 Status _checkNoExtraFields(const BSONObj& cmdObj,
                            StringData cmdName,
-                           const unordered_set<std::string>& validFieldNames) {
+                           const stdx::unordered_set<std::string>& validFieldNames) {
     // Iterate through all fields in command object and make sure there are no unexpected
     // ones.
     for (BSONObjIterator iter(cmdObj); iter.more(); iter.next()) {
@@ -149,7 +148,7 @@ Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
                                                const std::string& dbname,
                                                std::string* parsedName,
                                                vector<RoleName>* parsedRoleNames) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("roles");
 
@@ -186,13 +185,14 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
                                        StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateUserArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("customData");
     validFieldNames.insert("digestPassword");
     validFieldNames.insert("pwd");
     validFieldNames.insert("roles");
     validFieldNames.insert("authenticationRestrictions");
+    validFieldNames.insert("mechanisms");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
     if (!status.isOK()) {
@@ -213,30 +213,41 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
 
     parsedArgs->userName = UserName(userName, dbname);
 
+    // Parse mechanisms
+    if (cmdObj.hasField("mechanisms")) {
+        const auto mechsElem = cmdObj["mechanisms"];
+        if (mechsElem.type() != Array) {
+            return {ErrorCodes::UnsupportedFormat, "mechanisms field must be an array"};
+        }
+        const auto mechs = mechsElem.Obj();
+        if (mechs.nFields() == 0) {
+            return {ErrorCodes::UnsupportedFormat, "mechanisms field must not be empty"};
+        }
+        for (auto elem : mechs) {
+            if (elem.type() != String) {
+                return {ErrorCodes::BadValue, "mechanisms field must be an array of strings"};
+            }
+            parsedArgs->mechanisms.push_back(elem.String());
+        }
+    }
+
     // Parse password
     if (cmdObj.hasField("pwd")) {
-        std::string password;
-        status = bsonExtractStringField(cmdObj, "pwd", &password);
+        status = bsonExtractStringField(cmdObj, "pwd", &parsedArgs->password);
         if (!status.isOK()) {
             return status;
         }
-        if (password.empty()) {
+        if (parsedArgs->password.empty()) {
             return Status(ErrorCodes::BadValue, "User passwords must not be empty");
         }
+        parsedArgs->hasPassword = true;
 
-        bool digestPassword;  // True if the server should digest the password
-        status =
-            bsonExtractBooleanFieldWithDefault(cmdObj, "digestPassword", true, &digestPassword);
+        // True if the server should digest the password
+        status = bsonExtractBooleanFieldWithDefault(
+            cmdObj, "digestPassword", true, &parsedArgs->digestPassword);
         if (!status.isOK()) {
             return status;
         }
-
-        if (digestPassword) {
-            parsedArgs->hashedPassword = mongo::createPasswordDigest(userName, password);
-        } else {
-            parsedArgs->hashedPassword = password;
-        }
-        parsedArgs->hasHashedPassword = true;
     }
 
     // Parse custom data
@@ -281,7 +292,7 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
 Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
                                        const std::string& dbname,
                                        UserName* parsedUserName) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("dropUser");
 
     Status status = _checkNoExtraFields(cmdObj, "dropUser", validFieldNames);
@@ -302,7 +313,7 @@ Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
 Status parseFromDatabaseCommand(const BSONObj& cmdObj,
                                 const std::string& dbname,
                                 std::string command) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(command);
 
     Status status = _checkNoExtraFields(cmdObj, command, validFieldNames);
@@ -318,7 +329,7 @@ Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
 }
 
 Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfoArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("usersInfo");
     validFieldNames.insert("showAuthenticationRestrictions");
     validFieldNames.insert("showPrivileges");
@@ -380,7 +391,7 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfo
 }
 
 Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfoArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("rolesInfo");
     validFieldNames.insert("showPrivileges");
     validFieldNames.insert("showAuthenticationRestrictions");
@@ -501,7 +512,7 @@ Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
                                        StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateRoleArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("privileges");
     validFieldNames.insert("roles");
@@ -577,7 +588,7 @@ Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
                                                          const std::string& dbname,
                                                          RoleName* parsedRoleName,
                                                          PrivilegeVector* parsedPrivileges) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("privileges");
 
@@ -618,7 +629,7 @@ Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
 Status parseDropRoleCommand(const BSONObj& cmdObj,
                             const std::string& dbname,
                             RoleName* parsedRoleName) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("dropRole");
 
     Status status = _checkNoExtraFields(cmdObj, "dropRole", validFieldNames);
@@ -642,7 +653,7 @@ Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj, const std::st
 
 Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
                                          MergeAuthzCollectionsArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("_mergeAuthzCollections");
     validFieldNames.insert("tempUsersCollection");
     validFieldNames.insert("tempRolesCollection");

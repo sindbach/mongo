@@ -35,11 +35,11 @@
 #include <limits>
 #include <string>
 
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/client.h"
 #include "mongo/db/mongod_options.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/handshake_args.h"
 #include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/is_master_response.h"
 #include "mongo/db/repl/isself.h"
@@ -62,7 +62,7 @@
 
 namespace mongo {
 namespace repl {
-using std::vector;
+
 const Seconds TopologyCoordinator::VoteLease::leaseTime = Seconds(30);
 
 // Controls how caught up in replication a secondary with higher priority than the current primary
@@ -939,10 +939,7 @@ std::pair<ReplSetHeartbeatArgs, Milliseconds> TopologyCoordinator::prepareHeartb
         hbArgs.setSetName(ourSetName);
         hbArgs.setConfigVersion(-2);
     }
-    if (serverGlobalParams.featureCompatibility.getVersion() !=
-        ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34) {
-        hbArgs.setHeartbeatVersion(1);
-    }
+    hbArgs.setHeartbeatVersion(1);
 
     const Milliseconds timeoutPeriod(
         _rsConfig.isInitialized() ? _rsConfig.getHeartbeatTimeoutPeriodMillis()
@@ -978,10 +975,7 @@ std::pair<ReplSetHeartbeatArgsV1, Milliseconds> TopologyCoordinator::prepareHear
         hbArgs.setConfigVersion(-2);
         hbArgs.setTerm(OpTime::kInitialTerm);
     }
-    if (serverGlobalParams.featureCompatibility.getVersion() !=
-        ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34) {
-        hbArgs.setHeartbeatVersion(1);
-    }
+    hbArgs.setHeartbeatVersion(1);
 
     const Milliseconds timeoutPeriod(
         _rsConfig.isInitialized() ? _rsConfig.getHeartbeatTimeoutPeriodMillis()
@@ -1199,14 +1193,9 @@ HeartbeatResponseAction TopologyCoordinator::checkMemberTimeouts(Date_t now) {
 }
 
 std::vector<HostAndPort> TopologyCoordinator::getHostsWrittenTo(const OpTime& op,
-                                                                bool durablyWritten,
-                                                                bool skipSelf) {
+                                                                bool durablyWritten) {
     std::vector<HostAndPort> hosts;
     for (const auto& memberData : _memberData) {
-        if (skipSelf && memberData.isSelf()) {
-            continue;
-        }
-
         if (durablyWritten) {
             if (memberData.getLastDurableOpTime() < op) {
                 continue;
@@ -1355,57 +1344,11 @@ StatusWith<bool> TopologyCoordinator::setLastOptime(const UpdatePositionArgs::Up
     return advancedOpTime;
 }
 
-void TopologyCoordinator::setLastOptimeForSlave(const OID& rid, const OpTime& opTime, Date_t now) {
-    massert(28576,
-            "Received an old style replication progress update, which is only used for Master/"
-            "Slave replication now, but this node is not using Master/Slave replication. "
-            "This is likely caused by an old (pre-2.6) member syncing from this node.",
-            !_rsConfig.isInitialized());
-    auto* memberData = _findMemberDataByRid(rid);
-    if (memberData) {
-        memberData->advanceLastAppliedOpTime(opTime, now);
-    } else {
-        invariant(!_memberData.empty());  // Must always have our own entry first.
-        _memberData.emplace_back();
-        memberData = &_memberData.back();
-        memberData->setRid(rid);
-        memberData->setLastAppliedOpTime(opTime, now);
-    }
-}
-
-void TopologyCoordinator::setMyRid(const OID& rid) {
-    _selfMemberData().setRid(rid);
-}
-
 MemberData* TopologyCoordinator::_findMemberDataByMemberId(const int memberId) {
     const int memberIndex = _getMemberIndex(memberId);
     if (memberIndex >= 0)
         return &_memberData[memberIndex];
     return nullptr;
-}
-
-MemberData* TopologyCoordinator::_findMemberDataByRid(const OID rid) {
-    for (auto& memberData : _memberData) {
-        if (memberData.getRid() == rid)
-            return &memberData;
-    }
-    return nullptr;
-}
-
-Status TopologyCoordinator::processHandshake(const OID& rid, const HostAndPort& hostAndPort) {
-    if (_rsConfig.isInitialized()) {
-        return Status(ErrorCodes::IllegalOperation,
-                      "The handshake command is only used for master/slave replication");
-    }
-    auto* memberData = _findMemberDataByRid(rid);
-    if (!memberData) {
-        invariant(!_memberData.empty());  // Must always have our own entry first.
-        _memberData.emplace_back();
-        auto& newMember = _memberData.back();
-        newMember.setRid(rid);
-        newMember.setHostAndPort(hostAndPort);
-    }
-    return Status::OK();
 }
 
 HeartbeatResponseAction TopologyCoordinator::_updatePrimaryFromHBDataV1(
@@ -1690,7 +1633,7 @@ HeartbeatResponseAction TopologyCoordinator::_updatePrimaryFromHBData(
         LOG(2) << "TopologyCoordinator::_updatePrimaryFromHBData - " << status.reason();
         return HeartbeatResponseAction::makeNoAction();
     }
-    fassertStatusOK(28816, becomeCandidateIfElectable(now, StartElectionReason::kElectionTimeout));
+    fassert(28816, becomeCandidateIfElectable(now, StartElectionReason::kElectionTimeout));
     return HeartbeatResponseAction::makeElectAction();
 }
 
@@ -1915,6 +1858,11 @@ Status TopologyCoordinator::prepareForStepDownAttempt() {
         return Status{ErrorCodes::ConflictingOperationInProgress,
                       "This node is already in the process of stepping down"};
     }
+
+    if (_leaderMode == LeaderMode::kNotLeader) {
+        return Status{ErrorCodes::NotMaster, "This node is not a primary."};
+    }
+
     _setLeaderMode(LeaderMode::kAttemptingStepDown);
     return Status::OK();
 }
@@ -1995,7 +1943,7 @@ void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatu
                                                 BSONObjBuilder* response,
                                                 Status* result) {
     // output for each member
-    vector<BSONObj> membersOut;
+    std::vector<BSONObj> membersOut;
     const MemberState myState = getMemberState();
     const Date_t now = rsStatusArgs.now;
     const OpTime lastOpApplied = getMyLastAppliedOpTime();
@@ -2206,7 +2154,6 @@ void TopologyCoordinator::fillMemberData(BSONObjBuilder* result) {
     {
         for (const auto& memberData : _memberData) {
             BSONObjBuilder entry(replicationProgress.subobjStart());
-            entry.append("rid", memberData.getRid());
             const auto lastDurableOpTime = memberData.getLastDurableOpTime();
             if (_rsConfig.getProtocolVersion() == 1) {
                 BSONObjBuilder opTime(entry.subobjStart("optime"));
@@ -2489,8 +2436,8 @@ const int TopologyCoordinator::_selfMemberDataIndex() const {
     invariant(!_memberData.empty());
     if (_selfIndex >= 0)
         return _selfIndex;
-    // In master-slave mode, the first entry is for self.  If there is no config
-    // or we're not in the config, the first-and-only entry should be for self.
+    // If there is no config or we're not in the config, the first-and-only entry should be for
+    // self.
     return 0;
 }
 

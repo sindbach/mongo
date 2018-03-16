@@ -60,7 +60,8 @@
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
@@ -392,6 +393,9 @@ IndexCatalogImpl::IndexBuildBlock::IndexBuildBlock(OperationContext* opCtx,
 }
 
 Status IndexCatalogImpl::IndexBuildBlock::init() {
+    // Being in a WUOW means all timestamping responsibility can be pushed up to the caller.
+    invariant(_opCtx->lockState()->inAWriteUnitOfWork());
+
     // need this first for names, etc...
     BSONObj keyPattern = _spec.getObjectField("key");
     auto descriptor = stdx::make_unique<IndexDescriptor>(
@@ -402,7 +406,15 @@ Status IndexCatalogImpl::IndexBuildBlock::init() {
 
     /// ----------   setup on disk structures ----------------
 
-    Status status = _collection->getCatalogEntry()->prepareForIndexBuild(_opCtx, descriptor.get());
+    bool isBackgroundSecondaryBuild = false;
+    if (auto replCoord = repl::ReplicationCoordinator::get(_opCtx)) {
+        isBackgroundSecondaryBuild =
+            replCoord->getReplicationMode() == repl::ReplicationCoordinator::Mode::modeReplSet &&
+            replCoord->getMemberState().secondary() && _spec["background"].trueValue();
+    }
+
+    Status status = _collection->getCatalogEntry()->prepareForIndexBuild(
+        _opCtx, descriptor.get(), isBackgroundSecondaryBuild);
     if (!status.isOK())
         return status;
 
@@ -425,6 +437,8 @@ IndexCatalogImpl::IndexBuildBlock::~IndexBuildBlock() {
 }
 
 void IndexCatalogImpl::IndexBuildBlock::fail() {
+    // Being in a WUOW means all timestamping responsibility can be pushed up to the caller.
+    invariant(_opCtx->lockState()->inAWriteUnitOfWork());
     fassert(17204, _catalog->_getCollection()->ok());  // defensive
 
     IndexCatalogEntry* entry = IndexCatalog::_getEntries(_catalog).find(_indexName);
@@ -438,6 +452,9 @@ void IndexCatalogImpl::IndexBuildBlock::fail() {
 }
 
 void IndexCatalogImpl::IndexBuildBlock::success() {
+    // Being in a WUOW means all timestamping responsibility can be pushed up to the caller.
+    invariant(_opCtx->lockState()->inAWriteUnitOfWork());
+
     Collection* collection = _catalog->_getCollection();
     fassert(17207, collection->ok());
     NamespaceString ns(_indexNamespace);
@@ -1080,14 +1097,34 @@ int IndexCatalogImpl::numIndexesTotal(OperationContext* opCtx) const {
 }
 
 int IndexCatalogImpl::numIndexesReady(OperationContext* opCtx) const {
-    int count = 0;
+    std::vector<IndexDescriptor*> itIndexes;
     IndexIterator ii = _this->getIndexIterator(opCtx, /*includeUnfinished*/ false);
     while (ii.more()) {
-        ii.next();
-        count++;
+        itIndexes.push_back(ii.next());
     }
-    dassert(_collection->getCatalogEntry()->getCompletedIndexCount(opCtx) == count);
-    return count;
+    DEV {
+        std::vector<std::string> completedIndexes;
+        _collection->getCatalogEntry()->getReadyIndexes(opCtx, &completedIndexes);
+
+        // There is a potential inconistency where the index information in the collection catalog
+        // entry and the index catalog differ. Log as much information as possible here.
+        if (itIndexes.size() != completedIndexes.size()) {
+            log() << "index catalog reports: ";
+            for (IndexDescriptor* i : itIndexes) {
+                log() << "  index: " << i->toString();
+            }
+
+            log() << "collection catalog reports: ";
+            for (auto const& i : completedIndexes) {
+                log() << "  index: " << i;
+            }
+
+            invariant(itIndexes.size() == completedIndexes.size(),
+                      "The number of ready indexes reported in the collection metadata catalog did "
+                      "not match the number of ready indexes reported by the index catalog.");
+        }
+    }
+    return itIndexes.size();
 }
 
 bool IndexCatalogImpl::haveIdIndex(OperationContext* opCtx) const {
@@ -1144,7 +1181,7 @@ void IndexCatalogImpl::IndexIteratorImpl::_advance() {
 
         if (!_includeUnfinishedIndexes) {
             if (auto minSnapshot = entry->getMinimumVisibleSnapshot()) {
-                if (auto mySnapshot = _opCtx->recoveryUnit()->getMajorityCommittedSnapshot()) {
+                if (auto mySnapshot = _opCtx->recoveryUnit()->getPointInTimeReadTimestamp()) {
                     if (mySnapshot < minSnapshot) {
                         // This index isn't finished in my snapshot.
                         continue;

@@ -60,7 +60,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/key_string.h"
@@ -268,7 +268,9 @@ Status CollectionImpl::checkValidation(OperationContext* opCtx, const BSONObj& d
 StatusWithMatchExpression CollectionImpl::parseValidator(
     OperationContext* opCtx,
     const BSONObj& validator,
-    MatchExpressionParser::AllowedFeatureSet allowedFeatures) const {
+    MatchExpressionParser::AllowedFeatureSet allowedFeatures,
+    boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
+        maxFeatureCompatibilityVersion) const {
     if (validator.isEmpty())
         return {nullptr};
 
@@ -293,6 +295,9 @@ StatusWithMatchExpression CollectionImpl::parseValidator(
     // The MatchExpression and contained ExpressionContext created as part of the validator are
     // owned by the Collection and will outlive the OperationContext they were created under.
     expCtx->opCtx = nullptr;
+
+    // Enforce a maximum feature version if requested.
+    expCtx->maxFeatureCompatibilityVersion = maxFeatureCompatibilityVersion;
 
     auto statusWithMatcher =
         MatchExpressionParser::parse(validator, expCtx, ExtensionsCallbackNoop(), allowedFeatures);
@@ -506,11 +511,16 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
     return status;
 }
 
+bool CollectionImpl::haveCappedWaiters() {
+    // Waiters keep a shared_ptr to '_cappedNotifier', so there are waiters if this CollectionImpl's
+    // shared_ptr is not unique (use_count > 1).
+    return _cappedNotifier.use_count() > 1;
+}
+
 void CollectionImpl::notifyCappedWaitersIfNeeded() {
     // If there is a notifier object and another thread is waiting on it, then we notify
-    // waiters of this document insert. Waiters keep a shared_ptr to '_cappedNotifier', so
-    // there are waiters if this CollectionImpl's shared_ptr is not unique (use_count > 1).
-    if (_cappedNotifier && !_cappedNotifier.unique())
+    // waiters of this document insert.
+    if (haveCappedWaiters())
         _cappedNotifier->notifyAll();
 }
 
@@ -1277,7 +1287,10 @@ Status CollectionImpl::validate(OperationContext* opCtx,
             opCtx, &indexConsistency, level, &_indexCatalog, &indexNsResultsMap);
 
         // Validate the record store
-        log(LogComponent::kIndex) << "validating collection " << ns().toString() << endl;
+        std::string uuidString = str::stream()
+            << " (UUID: " << (uuid() ? uuid()->toString() : "none") << ")";
+        log(LogComponent::kIndex) << "validating collection " << ns().toString() << uuidString
+                                  << endl;
         _validateRecordStore(
             opCtx, _recordStore, level, background, &indexValidator, results, output);
 
@@ -1311,9 +1324,10 @@ Status CollectionImpl::validate(OperationContext* opCtx,
 
         if (!results->valid) {
             log(LogComponent::kIndex) << "validating collection " << ns().toString() << " failed"
-                                      << endl;
+                                      << uuidString << endl;
         } else {
-            log(LogComponent::kIndex) << "validated collection " << ns().toString() << endl;
+            log(LogComponent::kIndex) << "validated collection " << ns().toString() << uuidString
+                                      << endl;
         }
     } catch (DBException& e) {
         if (ErrorCodes::isInterruption(e.code())) {

@@ -48,7 +48,7 @@
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/server_options.h"
@@ -216,13 +216,13 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
-    virtual bool slaveOk() const {
-        return false;
-    }  // TODO: this could be made true...
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
+    }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         ActionSet actions;
         actions.addAction(ActionType::createIndex);
         Privilege p(parseResourcePattern(dbname, cmdObj), actions);
@@ -255,6 +255,9 @@ public:
         }
         auto specs = std::move(specsWithStatus.getValue());
 
+        // Index builds cannot currently handle lock interruption.
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+
         // now we know we have to create index(es)
         // Note: createIndexes command does not currently respect shard versioning.
         Lock::DBLock dbLock(opCtx, ns.db(), MODE_X);
@@ -278,6 +281,11 @@ public:
                 errmsg = "Cannot create indexes on a view";
                 return CommandHelpers::appendCommandStatus(
                     result, {ErrorCodes::CommandNotSupportedOnView, errmsg});
+            }
+
+            status = userAllowedCreateNS(ns.db(), ns.coll());
+            if (!status.isOK()) {
+                return CommandHelpers::appendCommandStatus(result, status);
             }
 
             writeConflictRetry(opCtx, kCommandName, ns.ns(), [&] {

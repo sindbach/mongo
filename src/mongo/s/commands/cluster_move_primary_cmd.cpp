@@ -57,8 +57,8 @@ class MoveDatabasePrimaryCommand : public BasicCommand {
 public:
     MoveDatabasePrimaryCommand() : BasicCommand("movePrimary", "moveprimary") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -69,13 +69,13 @@ public:
         return true;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << " example: { moveprimary : 'foo' , to : 'localhost:9999' }";
+    std::string help() const override {
+        return " example: { moveprimary : 'foo' , to : 'localhost:9999' }";
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(parseNs(dbname, cmdObj)), ActionType::moveChunk)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -105,6 +105,7 @@ public:
         ConfigsvrMovePrimary configMovePrimaryRequest;
         configMovePrimaryRequest.set_configsvrMovePrimary(nss);
         configMovePrimaryRequest.setTo(movePrimaryRequest.getTo());
+        configMovePrimaryRequest.setForTest(movePrimaryRequest.getForTest());
 
         // Invalidate the routing table cache entry for this database so that we reload the
         // collection the next time it's accessed, even if we receive a failure, e.g. NetworkError.

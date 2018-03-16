@@ -47,10 +47,9 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/random.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -73,7 +72,6 @@ namespace repl {
 
 class ElectCmdRunner;
 class FreshnessChecker;
-class HandshakeArgs;
 class HeartbeatResponseAction;
 class LastVote;
 class OplogReader;
@@ -147,8 +145,6 @@ public:
 
     virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
-    virtual Status setLastOptimeForSlave(const OID& rid, const Timestamp& ts);
-
     virtual void setMyLastAppliedOpTime(const OpTime& opTime);
     virtual void setMyLastDurableOpTime(const OpTime& opTime);
 
@@ -170,8 +166,6 @@ public:
                                           const ReadConcernArgs& readConcern) override;
 
     virtual OID getElectionId() override;
-
-    virtual OID getMyRID() const override;
 
     virtual int getMyId() const override;
 
@@ -237,9 +231,6 @@ public:
     virtual Status processReplSetUpdatePosition(const UpdatePositionArgs& updates,
                                                 long long* configVersion) override;
 
-    virtual Status processHandshake(OperationContext* opCtx,
-                                    const HandshakeArgs& handshake) override;
-
     virtual bool buildsIndexes() override;
 
     virtual std::vector<HostAndPort> getHostsWrittenTo(const OpTime& op,
@@ -271,8 +262,7 @@ public:
                                               const ReplSetRequestVotesArgs& args,
                                               ReplSetRequestVotesResponse* response) override;
 
-    virtual void prepareReplMetadata(OperationContext* opCtx,
-                                     const BSONObj& metadataRequestObj,
+    virtual void prepareReplMetadata(const BSONObj& metadataRequestObj,
                                      const OpTime& lastOpTimeFromClient,
                                      BSONObjBuilder* builder) const override;
 
@@ -636,8 +626,6 @@ private:
 
     bool _canAcceptWritesFor_inlock(const NamespaceString& ns);
 
-    OID _getMyRID_inlock() const;
-
     int _getMyId_inlock() const;
 
     OpTime _getMyLastAppliedOpTime_inlock() const;
@@ -971,8 +959,10 @@ private:
 
     /**
      * Blesses a snapshot to be used for new committed reads.
+     *
+     * Returns true if the value was updated to `newCommittedSnapshot`.
      */
-    void _updateCommittedSnapshot_inlock(const OpTime& newCommittedSnapshot);
+    bool _updateCommittedSnapshot_inlock(const OpTime& newCommittedSnapshot);
 
     /**
      * A helper method that returns the current stable optime based on the current commit point and
@@ -1145,7 +1135,7 @@ private:
     // every host that sends it a heartbeat request to this set, and also starts
     // sending heartbeat requests to that host.  This set is cleared whenever
     // a node discovers that it is a member of a config.
-    unordered_set<HostAndPort> _seedList;  // (M)
+    stdx::unordered_set<HostAndPort> _seedList;  // (M)
 
     // Back pointer to the ServiceContext that has started the instance.
     ServiceContext* const _service;  // (S)
@@ -1164,10 +1154,6 @@ private:
 
     // Pointer to the ReplicationCoordinatorExternalState owned by this ReplicationCoordinator.
     std::unique_ptr<ReplicationCoordinatorExternalState> _externalState;  // (PS)
-
-    // Our RID, used to identify us to our sync source when sending replication progress
-    // updates upstream.  Set once in startReplication() and then never modified again.
-    OID _myRID;  // (M)
 
     // list of information about clients waiting on replication.  Does *not* own the WaiterInfos.
     WaiterList _replicationWaiterList;  // (M)
@@ -1235,7 +1221,7 @@ private:
 
     // Flag that indicates whether writes to databases other than "local" are allowed.  Used to
     // answer canAcceptWritesForDatabase() and canAcceptWritesFor() questions.
-    // Always true for standalone nodes and masters in master-slave relationships.
+    // Always true for standalone nodes.
     bool _canAcceptNonLocalWrites;  // (GM)
 
     // Flag that indicates whether reads from databases other than "local" are allowed.  Unlike

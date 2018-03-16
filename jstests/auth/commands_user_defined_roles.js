@@ -5,6 +5,8 @@ Exhaustive test for authorization of commands with user-defined roles.
 The test logic implemented here operates on the test cases defined
 in jstests/auth/commands.js.
 
+@tags: [requires_sharding]
+
 */
 
 // constants
@@ -204,7 +206,12 @@ authCommandsLib.runTests(conn, impls);
 MongoRunner.stopMongod(conn);
 
 // run all tests sharded
-conn = new ShardingTest(
-    {shards: 2, mongos: 1, keyFile: "jstests/libs/key1", other: {shardOptions: opts}});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+conn = new ShardingTest({
+    shards: 2,
+    mongos: 1,
+    keyFile: "jstests/libs/key1",
+    other: {shardOptions: opts, shardAsReplicaSet: false}
+});
 authCommandsLib.runTests(conn, impls);
 conn.stop();

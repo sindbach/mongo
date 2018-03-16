@@ -37,7 +37,7 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/operation_context.h"
@@ -45,13 +45,11 @@
 #include "mongo/db/ops/update_lifecycle_impl.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/chunk_splitter.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
-#include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/type_shard_identity.h"
-#include "mongo/executor/network_interface_factory.h"
-#include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/rpc/metadata/config_server_metadata.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
@@ -67,13 +65,6 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
-using std::shared_ptr;
-using std::string;
-using std::vector;
-
-using CallbackArgs = executor::TaskExecutor::CallbackArgs;
-
 namespace {
 
 const auto getShardingState = ServiceContext::declareDecoration<ShardingState>();
@@ -86,7 +77,8 @@ const auto getShardingState = ServiceContext::declareDecoration<ShardingState>()
  * One example use case is for the ReplicaSetMonitor asynchronous callback when it detects changes
  * to replica set membership.
  */
-void updateShardIdentityConfigStringCB(const string& setName, const string& newConnectionString) {
+void updateShardIdentityConfigStringCB(const std::string& setName,
+                                       const std::string& newConnectionString) {
     auto configsvrConnStr = grid.shardRegistry()->getConfigServerConnectionString();
     if (configsvrConnStr.getSetName() != setName) {
         // Ignore all change notification for other sets that are not the config server.
@@ -107,8 +99,7 @@ void updateShardIdentityConfigStringCB(const string& setName, const string& newC
 }  // namespace
 
 ShardingState::ShardingState()
-    : _chunkSplitter(stdx::make_unique<ChunkSplitter>()),
-      _initializationState(static_cast<uint32_t>(InitializationState::kNew)),
+    : _initializationState(static_cast<uint32_t>(InitializationState::kNew)),
       _initializationStatus(Status(ErrorCodes::InternalError, "Uninitialized value")),
       _globalInit(&initializeGlobalShardingStateForMongod) {}
 
@@ -144,13 +135,7 @@ Status ShardingState::canAcceptShardedCommands() const {
     }
 }
 
-ConnectionString ShardingState::getConfigServer(OperationContext* opCtx) {
-    invariant(enabled());
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    return Grid::get(opCtx)->shardRegistry()->getConfigServerConnectionString();
-}
-
-string ShardingState::getShardName() {
+std::string ShardingState::getShardName() {
     invariant(enabled());
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _shardName;
@@ -184,75 +169,8 @@ Status ShardingState::updateConfigServerOpTimeFromMetadata(OperationContext* opC
     return Status::OK();
 }
 
-ChunkSplitter* ShardingState::getChunkSplitter() {
-    return _chunkSplitter.get();
-}
-
-void ShardingState::initiateChunkSplitter() {
-    _chunkSplitter->initiateChunkSplitter();
-}
-
-void ShardingState::interruptChunkSplitter() {
-    _chunkSplitter->interruptChunkSplitter();
-}
-
 void ShardingState::setGlobalInitMethodForTest(GlobalInitFunc func) {
     _globalInit = func;
-}
-
-Status ShardingState::onStaleShardVersion(OperationContext* opCtx,
-                                          const NamespaceString& nss,
-                                          const ChunkVersion& expectedVersion) {
-    invariant(!opCtx->getClient()->isInDirectClient());
-    invariant(!opCtx->lockState()->isLocked());
-    invariant(enabled());
-
-    LOG(2) << "metadata refresh requested for " << nss.ns() << " at shard version "
-           << expectedVersion;
-
-    ShardingStatistics::get(opCtx).countStaleConfigErrors.addAndFetch(1);
-
-    // Ensure any ongoing migrations have completed
-    auto& oss = OperationShardingState::get(opCtx);
-    oss.waitForMigrationCriticalSectionSignal(opCtx);
-
-    const auto collectionShardVersion = [&] {
-        // Fast path - check if the requested version is at a higher version than the current
-        // metadata version or a different epoch before verifying against config server
-        AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-        const auto currentMetadata = CollectionShardingState::get(opCtx, nss)->getMetadata();
-        if (currentMetadata) {
-            return currentMetadata->getShardVersion();
-        }
-
-        return ChunkVersion::UNSHARDED();
-    }();
-
-    if (collectionShardVersion.epoch() == expectedVersion.epoch() &&
-        collectionShardVersion >= expectedVersion) {
-        // Don't need to remotely reload if we're in the same epoch and the requested version is
-        // smaller than the one we know about. This means that the remote side is behind.
-        return Status::OK();
-    }
-
-    try {
-        _refreshMetadata(opCtx, nss);
-        return Status::OK();
-    } catch (const DBException& ex) {
-        log() << "Failed to refresh metadata for collection" << nss << causedBy(redact(ex));
-        return ex.toStatus();
-    }
-}
-
-Status ShardingState::refreshMetadataNow(OperationContext* opCtx,
-                                         const NamespaceString& nss,
-                                         ChunkVersion* latestShardVersion) {
-    try {
-        *latestShardVersion = _refreshMetadata(opCtx, nss);
-        return Status::OK();
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
 }
 
 // NOTE: This method will be called inside a database lock so it should never take any database
@@ -296,8 +214,6 @@ Status ShardingState::initializeFromShardIdentity(OperationContext* opCtx,
                               << causedBy(_initializationStatus)};
     }
 
-    ShardedConnectionInfo::addHook(opCtx->getServiceContext());
-
     try {
         Status status = _globalInit(opCtx, configSvrConnStr, generateDistLockProcessId(opCtx));
         if (status.isOK()) {
@@ -315,8 +231,7 @@ Status ShardingState::initializeFromShardIdentity(OperationContext* opCtx,
                                repl::MemberState::RS_PRIMARY);
 
             CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
-
-            _chunkSplitter->setReplicaSetMode(isStandaloneOrPrimary);
+            ChunkSplitter::get(opCtx).setReplicaSetMode(isStandaloneOrPrimary);
 
             log() << "initialized sharding components for "
                   << (isStandaloneOrPrimary ? "primary" : "secondary") << " node.";
@@ -456,87 +371,6 @@ StatusWith<bool> ShardingState::initializeShardingAwarenessIfNeeded(OperationCon
     }
 }
 
-ChunkVersion ShardingState::_refreshMetadata(OperationContext* opCtx, const NamespaceString& nss) {
-    invariant(!opCtx->lockState()->isLocked());
-    invariant(enabled());
-
-    const ShardId shardId = getShardName();
-
-    uassert(ErrorCodes::NotYetInitialized,
-            str::stream() << "Cannot refresh metadata for " << nss.ns()
-                          << " before shard name has been set",
-            shardId.isValid());
-
-    const auto routingInfo = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, nss));
-    const auto cm = routingInfo.cm();
-
-    if (!cm) {
-        // No chunk manager, so unsharded.
-
-        // Exclusive collection lock needed since we're now changing the metadata
-        AutoGetCollection autoColl(opCtx, nss, MODE_IX, MODE_X);
-
-        auto css = CollectionShardingState::get(opCtx, nss);
-        css->refreshMetadata(opCtx, nullptr);
-
-        return ChunkVersion::UNSHARDED();
-    }
-
-    {
-        AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-        auto css = CollectionShardingState::get(opCtx, nss);
-
-        // We already have newer version
-        if (css->getMetadata() &&
-            css->getMetadata()->getCollVersion().epoch() == cm->getVersion().epoch() &&
-            css->getMetadata()->getCollVersion() >= cm->getVersion()) {
-            LOG(1) << "Skipping refresh of metadata for " << nss << " "
-                   << css->getMetadata()->getCollVersion() << " with an older " << cm->getVersion();
-            return css->getMetadata()->getShardVersion();
-        }
-    }
-
-    // Exclusive collection lock needed since we're now changing the metadata
-    AutoGetCollection autoColl(opCtx, nss, MODE_IX, MODE_X);
-
-    auto css = CollectionShardingState::get(opCtx, nss);
-
-    // We already have newer version
-    if (css->getMetadata() &&
-        css->getMetadata()->getCollVersion().epoch() == cm->getVersion().epoch() &&
-        css->getMetadata()->getCollVersion() >= cm->getVersion()) {
-        LOG(1) << "Skipping refresh of metadata for " << nss << " "
-               << css->getMetadata()->getCollVersion() << " with an older " << cm->getVersion();
-        return css->getMetadata()->getShardVersion();
-    }
-
-    std::unique_ptr<CollectionMetadata> newCollectionMetadata =
-        stdx::make_unique<CollectionMetadata>(cm, shardId);
-
-    css->refreshMetadata(opCtx, std::move(newCollectionMetadata));
-
-    return css->getMetadata()->getShardVersion();
-}
-
-StatusWith<ScopedRegisterDonateChunk> ShardingState::registerDonateChunk(
-    const MoveChunkRequest& args) {
-    return _activeMigrationsRegistry.registerDonateChunk(args);
-}
-
-StatusWith<ScopedRegisterReceiveChunk> ShardingState::registerReceiveChunk(
-    const NamespaceString& nss, const ChunkRange& chunkRange, const ShardId& fromShardId) {
-    return _activeMigrationsRegistry.registerReceiveChunk(nss, chunkRange, fromShardId);
-}
-
-boost::optional<NamespaceString> ShardingState::getActiveDonateChunkNss() {
-    return _activeMigrationsRegistry.getActiveDonateChunkNss();
-}
-
-BSONObj ShardingState::getActiveMigrationStatusReport(OperationContext* opCtx) {
-    return _activeMigrationsRegistry.getActiveMigrationStatusReport(opCtx);
-}
-
 void ShardingState::appendInfo(OperationContext* opCtx, BSONObjBuilder& builder) {
     const bool isEnabled = enabled();
     builder.appendBool("enabled", isEnabled);
@@ -551,7 +385,7 @@ void ShardingState::appendInfo(OperationContext* opCtx, BSONObjBuilder& builder)
     builder.append("clusterId", _clusterId);
 }
 
-bool ShardingState::needCollectionMetadata(OperationContext* opCtx, const string& ns) {
+bool ShardingState::needCollectionMetadata(OperationContext* opCtx, const std::string& ns) {
     if (!enabled())
         return false;
 
@@ -590,26 +424,6 @@ Status ShardingState::updateShardIdentityConfigString(OperationContext* opCtx,
     }
 
     return Status::OK();
-}
-
-executor::TaskExecutor* ShardingState::getRangeDeleterTaskExecutor() {
-    stdx::lock_guard<stdx::mutex> lk(_rangeDeleterExecutor.lock);
-    if (_rangeDeleterExecutor.taskExecutor.get() == nullptr) {
-        static const char kExecName[] = "NetworkInterfaceCollectionRangeDeleter-TaskExecutor";
-        auto net = executor::makeNetworkInterface(kExecName);
-        auto pool = stdx::make_unique<executor::NetworkInterfaceThreadPool>(net.get());
-        _rangeDeleterExecutor.taskExecutor =
-            stdx::make_unique<executor::ThreadPoolTaskExecutor>(std::move(pool), std::move(net));
-        _rangeDeleterExecutor.taskExecutor->startup();
-    }
-    return _rangeDeleterExecutor.taskExecutor.get();
-}
-
-ShardingState::RangeDeleterExecutor::~RangeDeleterExecutor() {
-    if (taskExecutor) {
-        taskExecutor->shutdown();
-        taskExecutor->join();
-    }
 }
 
 }  // namespace mongo

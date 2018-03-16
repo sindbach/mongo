@@ -1,4 +1,4 @@
-// @tags: [SERVER-32675]
+// @tags: [SERVER-32997]
 'use strict';
 
 load('jstests/concurrency/fsm_libs/runner.js');
@@ -16,7 +16,6 @@ var blacklist = [
     'agg_group_external.js',  // uses >100MB of data, which can overwhelm test hosts
     'agg_sort_external.js',   // uses >100MB of data, which can overwhelm test hosts
 
-    'toggle_feature_compatibility.js',  // Sets FCV to 3.4, which could interefere with other tests.
 ].map(function(file) {
     return dir + '/' + file;
 });

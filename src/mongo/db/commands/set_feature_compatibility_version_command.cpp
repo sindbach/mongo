@@ -35,16 +35,14 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/feature_compatibility_version_command_parser.h"
+#include "mongo/db/commands/feature_compatibility_version_documentation.h"
+#include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/server_options.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_client_impl.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
-#include "mongo/s/client/shard_registry.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/scopeguard.h"
@@ -67,10 +65,10 @@ MONGO_FP_DECLARE(featureCompatibilityUpgrade);
 class SetFeatureCompatibilityVersionCommand : public BasicCommand {
 public:
     SetFeatureCompatibilityVersionCommand()
-        : BasicCommand(FeatureCompatibilityVersion::kCommandName) {}
+        : BasicCommand(FeatureCompatibilityVersionCommandParser::kCommandName) {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool adminOnly() const {
@@ -81,19 +79,21 @@ public:
         return true;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "Set the API version exposed by this node. If set to \""
-             << FeatureCompatibilityVersionCommandParser::kVersion34
-             << "\", then 3.6 features are disabled. If \""
-             << FeatureCompatibilityVersionCommandParser::kVersion36
-             << "\", then 3.6 features are enabled, and all nodes in the cluster must be version "
-                "3.6. See "
-             << feature_compatibility_version::kDochubLink << ".";
+    std::string help() const override {
+        std::stringstream h;
+        h << "Set the API version exposed by this node. If set to \""
+          << FeatureCompatibilityVersionParser::kVersion36
+          << "\", then 4.0 features are disabled. If \""
+          << FeatureCompatibilityVersionParser::kVersion40
+          << "\", then 4.0 features are enabled, and all nodes in the cluster must be binary "
+             "version 4.0. See "
+          << feature_compatibility_version_documentation::kCompatibilityLink << ".";
+        return h.str();
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(),
                 ActionType::setFeatureCompatibilityVersion)) {
@@ -127,6 +127,7 @@ public:
         });
 
         // Only allow one instance of setFeatureCompatibilityVersion to run at a time.
+        invariant(!opCtx->lockState()->isLocked());
         Lock::ExclusiveLock lk(opCtx->lockState(), FeatureCompatibilityVersion::fcvLock);
 
         const auto requestedVersion = uassertStatusOK(
@@ -134,23 +135,7 @@ public:
         ServerGlobalParams::FeatureCompatibility::Version actualVersion =
             serverGlobalParams.featureCompatibility.getVersion();
 
-        if (requestedVersion == FeatureCompatibilityVersionCommandParser::kVersion40) {
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion upgrade to 4.0 when in 3.4. "
-                    "Upgrade to featureCompatibility 3.6 before upgrading to 4.0.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34);
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion upgrade to 4.0 while a previous "
-                    "downgrade to 3.4 has not completed. Finish downgrade to 3.4, upgrade to 3.6, "
-                    "and then 4.0.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo34);
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion upgrade to 4.0 while a previous "
-                    "upgrade to 3.6 has not completed. Finish upgrade to 3.6, then upgrade to 4.0.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo36);
+        if (requestedVersion == FeatureCompatibilityVersionParser::kVersion40) {
             uassert(ErrorCodes::IllegalOperation,
                     "cannot initiate featureCompatibilityVersion upgrade to 4.0 while a previous "
                     "featureCompatibilityVersion downgrade to 3.6 has not completed. Finish "
@@ -169,7 +154,18 @@ public:
 
             FeatureCompatibilityVersion::setTargetUpgrade(opCtx);
 
-            // If config server, upgrade shards *after* upgrading self.
+            {
+                // Take the global lock in S mode to create a barrier for operations taking the
+                // global IX or X locks. This ensures that either
+                //   - The global IX/X locked operation will start after the FCV change, see the
+                //     upgrading to 4.0 FCV and act accordingly.
+                //   - The global IX/X locked operation began prior to the FCV change, is acting on
+                //     that assumption and will finish before upgrade procedures begin right after
+                //     this.
+                Lock::GlobalLock lk(opCtx, MODE_S, Date_t::max());
+            }
+
+            // Upgrade shards before config finishes its upgrade.
             if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
                 uassertStatusOK(
                     ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
@@ -177,17 +173,12 @@ public:
                         CommandHelpers::appendMajorityWriteConcern(
                             CommandHelpers::appendPassthroughFields(
                                 cmdObj,
-                                BSON(FeatureCompatibilityVersion::kCommandName
+                                BSON(FeatureCompatibilityVersionCommandParser::kCommandName
                                      << requestedVersion)))));
             }
 
             FeatureCompatibilityVersion::unsetTargetUpgradeOrDowngrade(opCtx, requestedVersion);
-        } else if (requestedVersion == FeatureCompatibilityVersionCommandParser::kVersion36) {
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate setting featureCompatibilityVersion to 3.6 while a previous "
-                    "featureCompatibilityVersion downgrade to 3.4 has not completed.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo34);
+        } else if (requestedVersion == FeatureCompatibilityVersionParser::kVersion36) {
             uassert(ErrorCodes::IllegalOperation,
                     "cannot initiate setting featureCompatibilityVersion to 3.6 while a previous "
                     "featureCompatibilityVersion upgrade to 4.0 has not completed.",
@@ -195,7 +186,7 @@ public:
                         ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo40);
 
             if (actualVersion ==
-                ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo36) {
+                ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo36) {
                 // Set the client's last opTime to the system last opTime so no-ops wait for
                 // writeConcern.
                 repl::ReplClientInfo::forClient(opCtx->getClient())
@@ -203,110 +194,20 @@ public:
                 return true;
             }
 
-            if (actualVersion ==
-                    ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40 ||
-                actualVersion ==
-                    ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo36) {
-                // Downgrading to 3.6.
+            FeatureCompatibilityVersion::setTargetDowngrade(opCtx);
 
-                FeatureCompatibilityVersion::setTargetDowngrade(opCtx);
-
-                // If config server, downgrade shards *before* downgrading self
-                if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-                    uassertStatusOK(
-                        ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
-                            opCtx,
-                            CommandHelpers::appendMajorityWriteConcern(
-                                CommandHelpers::appendPassthroughFields(
-                                    cmdObj,
-                                    BSON(FeatureCompatibilityVersion::kCommandName
-                                         << requestedVersion)))));
-                }
-
-                FeatureCompatibilityVersion::unsetTargetUpgradeOrDowngrade(opCtx, requestedVersion);
-            } else {
-                // Upgrading to 3.6.
-
-                invariant(
-                    actualVersion ==
-                        ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34 ||
-                    actualVersion ==
-                        ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo36);
-
-                FeatureCompatibilityVersion::setTargetUpgrade_DEPRECATED(opCtx);
-
-                // First put UUIDs in the storage layer metadata. UUIDs will be generated for
-                // unsharded collections; shards will query the config server for sharded collection
-                // UUIDs. Remove after 3.4 -> 3.6 upgrade.
-                updateUUIDSchemaVersion(opCtx, /*upgrade*/ true);
-
-                // If config server, upgrade shards *after* upgrading self.
-                if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-                    // Remove after 3.4 -> 3.6 upgrade.
-                    ShardingCatalogManager::get(opCtx)->generateUUIDsForExistingShardedCollections(
-                        opCtx);
-
-                    uassertStatusOK(
-                        ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
-                            opCtx,
-                            CommandHelpers::appendMajorityWriteConcern(
-                                CommandHelpers::appendPassthroughFields(
-                                    cmdObj,
-                                    BSON(FeatureCompatibilityVersion::kCommandName
-                                         << requestedVersion)))));
-                }
-
-                // Fail after adding UUIDs but before updating the FCV document.
-                if (MONGO_FAIL_POINT(featureCompatibilityUpgrade)) {
-                    exitCleanly(EXIT_CLEAN);
-                }
-
-                FeatureCompatibilityVersion::unsetTargetUpgradeOrDowngrade(opCtx, requestedVersion);
-            }
-        } else {
-            invariant(requestedVersion == FeatureCompatibilityVersionCommandParser::kVersion34);
-
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion downgrade to 3.4 when in 4.0. "
-                    "Downgrade to featureCompatibility 3.6 before downgrading to 3.4",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40);
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion downgrade to 3.4 while a previous "
-                    "upgrade to 4.0 has not completed. Finish upgrade to 4.0, downgrade to 3.6, "
-                    "and then 3.4.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo40);
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion downgrade to 3.4 while a previous "
-                    "downgrade to 3.6 has not completed. Finish downgrade to 3.6, then downgrade "
-                    " to 3.4.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo36);
-            uassert(ErrorCodes::IllegalOperation,
-                    "cannot initiate featureCompatibilityVersion downgrade to 3.4 while a previous "
-                    "featureCompatibilityVersion upgrade to 3.6 has not completed. Finish upgrade "
-                    "to 3.6, then downgrade to 3.4.",
-                    actualVersion !=
-                        ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo36);
-
-            if (actualVersion ==
-                ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34) {
-                // Set the client's last opTime to the system last opTime so no-ops wait for
-                // writeConcern.
-                repl::ReplClientInfo::forClient(opCtx->getClient())
-                    .setLastOpToSystemLastOpTime(opCtx);
-                return true;
+            {
+                // Take the global lock in S mode to create a barrier for operations taking the
+                // global IX or X locks. This ensures that either
+                //   - The global IX/X locked operation will start after the FCV change, see the
+                //     downgrading to 3.6 FCV and act accordingly.
+                //   - The global IX/X locked operation began prior to the FCV change, is acting on
+                //     that assumption and will finish before downgrade procedures begin right after
+                //     this.
+                Lock::GlobalLock lk(opCtx, MODE_S, Date_t::max());
             }
 
-            FeatureCompatibilityVersion::setTargetDowngrade_DEPRECATED(opCtx);
-
-            // Fail after updating the FCV document but before removing UUIDs.
-            if (MONGO_FAIL_POINT(featureCompatibilityDowngrade)) {
-                exitCleanly(EXIT_CLEAN);
-            }
-
-            // If config server, downgrade shards *before* downgrading self.
+            // Downgrade shards before config finishes its downgrade.
             if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
                 uassertStatusOK(
                     ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
@@ -314,12 +215,9 @@ public:
                         CommandHelpers::appendMajorityWriteConcern(
                             CommandHelpers::appendPassthroughFields(
                                 cmdObj,
-                                BSON(FeatureCompatibilityVersion::kCommandName
+                                BSON(FeatureCompatibilityVersionCommandParser::kCommandName
                                      << requestedVersion)))));
             }
-
-            // Remove after 3.6 -> 3.4 downgrade.
-            updateUUIDSchemaVersion(opCtx, /*upgrade*/ false);
 
             FeatureCompatibilityVersion::unsetTargetUpgradeOrDowngrade(opCtx, requestedVersion);
         }

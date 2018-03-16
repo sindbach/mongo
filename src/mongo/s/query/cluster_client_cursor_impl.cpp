@@ -73,23 +73,34 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
                                                  executor::TaskExecutor* executor,
                                                  ClusterClientCursorParams&& params,
                                                  boost::optional<LogicalSessionId> lsid)
-    : _params(std::move(params)), _root(buildMergerPlan(opCtx, executor, &_params)), _lsid(lsid) {
+    : _params(std::move(params)),
+      _root(buildMergerPlan(opCtx, executor, &_params)),
+      _lsid(lsid),
+      _opCtx(opCtx) {
     dassert(!_params.compareWholeSortKey ||
             SimpleBSONObjComparator::kInstance.evaluate(
-                _params.sort == ClusterClientCursorParams::kWholeSortKeySortPattern));
+                _params.sort == AsyncResultsMerger::kWholeSortKeySortPattern));
 }
 
-ClusterClientCursorImpl::ClusterClientCursorImpl(std::unique_ptr<RouterStageMock> root,
+ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
+                                                 std::unique_ptr<RouterStageMock> root,
                                                  ClusterClientCursorParams&& params,
                                                  boost::optional<LogicalSessionId> lsid)
-    : _params(std::move(params)), _root(std::move(root)), _lsid(lsid) {
+    : _params(std::move(params)), _root(std::move(root)), _lsid(lsid), _opCtx(opCtx) {
     dassert(!_params.compareWholeSortKey ||
             SimpleBSONObjComparator::kInstance.evaluate(
-                _params.sort == ClusterClientCursorParams::kWholeSortKeySortPattern));
+                _params.sort == AsyncResultsMerger::kWholeSortKeySortPattern));
 }
 
 StatusWith<ClusterQueryResult> ClusterClientCursorImpl::next(
     RouterExecStage::ExecContext execContext) {
+
+    invariant(_opCtx);
+    const auto interruptStatus = _opCtx->checkForInterruptNoAssert();
+    if (!interruptStatus.isOK()) {
+        return interruptStatus;
+    }
+
     // First return stashed results, if there are any.
     if (!_stash.empty()) {
         auto front = std::move(_stash.front());
@@ -110,11 +121,17 @@ void ClusterClientCursorImpl::kill(OperationContext* opCtx) {
 }
 
 void ClusterClientCursorImpl::reattachToOperationContext(OperationContext* opCtx) {
+    _opCtx = opCtx;
     _root->reattachToOperationContext(opCtx);
 }
 
 void ClusterClientCursorImpl::detachFromOperationContext() {
+    _opCtx = nullptr;
     _root->detachFromOperationContext();
+}
+
+OperationContext* ClusterClientCursorImpl::getCurrentOperationContext() const {
+    return _opCtx;
 }
 
 bool ClusterClientCursorImpl::isTailable() const {
@@ -125,9 +142,8 @@ bool ClusterClientCursorImpl::isTailableAndAwaitData() const {
     return _params.tailableMode == TailableMode::kTailableAndAwaitData;
 }
 
-UserNameIterator ClusterClientCursorImpl::getAuthenticatedUsers() const {
-    return makeUserNameIterator(_params.authenticatedUsers.begin(),
-                                _params.authenticatedUsers.end());
+BSONObj ClusterClientCursorImpl::getOriginatingCommand() const {
+    return _params.originatingCommandObj;
 }
 
 long long ClusterClientCursorImpl::getNumReturnedSoFar() const {
@@ -269,9 +285,7 @@ std::unique_ptr<RouterExecStage> ClusterClientCursorImpl::buildMergerPlan(
     if (hasSort) {
         // Strip out the sort key after sorting.
         root = stdx::make_unique<RouterStageRemoveMetadataFields>(
-            opCtx,
-            std::move(root),
-            std::vector<StringData>{ClusterClientCursorParams::kSortKeyField});
+            opCtx, std::move(root), std::vector<StringData>{AsyncResultsMerger::kSortKeyField});
     }
 
     return root;

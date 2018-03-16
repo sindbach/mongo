@@ -51,13 +51,13 @@ class ConfigSvrMoveChunkCommand : public BasicCommand {
 public:
     ConfigSvrMoveChunkCommand() : BasicCommand("_configsvrMoveChunk") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Requests the balancer to move or rebalance a single chunk.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Requests the balancer to move or rebalance a single chunk.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -70,7 +70,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");

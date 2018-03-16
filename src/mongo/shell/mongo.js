@@ -249,7 +249,7 @@ connect = function(url, user, pass) {
 
     chatty("connecting to: " + url);
     var m = new Mongo(url);
-    db = m.getDB(m.defaultDB);
+    var db = m.getDB(m.defaultDB);
 
     if (user && pass) {
         if (!db.auth(user, pass)) {
@@ -417,7 +417,11 @@ Mongo.prototype.getClusterTime = function() {
     return this._clusterTime;
 };
 
-Mongo.prototype.startSession = function startSession(options) {
+Mongo.prototype.startSession = function startSession(options = {}) {
+    // Set retryWrites if not already set on options.
+    if (!options.hasOwnProperty("retryWrites") && this.hasOwnProperty("_retryWrites")) {
+        options.retryWrites = this._retryWrites;
+    }
     return new DriverSession(this, options);
 };
 

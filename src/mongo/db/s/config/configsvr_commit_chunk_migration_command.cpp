@@ -37,9 +37,9 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/s/chunk_move_write_concern_options.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_locks.h"
 #include "mongo/s/chunk_version.h"
@@ -87,12 +87,12 @@ class ConfigSvrCommitChunkMigrationCommand : public BasicCommand {
 public:
     ConfigSvrCommitChunkMigrationCommand() : BasicCommand("_configsvrCommitChunkMigration") {}
 
-    void help(std::stringstream& help) const override {
-        help << "should not be calling this directly";
+    std::string help() const override {
+        return "should not be calling this directly";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -105,7 +105,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -134,7 +134,8 @@ public:
             commitRequest.getControlChunk(),
             commitRequest.getCollectionEpoch(),
             commitRequest.getFromShard(),
-            commitRequest.getToShard());
+            commitRequest.getToShard(),
+            commitRequest.getValidAfter());
         if (!response.isOK()) {
             return CommandHelpers::appendCommandStatus(result, response.getStatus());
         }

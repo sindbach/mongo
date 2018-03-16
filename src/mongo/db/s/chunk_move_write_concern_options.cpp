@@ -34,7 +34,7 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/util/log.h"
@@ -86,14 +86,6 @@ StatusWith<WriteConcernOptions> ChunkMoveWriteConcernOptions::getEffectiveWriteC
         writeConcern = options.getWriteConcern();
 
         repl::ReplicationCoordinator* replCoordinator = repl::ReplicationCoordinator::get(opCtx);
-
-        if (replCoordinator->getReplicationMode() ==
-                repl::ReplicationCoordinator::modeMasterSlave &&
-            writeConcern.shouldWaitForOtherNodes()) {
-            warning() << "moveChunk cannot check if secondary throttle setting "
-                      << writeConcern.toBSON()
-                      << " can be enforced in a master slave configuration";
-        }
 
         Status status = replCoordinator->checkIfWriteConcernCanBeSatisfied(writeConcern);
         if (!status.isOK() && status != ErrorCodes::NoReplicationEnabled) {

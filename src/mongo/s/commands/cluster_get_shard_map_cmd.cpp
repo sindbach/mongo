@@ -47,12 +47,12 @@ public:
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "lists the set of shards known to this instance";
+    std::string help() const override {
+        return "lists the set of shards known to this instance";
     }
 
     virtual bool adminOnly() const {
@@ -61,7 +61,7 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::getShardMap);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));

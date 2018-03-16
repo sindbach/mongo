@@ -48,21 +48,17 @@ class PipelineCommand : public BasicCommand {
 public:
     PipelineCommand() : BasicCommand("aggregate") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Runs the aggregation command. See http://dochub.mongodb.org/core/aggregation for "
-                "more details.";
+    std::string help() const override {
+        return "Runs the aggregation command. See http://dochub.mongodb.org/core/aggregation for "
+               "more details.";
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return Pipeline::aggSupportsWriteConcern(cmd);
     }
 
-    bool slaveOk() const override {
-        return false;
-    }
-
-    bool slaveOverrideOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kOptIn;
     }
 
     bool supportsReadConcern(const std::string& dbName,
@@ -78,7 +74,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         const NamespaceString nss(AggregationRequest::parseNs(dbname, cmdObj));
         return AuthorizationSession::get(client)->checkAuthForAggregate(nss, cmdObj, false);
     }
@@ -100,10 +96,11 @@ public:
     }
 
     Status explain(OperationContext* opCtx,
-                   const std::string& dbname,
-                   const BSONObj& cmdObj,
+                   const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    BSONObjBuilder* out) const override {
+        std::string dbname = request.getDatabase().toString();
+        const BSONObj& cmdObj = request.body;
         const auto aggregationRequest =
             uassertStatusOK(AggregationRequest::parseFromBSON(dbname, cmdObj, verbosity));
 

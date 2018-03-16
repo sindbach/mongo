@@ -37,6 +37,32 @@ function _getErrorWithCode(codeOrObj, message) {
     return e;
 }
 
+/**
+ * Executes the specified function and retries it if it fails due to exception related to network
+ * error. If it exhausts the number of allowed retries, it simply throws the last exception.
+ *
+ * Returns the return value of the input call.
+ */
+function retryOnNetworkError(func, numRetries, sleepMs) {
+    numRetries = numRetries || 1;
+    sleepMs = sleepMs || 1000;
+
+    while (true) {
+        try {
+            return func();
+        } catch (e) {
+            if (isNetworkError(e) && numRetries > 0) {
+                print("Network error occurred and the call will be retried: " +
+                      tojson({error: e.toString(), stack: e.stack}));
+                numRetries--;
+                sleep(sleepMs);
+            } else {
+                throw e;
+            }
+        }
+    }
+}
+
 // Checks if a javascript exception is a network error.
 function isNetworkError(error) {
     return error.message.indexOf("network error") >= 0 ||
@@ -257,6 +283,8 @@ jsTestOptions = function() {
             skipValidationNamespaces: TestData.skipValidationNamespaces || [],
             skipCheckingUUIDsConsistentAcrossCluster:
                 TestData.skipCheckingUUIDsConsistentAcrossCluster || false,
+            skipCheckingCatalogCacheConsistencyWithShardingCatalog:
+                TestData.skipCheckingCatalogCacheConsistencyWithShardingCatalog || false,
             jsonSchemaTestFile: TestData.jsonSchemaTestFile,
             excludedDBsFromDBHash: TestData.excludedDBsFromDBHash,
             alwaysInjectTransactionNumber: TestData.alwaysInjectTransactionNumber,
@@ -276,7 +304,9 @@ setJsTestOption = function(name, value) {
 };
 
 jsTestLog = function(msg) {
-    print("\n\n----\n" + msg + "\n----\n\n");
+    assert.eq(typeof(msg), "string", "Received: " + msg);
+    const msgs = ["----", ...msg.split("\n"), "----"].map(s => `[jsTest] ${s}`);
+    print(`\n\n${msgs.join("\n")}\n\n`);
 };
 
 jsTest = {};
@@ -1377,49 +1407,29 @@ rs.debug.getLastOpWritten = function(server) {
 };
 
 /**
- * Compares OpTimes. Returns -1 if ot1 is 'earlier' than ot2, 1 if 'later' and 0 if equal.
- *
- * Note: Since Protocol Version 1 was introduced for replication, 'OpTimes'
- * can come in two different formats. This function will throw an error when the OpTime
- * passed do not have the same protocol version.
- *
- * OpTime Formats:
- * PV0: Timestamp
- * PV1: {ts:Timestamp, t:NumberLong}
+ * Compares OpTimes in the format {ts:Timestamp, t:NumberLong}.
+ * Returns -1 if ot1 is 'earlier' than ot2, 1 if 'later' and 0 if equal.
  */
 rs.compareOpTimes = function(ot1, ot2) {
-    function _isOpTimeV1(opTime) {
-        return (opTime.hasOwnProperty("ts") && opTime.hasOwnProperty("t"));
-    }
-    function _isEmptyOpTime(opTime) {
-        return (opTime.ts.getTime() == 0 && opTime.ts.getInc() == 0 && opTime.t == -1);
-    }
 
-    // Make sure both OpTimes have a timestamp and a term.
-    var ot1 = _isOpTimeV1(ot1) ? ot1 : {ts: ot1, t: NumberLong(-1)};
-    var ot2 = _isOpTimeV1(ot2) ? ot2 : {ts: ot2, t: NumberLong(-1)};
+    function _isValidOptime(opTime) {
+        let timestampIsValid = (opTime.hasOwnProperty("ts") && (opTime.ts !== Timestamp(0, 0)));
+        let termIsValid = (opTime.hasOwnProperty("t") && (opTime.t != -1));
 
-    if (_isEmptyOpTime(ot1) || _isEmptyOpTime(ot2)) {
-        throw Error("cannot do comparison with empty OpTime, received: " + tojson(ot1) + " and " +
-                    tojson(ot2));
+        return timestampIsValid && termIsValid;
     }
 
-    if ((ot1.t == -1 && ot2.t != -1) || (ot1.t != -1 && ot2.t == -1)) {
-        throw Error("cannot compare OpTimes between different protocol versions, received: " +
-                    tojson(ot1) + " and " + tojson(ot2));
+    if (!_isValidOptime(ot1) || !_isValidOptime(ot2)) {
+        throw Error("invalid optimes, received: " + tojson(ot1) + " and " + tojson(ot2));
     }
 
-    if (!friendlyEqual(ot1.t, ot2.t)) {
-        if (ot1.t < ot2.t) {
-            return -1;
-        } else {
-            return 1;
-        }
+    if (ot1.t > ot2.t) {
+        return 1;
+    } else if (ot1.t < ot2.t) {
+        return -1;
+    } else {
+        return timestampCmp(ot1.ts, ot2.ts);
     }
-    // else equal terms, so proceed to compare timestamp component.
-
-    // Otherwise, choose the OpTime with the lower timestamp.
-    return timestampCmp(ot1.ts, ot2.ts);
 };
 
 help = shellHelper.help = function(x) {

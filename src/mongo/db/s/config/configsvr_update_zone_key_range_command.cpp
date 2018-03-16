@@ -35,7 +35,7 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/update_zone_key_range_request_type.h"
 #include "mongo/util/log.h"
@@ -62,13 +62,13 @@ class ConfigsvrUpdateZoneKeyRangeCommand : public BasicCommand {
 public:
     ConfigsvrUpdateZoneKeyRangeCommand() : BasicCommand("_configsvrUpdateZoneKeyRange") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Validates and assigns a new range to a zone.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Validates and assigns a new range to a zone.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -81,7 +81,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");

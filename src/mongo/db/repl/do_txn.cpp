@@ -36,6 +36,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
@@ -47,8 +48,9 @@
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collation_spec.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/session_catalog.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -101,8 +103,7 @@ Status _doTxn(OperationContext* opCtx,
               const std::string& dbName,
               const BSONObj& doTxnCmd,
               BSONObjBuilder* result,
-              int* numApplied,
-              BSONArrayBuilder* opsBuilder) {
+              int* numApplied) {
     BSONObj ops = doTxnCmd.firstElement().Obj();
     // apply
     *numApplied = 0;
@@ -117,7 +118,7 @@ Status _doTxn(OperationContext* opCtx,
         BSONElement e = i.next();
         const BSONObj& opObj = e.Obj();
 
-        const NamespaceString nss(opObj["ns"].String());
+        NamespaceString nss(opObj["ns"].String());
 
         // Need to check this here, or OldClientContext may fail an invariant.
         if (!nss.isValid())
@@ -125,8 +126,8 @@ Status _doTxn(OperationContext* opCtx,
 
         Status status(ErrorCodes::InternalError, "");
 
-        AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-        auto db = autoColl.getDb();
+        AutoGetDb autoDb(opCtx, nss.db(), MODE_IX);
+        auto db = autoDb.getDb();
         if (!db) {
             uasserted(ErrorCodes::NamespaceNotFound,
                       str::stream() << "cannot apply insert, delete, or update operation on a "
@@ -136,12 +137,23 @@ Status _doTxn(OperationContext* opCtx,
                                     << mongo::redact(opObj));
         }
 
+        if (opObj.hasField("ui")) {
+            auto uuidStatus = UUID::parse(opObj["ui"]);
+            uassertStatusOK(uuidStatus.getStatus());
+            // If "ui" is present, it overrides "nss" for the collection name.
+            nss = UUIDCatalog::get(opCtx).lookupNSSByUUID(uuidStatus.getValue());
+            uassert(ErrorCodes::NamespaceNotFound,
+                    str::stream() << "cannot find collection uuid " << uuidStatus.getValue(),
+                    !nss.isEmpty());
+        }
+        Lock::CollectionLock collLock(opCtx->lockState(), nss.ns(), MODE_IX);
+        auto collection = db->getCollection(opCtx, nss);
+
         // When processing an update on a non-existent collection, applyOperation_inlock()
         // returns UpdateOperationFailed on updates and allows the collection to be
         // implicitly created on upserts. We detect both cases here and fail early with
         // NamespaceNotFound.
         // Additionally for inserts, we fail early on non-existent collections.
-        auto collection = db->getCollection(opCtx, nss);
         if (!collection && db->getViewCatalog()->lookup(opCtx, nss.ns())) {
             uasserted(ErrorCodes::CommandNotSupportedOnView,
                       str::stream() << "doTxn not supported on a view: " << redact(opObj));
@@ -154,12 +166,6 @@ Status _doTxn(OperationContext* opCtx,
                                     << redact(opObj));
         }
 
-        // Cannot specify timestamp values in an atomic doTxn.
-        if (opObj.hasField("ts")) {
-            uasserted(ErrorCodes::AtomicityFailure,
-                      "cannot apply an op with a timestamp with doTxn; ");
-        }
-
         // Setting alwaysUpsert to true makes sense only during oplog replay, and doTxn commands
         // should not be executed during oplog replay.
         const bool alwaysUpsert = false;
@@ -167,22 +173,6 @@ Status _doTxn(OperationContext* opCtx,
             opCtx, db, opObj, alwaysUpsert, repl::OplogApplication::Mode::kApplyOpsCmd);
         if (!status.isOK())
             return status;
-
-        // Append completed op, including UUID if available, to 'opsBuilder'.
-        if (opsBuilder) {
-            if (opObj.hasField("ui") || nss.isSystemDotIndexes() ||
-                !(collection && collection->uuid())) {
-                // No changes needed to operation document.
-                opsBuilder->append(opObj);
-            } else {
-                // Operation document has no "ui" field and collection has a UUID.
-                auto uuid = collection->uuid();
-                BSONObjBuilder opBuilder;
-                opBuilder.appendElements(opObj);
-                uuid->appendToBuilder(&opBuilder, "ui");
-                opsBuilder->append(opBuilder.obj());
-            }
-        }
 
         ab.append(status.isOK());
         if (!status.isOK()) {
@@ -287,12 +277,19 @@ Status doTxn(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& doTxnCmd,
              BSONObjBuilder* result) {
+    auto txnNumber = opCtx->getTxnNumber();
+    uassert(ErrorCodes::InvalidOptions, "doTxn can only be run with a transaction ID.", txnNumber);
+    auto* session = OperationContextSession::get(opCtx);
+    uassert(ErrorCodes::InvalidOptions, "doTxn must be run within a session", session);
+    invariant(session->inMultiDocumentTransaction());
+    invariant(opCtx->getWriteUnitOfWork());
     uassert(
         ErrorCodes::InvalidOptions, "doTxn supports only CRUD opts.", _areOpsCrudOnly(doTxnCmd));
     auto hasPrecondition = _hasPrecondition(doTxnCmd);
 
+
     // Acquire global lock in IX mode so that the replication state check will remain valid.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX, UINT_MAX);
+    Lock::GlobalLock globalLock(opCtx, MODE_IX, Date_t::max());
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     bool userInitiatedWritesAndNotPrimary =
@@ -305,66 +302,23 @@ Status doTxn(OperationContext* opCtx,
     int numApplied = 0;
 
     try {
-        writeConflictRetry(opCtx, "doTxn", dbName, [&] {
-            BSONObjBuilder intermediateResult;
-            std::unique_ptr<BSONArrayBuilder> opsBuilder;
-            if (opCtx->writesAreReplicated() &&
-                repl::ReplicationCoordinator::modeMasterSlave != replCoord->getReplicationMode()) {
-                opsBuilder = stdx::make_unique<BSONArrayBuilder>();
-            }
-            // The write unit of work guarantees snapshot isolation for precondition check and the
-            // write.
-            WriteUnitOfWork wunit(opCtx);
+        BSONObjBuilder intermediateResult;
 
-            // Check precondition in the same write unit of work so that they share the same
-            // snapshot.
-            if (hasPrecondition) {
-                uassertStatusOK(_checkPrecondition(opCtx, doTxnCmd, result));
-            }
+        // The transaction takes place in a global unit of work, so the precondition check
+        // and the writes will share the same snapshot.
+        if (hasPrecondition) {
+            uassertStatusOK(_checkPrecondition(opCtx, doTxnCmd, result));
+        }
 
-            numApplied = 0;
-            {
-                // Suppress replication for atomic operations until end of doTxn.
-                repl::UnreplicatedWritesBlock uwb(opCtx);
-                uassertStatusOK(_doTxn(
-                    opCtx, dbName, doTxnCmd, &intermediateResult, &numApplied, opsBuilder.get()));
-            }
-            // Generate oplog entry for all atomic ops collectively.
-            if (opCtx->writesAreReplicated()) {
-                // We want this applied atomically on slaves so we rewrite the oplog entry without
-                // the pre-condition for speed.
+        numApplied = 0;
+        uassertStatusOK(_doTxn(opCtx, dbName, doTxnCmd, &intermediateResult, &numApplied));
+        auto opObserver = getGlobalServiceContext()->getOpObserver();
+        invariant(opObserver);
+        opObserver->onTransactionCommit(opCtx);
+        result->appendElements(intermediateResult.obj());
 
-                BSONObjBuilder cmdBuilder;
-
-                auto opsFieldName = doTxnCmd.firstElement().fieldNameStringData();
-                for (auto elem : doTxnCmd) {
-                    auto name = elem.fieldNameStringData();
-                    if (name == opsFieldName) {
-                        // This should be written as applyOps, not doTxn.
-                        invariant(opsFieldName == "doTxn"_sd);
-                        if (opsBuilder) {
-                            cmdBuilder.append("applyOps"_sd, opsBuilder->arr());
-                        } else {
-                            cmdBuilder.appendAs(elem, "applyOps"_sd);
-                        }
-                        continue;
-                    }
-                    if (name == DoTxn::kPreconditionFieldName)
-                        continue;
-                    if (name == bypassDocumentValidationCommandOption())
-                        continue;
-                    cmdBuilder.append(elem);
-                }
-
-                const BSONObj cmdRewritten = cmdBuilder.done();
-
-                auto opObserver = getGlobalServiceContext()->getOpObserver();
-                invariant(opObserver);
-                opObserver->onApplyOps(opCtx, dbName, cmdRewritten);
-            }
-            wunit.commit();
-            result->appendElements(intermediateResult.obj());
-        });
+        // Commit the global WUOW if the command succeeds.
+        opCtx->getWriteUnitOfWork()->commit();
     } catch (const DBException& ex) {
         BSONArrayBuilder ab;
         ++numApplied;

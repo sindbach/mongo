@@ -42,7 +42,7 @@ class BSONObj;
 class Chunk {
 public:
     // Test whether we should split once data * kSplitTestFactor > chunkSize (approximately)
-    const uint64_t kSplitTestFactor = 5;
+    static const uint64_t kSplitTestFactor = 5;
 
     explicit Chunk(const ChunkType& from);
 
@@ -97,6 +97,8 @@ private:
     const ShardId _shardId;
 
     const ChunkVersion _lastmod;
+
+    const std::vector<ChunkHistory> _history;
 
     // Indicates whether this chunk should be treated as jumbo and not attempted to be moved or
     // split

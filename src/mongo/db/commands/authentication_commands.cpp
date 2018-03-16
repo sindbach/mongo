@@ -97,12 +97,12 @@ class CmdGetNonce : public BasicCommand {
 public:
     CmdGetNonce() : BasicCommand("getnonce"), _random(SecureRandom::create()) {}
 
-    bool slaveOk() const final {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    void help(stringstream& h) const final {
-        h << "internal";
+    std::string help() const final {
+        return "internal";
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const final {
@@ -111,7 +111,7 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) final {
+                               std::vector<Privilege>* out) const final {
         // No auth required since this command was explicitly part
         // of an authentication workflow.
     }
@@ -159,7 +159,7 @@ bool CmdAuthenticate::run(OperationContext* opCtx,
         user = UserName(cmdObj.getStringField("user"), dbname);
     }
 
-    if (Command::testCommandsEnabled && user.getDB() == "admin" &&
+    if (getTestCommandsEnabled() && user.getDB() == "admin" &&
         user.getUser() == internalSecurity.user->getName().getUser()) {
         // Allows authenticating as the internal user against the admin database.  This is to
         // support the auth passthrough test framework on mongos (since you can't use the local
@@ -259,14 +259,14 @@ CmdAuthenticate cmdAuthenticate;
 
 class CmdLogout : public BasicCommand {
 public:
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
-    void help(stringstream& h) const {
-        h << "de-authenticate";
+                                       std::vector<Privilege>* out) const {}  // No auth required
+    std::string help() const override {
+        return "de-authenticate";
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -278,7 +278,7 @@ public:
              BSONObjBuilder& result) {
         AuthorizationSession* authSession = AuthorizationSession::get(Client::getCurrent());
         authSession->logoutDatabase(dbname);
-        if (Command::testCommandsEnabled && dbname == "admin") {
+        if (getTestCommandsEnabled() && dbname == "admin") {
             // Allows logging out as the internal user against the admin database, however
             // this actually logs out of the local database as well. This is to
             // support the auth passthrough test framework on mongos (since you can't use the

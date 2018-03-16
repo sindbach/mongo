@@ -36,8 +36,8 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/service_entry_point_utils.h"
 #include "mongo/transport/service_executor_task_names.h"
+#include "mongo/transport/thread_idle_callback.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/thread_idle_callback.h"
 #include "mongo/util/processinfo.h"
 
 namespace mongo {
@@ -60,13 +60,7 @@ thread_local int64_t ServiceExecutorSynchronous::_localThreadIdleCounter = 0;
 ServiceExecutorSynchronous::ServiceExecutorSynchronous(ServiceContext* ctx) {}
 
 Status ServiceExecutorSynchronous::start() {
-    _numHardwareCores = [] {
-        ProcessInfo p;
-        if (auto availCores = p.getNumAvailableCores()) {
-            return static_cast<size_t>(*availCores);
-        }
-        return static_cast<size_t>(p.getNumCores());
-    }();
+    _numHardwareCores = static_cast<size_t>(ProcessInfo::getNumAvailableCores());
 
     _stillRunning.store(true);
 

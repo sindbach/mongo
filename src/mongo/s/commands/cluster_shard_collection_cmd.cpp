@@ -55,7 +55,6 @@
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/commands/cluster_commands_helpers.h"
-#include "mongo/s/commands/cluster_write.h"
 #include "mongo/s/config_server_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
@@ -70,8 +69,8 @@ class ShardCollectionCmd : public BasicCommand {
 public:
     ShardCollectionCmd() : BasicCommand("shardCollection", "shardcollection") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -82,15 +81,15 @@ public:
         return true;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "Shard a collection. Requires key. Optional unique."
-             << " Sharding must already be enabled for the database.\n"
-             << "   { enablesharding : \"<dbname>\" }\n";
+    std::string help() const override {
+        return "Shard a collection. Requires key. Optional unique."
+               " Sharding must already be enabled for the database.\n"
+               "   { enablesharding : \"<dbname>\" }\n";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
                 ActionType::enableSharding)) {

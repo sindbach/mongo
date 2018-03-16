@@ -29,12 +29,9 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
@@ -76,12 +73,12 @@ namespace {
  */
 class CmdListIndexes : public BasicCommand {
 public:
-    virtual bool slaveOk() const {
-        return false;
+    CmdListIndexes() : BasicCommand("listIndexes") {}
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kOptIn;
     }
-    virtual bool slaveOverrideOk() const {
-        return true;
-    }
+
     virtual bool adminOnly() const {
         return false;
     }
@@ -89,14 +86,14 @@ public:
         return false;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "list indexes for a collection";
+    std::string help() const override {
+        return "list indexes for a collection";
     }
 
-    virtual Status checkAuthForCommand(Client* client,
-                                       const std::string& dbname,
-                                       const BSONObj& cmdObj) {
-        AuthorizationSession* authzSession = AuthorizationSession::get(client);
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const std::string& dbname,
+                                 const BSONObj& cmdObj) const override {
+        AuthorizationSession* authzSession = AuthorizationSession::get(opCtx->getClient());
 
         if (!authzSession->isAuthorizedToParseNamespaceElement(cmdObj.firstElement())) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -104,9 +101,9 @@ public:
 
         // Check for the listIndexes ActionType on the database, or find on system.indexes for pre
         // 3.0 systems.
-        const NamespaceString ns(
-            CommandHelpers::parseNsOrUUID(client->getOperationContext(), dbname, cmdObj));
-        if (authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forExactNamespace(ns),
+        const auto nss = AutoGetCollection::resolveNamespaceStringOrUUID(
+            opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj));
+        if (authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forExactNamespace(nss),
                                                            ActionType::listIndexes) ||
             authzSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString(dbname, "system.indexes")),
@@ -116,44 +113,31 @@ public:
 
         return Status(ErrorCodes::Unauthorized,
                       str::stream() << "Not authorized to list indexes on collection: "
-                                    << ns.coll());
+                                    << nss.ns());
     }
-
-    CmdListIndexes() : BasicCommand("listIndexes") {}
 
     bool run(OperationContext* opCtx,
              const string& dbname,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) {
-        Lock::DBLock dbSLock(opCtx, dbname, MODE_IS);
-        const NamespaceString ns(CommandHelpers::parseNsOrUUID(opCtx, dbname, cmdObj));
         const long long defaultBatchSize = std::numeric_limits<long long>::max();
         long long batchSize;
-        Status parseCursorStatus =
-            CursorRequest::parseCommandCursorOptions(cmdObj, defaultBatchSize, &batchSize);
-        if (!parseCursorStatus.isOK()) {
-            return CommandHelpers::appendCommandStatus(result, parseCursorStatus);
-        }
+        uassertStatusOK(
+            CursorRequest::parseCommandCursorOptions(cmdObj, defaultBatchSize, &batchSize));
 
-        AutoGetCollectionForReadCommand autoColl(opCtx, ns, std::move(dbSLock));
-        if (!autoColl.getDb()) {
-            return CommandHelpers::appendCommandStatus(
-                result,
-                Status(ErrorCodes::NamespaceNotFound, "Database " + ns.db() + " doesn't exist"));
-        }
-
-        const Collection* collection = autoColl.getCollection();
-        if (!collection) {
-            return CommandHelpers::appendCommandStatus(
-                result,
-                Status(ErrorCodes::NamespaceNotFound, "Collection " + ns.ns() + " doesn't exist"));
-        }
+        AutoGetCollectionForReadCommand ctx(opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj));
+        Collection* collection = ctx.getCollection();
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "ns does not exist: " << ctx.getNss().ns(),
+                collection);
 
         const CollectionCatalogEntry* cce = collection->getCatalogEntry();
         invariant(cce);
 
+        const auto nss = ctx.getNss();
+
         vector<string> indexNames;
-        writeConflictRetry(opCtx, "listIndexes", ns.ns(), [&indexNames, &cce, &opCtx] {
+        writeConflictRetry(opCtx, "listIndexes", nss.ns(), [&indexNames, &cce, &opCtx] {
             indexNames.clear();
             cce->getReadyIndexes(opCtx, &indexNames);
         });
@@ -163,7 +147,7 @@ public:
 
         for (size_t i = 0; i < indexNames.size(); i++) {
             BSONObj indexSpec =
-                writeConflictRetry(opCtx, "listIndexes", ns.ns(), [&cce, &opCtx, &indexNames, i] {
+                writeConflictRetry(opCtx, "listIndexes", nss.ns(), [&cce, &opCtx, &indexNames, i] {
                     return cce->getIndexSpec(opCtx, indexNames[i]);
                 });
 
@@ -176,8 +160,8 @@ public:
             root->pushBack(id);
         }
 
-        const NamespaceString cursorNss = NamespaceString::makeListIndexesNSS(dbname, ns.coll());
-        dassert(ns == cursorNss.getTargetNSForListIndexes());
+        const NamespaceString cursorNss = NamespaceString::makeListIndexesNSS(dbname, nss.coll());
+        invariant(nss == cursorNss.getTargetNSForListIndexes());
 
         auto statusWithPlanExecutor = PlanExecutor::make(
             opCtx, std::move(ws), std::move(root), cursorNss, PlanExecutor::NO_YIELD);
@@ -214,7 +198,7 @@ public:
                 {std::move(exec),
                  cursorNss,
                  AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
-                 opCtx->recoveryUnit()->isReadingFromMajorityCommittedSnapshot(),
+                 opCtx->recoveryUnit()->getReadConcernLevel(),
                  cmdObj});
             cursorId = pinnedCursor.getCursor()->cursorid();
         }

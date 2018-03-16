@@ -35,7 +35,7 @@ class MongoDFixture(interface.Fixture):
                  dbpath_prefix=None,
                  preserve_dbpath=False):
 
-        interface.Fixture.__init__(self, logger, job_num)
+        interface.Fixture.__init__(self, logger, job_num, dbpath_prefix=dbpath_prefix)
 
         if "dbpath" in mongod_options and dbpath_prefix is not None:
             raise ValueError("Cannot specify both mongod_options.dbpath and dbpath_prefix")
@@ -49,12 +49,8 @@ class MongoDFixture(interface.Fixture):
         # The dbpath in mongod_options takes precedence over other settings to make it easier for
         # users to specify a dbpath containing data to test against.
         if "dbpath" not in self.mongod_options:
-            # Command line options override the YAML configuration.
-            dbpath_prefix = utils.default_if_none(config.DBPATH_PREFIX, dbpath_prefix)
-            dbpath_prefix = utils.default_if_none(dbpath_prefix, config.DEFAULT_DBPATH_PREFIX)
-            self.mongod_options["dbpath"] = os.path.join(dbpath_prefix,
-                                                         "job{}".format(self.job_num),
-                                                         config.FIXTURE_SUBDIR)
+            self.mongod_options["dbpath"] = os.path.join(
+                self._dbpath_prefix, config.FIXTURE_SUBDIR)
         self._dbpath = self.mongod_options["dbpath"]
 
         self.mongod = None
@@ -81,9 +77,10 @@ class MongoDFixture(interface.Fixture):
             self.logger.info("Starting mongod on port %d...\n%s", self.port, mongod.as_command())
             mongod.start()
             self.logger.info("mongod started on port %d with pid %d.", self.port, mongod.pid)
-        except:
-            self.logger.exception("Failed to start mongod on port %d.", self.port)
-            raise
+        except Exception as err:
+            msg = "Failed to start mongod on port {:d}: {}".format(self.port, err)
+            self.logger.exception(msg)
+            raise errors.ServerFailure(msg)
 
         self.mongod = mongod
 
@@ -99,7 +96,7 @@ class MongoDFixture(interface.Fixture):
             if exit_code is not None:
                 raise errors.ServerFailure("Could not connect to mongod on port {}, process ended"
                                            " unexpectedly with code {}.".format(
-                                                self.port, exit_code))
+                                               self.port, exit_code))
 
             try:
                 # Use a shorter connection timeout to more closely satisfy the requested deadline.
@@ -119,35 +116,36 @@ class MongoDFixture(interface.Fixture):
         self.logger.info("Successfully contacted the mongod on port %d.", self.port)
 
     def _do_teardown(self):
-        running_at_start = self.is_running()
-        success = True  # Still a success even if nothing is running.
+        if self.mongod is None:
+            self.logger.warning("The mongod fixture has not been set up yet.")
+            return  # Still a success even if nothing is running.
 
-        if not running_at_start and self.mongod is not None:
-            self.logger.info(
-                "mongod on port %d was expected to be running in _do_teardown(), but wasn't. "
-                "Exited with code %d.",
-                self.port, self.mongod.poll())
+        self.logger.info("Stopping mongod on port %d with pid %d...", self.port, self.mongod.pid)
+        if not self.is_running():
+            exit_code = self.mongod.poll()
+            msg = ("mongod on port {:d} was expected to be running, but wasn't. "
+                   "Process exited with code {:d}.").format(self.port, exit_code)
+            self.logger.warning(msg)
+            raise errors.ServerFailure(msg)
 
-        if self.mongod is not None:
-            if running_at_start:
-                self.logger.info("Stopping mongod on port %d with pid %d...",
-                                 self.port,
-                                 self.mongod.pid)
-                self.mongod.stop()
+        self.mongod.stop()
+        exit_code = self.mongod.wait()
 
-            exit_code = self.mongod.wait()
-            success = exit_code == 0
-
-            if running_at_start:
-                self.logger.info("Successfully terminated the mongod on port %d, exited with code"
-                                 " %d.",
-                                 self.port,
-                                 exit_code)
-
-        return success
+        if exit_code == 0:
+            self.logger.info("Successfully stopped the mongod on port {:d}.".format(self.port))
+        else:
+            self.logger.warning("Stopped the mongod on port {:d}. "
+                                "Process exited with code {:d}.".format(self.port, exit_code))
+            raise errors.ServerFailure(
+                "mongod on port {:d} with pid {:d} exited with code {:d}".format(
+                    self.port, self.mongod.pid, exit_code))
 
     def is_running(self):
         return self.mongod is not None and self.mongod.poll() is None
+
+    def get_dbpath_prefix(self):
+        """ Returns the _dbpath, as this is the root of the data directory. """
+        return self._dbpath
 
     def get_internal_connection_string(self):
         if self.mongod is None:

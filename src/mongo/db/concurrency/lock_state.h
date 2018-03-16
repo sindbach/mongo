@@ -32,6 +32,7 @@
 
 #include "mongo/db/concurrency/fast_map_noalloc.h"
 #include "mongo/db/concurrency/locker.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/concurrency/spin_lock.h"
 
@@ -58,6 +59,15 @@ public:
      * @param timeout How many milliseconds to wait before returning LOCK_TIMEOUT.
      */
     LockResult wait(Milliseconds timeout);
+
+    /**
+     * Interruptible blocking method, which waits for the notification to fire or an interrupt from
+     * the operation context.
+     *
+     * @param opCtx OperationContext to wait on for an interrupt.
+     * @param timeout How many milliseconds to wait before returning LOCK_TIMEOUT.
+     */
+    LockResult wait(OperationContext* opCtx, Milliseconds timeout);
 
 private:
     virtual void notify(ResourceId resId, LockResult result);
@@ -101,11 +111,24 @@ public:
 
     stdx::thread::id getThreadId() const override;
 
-    virtual LockResult lockGlobal(LockMode mode);
-    virtual LockResult lockGlobalBegin(LockMode mode, Milliseconds timeout) {
-        return _lockGlobalBegin(mode, timeout);
+    void setSharedLocksShouldTwoPhaseLock(bool sharedLocksShouldTwoPhaseLock) override {
+        _sharedLocksShouldTwoPhaseLock = sharedLocksShouldTwoPhaseLock;
     }
-    virtual LockResult lockGlobalComplete(Milliseconds timeout);
+
+    virtual LockResult lockGlobal(OperationContext* opCtx, LockMode mode);
+    virtual LockResult lockGlobal(LockMode mode) {
+        return lockGlobal(nullptr, mode);
+    }
+    virtual LockResult lockGlobalBegin(OperationContext* opCtx, LockMode mode, Date_t deadline) {
+        return _lockGlobalBegin(opCtx, mode, deadline);
+    }
+    virtual LockResult lockGlobalBegin(LockMode mode, Date_t deadline) {
+        return _lockGlobalBegin(nullptr, mode, deadline);
+    }
+    virtual LockResult lockGlobalComplete(OperationContext* opCtx, Date_t deadline);
+    virtual LockResult lockGlobalComplete(Date_t deadline) {
+        return lockGlobalComplete(nullptr, deadline);
+    }
     virtual void lockMMAPV1Flush();
 
     virtual void downgradeGlobalXtoSForMMAPV1();
@@ -118,10 +141,24 @@ public:
         return _wuowNestingLevel > 0;
     }
 
+    /**
+     * Requests a lock for resource 'resId' with mode 'mode'. An OperationContext 'opCtx' must be
+     * provided to interrupt waiting on the locker condition variable that indicates status of
+     * the lock acquisition. A lock operation would otherwise wait until a timeout or the lock is
+     * granted.
+     */
+    virtual LockResult lock(OperationContext* opCtx,
+                            ResourceId resId,
+                            LockMode mode,
+                            Date_t deadline = Date_t::max(),
+                            bool checkDeadlock = false);
+
     virtual LockResult lock(ResourceId resId,
                             LockMode mode,
-                            Milliseconds timeout = Milliseconds::max(),
-                            bool checkDeadlock = false);
+                            Date_t deadline = Date_t::max(),
+                            bool checkDeadlock = false) {
+        return lock(nullptr, resId, mode, deadline, checkDeadlock);
+    }
 
     virtual void downgrade(ResourceId resId, LockMode newMode);
 
@@ -138,7 +175,13 @@ public:
 
     virtual bool saveLockStateAndUnlock(LockSnapshot* stateOut);
 
-    virtual void restoreLockState(const LockSnapshot& stateToRestore);
+    virtual void restoreLockState(OperationContext* opCtx, const LockSnapshot& stateToRestore);
+    virtual void restoreLockState(const LockSnapshot& stateToRestore) {
+        restoreLockState(nullptr, stateToRestore);
+    }
+
+    virtual void releaseTicket();
+    virtual void reacquireTicket(OperationContext* opCtx);
 
     /**
      * Allows for lock requests to be requested in a non-blocking way. There can be only one
@@ -167,15 +210,23 @@ public:
      * Waits for the completion of a lock, previously requested through lockBegin or
      * lockGlobalBegin. Must only be called, if lockBegin returned LOCK_WAITING.
      *
+     * @param opCtx Operation context that, if not null, will be used to allow interruptible lock
+     * acquisition.
      * @param resId Resource id which was passed to an earlier lockBegin call. Must match.
      * @param mode Mode which was passed to an earlier lockBegin call. Must match.
-     * @param timeout How long to wait for the lock acquisition to complete.
+     * @param deadline The absolute time point when this lock acquisition will time out, if not yet
+     * granted.
      * @param checkDeadlock whether to perform deadlock detection while waiting.
      */
-    LockResult lockComplete(ResourceId resId,
+    LockResult lockComplete(OperationContext* opCtx,
+                            ResourceId resId,
                             LockMode mode,
-                            Milliseconds timeout,
+                            Date_t deadline,
                             bool checkDeadlock);
+
+    LockResult lockComplete(ResourceId resId, LockMode mode, Date_t deadline, bool checkDeadlock) {
+        return lockComplete(nullptr, resId, mode, deadline, checkDeadlock);
+    }
 
 private:
     friend class AutoYieldFlushLockForMMAPV1Commit;
@@ -183,9 +234,9 @@ private:
     typedef FastMapNoAlloc<ResourceId, LockRequest, 16> LockRequestsMap;
 
     /**
-     * Like lockGlobalBegin, but accepts a timeout for acquiring a ticket.
+     * Like lockGlobalBegin, but accepts a deadline for acquiring a ticket.
      */
-    LockResult _lockGlobalBegin(LockMode, Milliseconds timeout);
+    LockResult _lockGlobalBegin(OperationContext* opCtx, LockMode, Date_t deadline);
 
     /**
      * The main functionality of the unlock method, except accepts iterator in order to avoid
@@ -200,6 +251,25 @@ private:
      * acquired. It is based on the type of the operation (IS for readers, IX for writers).
      */
     LockMode _getModeForMMAPV1FlushLock() const;
+
+    /**
+     * Whether the particular lock's release should be held until the end of the operation. We delay
+     * release of exclusive locks (locks that are for write operations) in order to ensure that the
+     * data they protect is committed successfully. Shared locks will also participate in two-phase
+     * locking if '_sharedLocksShouldTwoPhaseLock' is true.
+     */
+    bool _shouldDelayUnlock(ResourceId resId, LockMode mode) const;
+
+    /**
+     * Releases the ticket for the Locker.
+     */
+    void _releaseTicket();
+
+    /**
+     * Acquires a ticket for the Locker under 'mode'. Returns LOCK_TIMEOUT if it cannot acquire a
+     * ticket within 'deadline'.
+     */
+    LockResult _acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadline);
 
     // Used to disambiguate different lockers
     const LockerId _id;
@@ -233,6 +303,9 @@ private:
 
     // Track the thread who owns the lock for debugging purposes
     stdx::thread::id _threadId;
+
+    // If true, shared locks will participate in two-phase locking.
+    bool _sharedLocksShouldTwoPhaseLock = false;
 
     //////////////////////////////////////////////////////////////////////////////////////////
     //

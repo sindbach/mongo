@@ -1,5 +1,6 @@
 /**
  * This tests that CLAC (collection level access control) handles system collections properly.
+ * @tags: [requires_sharding]
  */
 
 // Verify that system collections are treated correctly
@@ -60,6 +61,8 @@ runTest(conn.getDB("admin"));
 MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s.getDB("admin"));
 st.stop();

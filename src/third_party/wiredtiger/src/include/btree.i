@@ -178,7 +178,7 @@ static inline void
 __wt_cache_decr_check_size(
     WT_SESSION_IMPL *session, size_t *vp, size_t v, const char *fld)
 {
-	if (__wt_atomic_subsize(vp, v) < WT_EXABYTE)
+	if (v == 0 || __wt_atomic_subsize(vp, v) < WT_EXABYTE)
 		return;
 
 	/*
@@ -202,7 +202,7 @@ static inline void
 __wt_cache_decr_check_uint64(
     WT_SESSION_IMPL *session, uint64_t *vp, uint64_t v, const char *fld)
 {
-	if (__wt_atomic_sub64(vp, v) < WT_EXABYTE)
+	if (v == 0 || __wt_atomic_sub64(vp, v) < WT_EXABYTE)
 		return;
 
 	/*
@@ -1350,11 +1350,9 @@ __wt_page_can_evict(WT_SESSION_IMPL *session, WT_REF *ref, bool *inmem_splitp)
 	    F_ISSET_ATOMIC(ref->home, WT_PAGE_OVERFLOW_KEYS))
 		return (false);
 
-	/*
-	 * If the page was restored after a truncate, it can't be evicted until
-	 * the truncate completes.
-	 */
-	if (ref->page_del != NULL && !__wt_txn_visible_all(session,
+	/* A truncated page can't be evicted until the truncate completes. */
+	if (ref->page_del != NULL && ref->page_del->txnid != WT_TXN_ABORTED &&
+	    !__wt_txn_visible_all(session,
 	    ref->page_del->txnid, WT_TIMESTAMP_NULL(&ref->page_del->timestamp)))
 		return (false);
 

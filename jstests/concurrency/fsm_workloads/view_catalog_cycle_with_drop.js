@@ -49,8 +49,9 @@ var $config = (function() {
             const viewName = this.getRandomView(this.viewList);
             this.assertCommandWorkedOrFailedWithCode(db.runCommand({drop: viewName}),
                                                      [ErrorCodes.NamespaceNotFound]);
-            this.assertCommandWorkedOrFailedWithCode(db.createView(viewName, collName, []),
-                                                     [ErrorCodes.NamespaceExists]);
+            this.assertCommandWorkedOrFailedWithCode(
+                db.createView(viewName, collName, []),
+                [ErrorCodes.NamespaceExists, ErrorCodes.NamespaceNotFound]);
         }
 
         /**
@@ -96,9 +97,18 @@ var $config = (function() {
         dropCollections(db, pattern);
     }
 
+    // This test performs createCollection concurrently from many threads, and createCollection on a
+    // sharded cluster takes a distributed lock. Since a distributed lock is acquired by repeatedly
+    // attempting to grab the lock every half second for 20 seconds (a max of 40 attempts), it's
+    // possible that some thread will be starved by the other threads and fail to grab the lock
+    // after 40 attempts. To reduce the likelihood of this, we choose threadCount and iterations so
+    // that threadCount * iterations < 40.
+    // The threadCount and iterations can be increased once PM-697 ("Remove all usages of
+    // distributed lock") is complete.
+
     return {
-        threadCount: 10,
-        iterations: 100,
+        threadCount: 5,
+        iterations: 5,
         data: data,
         states: states,
         startState: 'readFromView',

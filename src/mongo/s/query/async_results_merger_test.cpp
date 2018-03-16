@@ -41,7 +41,7 @@
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/sharding_test_fixture.h"
+#include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
@@ -115,9 +115,8 @@ protected:
     void makeCursorFromExistingCursors(
         std::vector<ClusterClientCursorParams::RemoteCursor> remoteCursors,
         boost::optional<BSONObj> findCmd = boost::none,
-        boost::optional<long long> getMoreBatchSize = boost::none,
-        ReadPreferenceSetting readPref = ReadPreferenceSetting(ReadPreference::PrimaryOnly)) {
-        _params = stdx::make_unique<ClusterClientCursorParams>(_nss, UserNameIterator(), readPref);
+        boost::optional<long long> getMoreBatchSize = boost::none) {
+        _params = stdx::make_unique<ClusterClientCursorParams>(_nss);
         _params->remotes = std::move(remoteCursors);
 
         if (findCmd) {
@@ -1273,36 +1272,6 @@ TEST_F(AsyncResultsMergerTest, GetMoreBatchSizes) {
     ASSERT_TRUE(unittest::assertGet(arm->nextReady()).isEOF());
 }
 
-TEST_F(AsyncResultsMergerTest, SendsSecondaryOkAsMetadata) {
-    std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
-    cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 1, {}));
-    makeCursorFromExistingCursors(std::move(cursors),
-                                  boost::none,
-                                  boost::none,
-                                  ReadPreferenceSetting(ReadPreference::Nearest));
-
-    ASSERT_FALSE(arm->ready());
-    auto readyEvent = unittest::assertGet(arm->nextEvent());
-    ASSERT_FALSE(arm->ready());
-
-    BSONObj cmdRequestMetadata = getNthPendingRequest(0).metadata;
-    ASSERT(uassertStatusOK(ReadPreferenceSetting::fromContainingBSON(cmdRequestMetadata))
-               .canRunOnSecondary())
-        << "full metadata: " << cmdRequestMetadata;
-
-    std::vector<CursorResponse> responses;
-    std::vector<BSONObj> batch1 = {fromjson("{_id: 1}")};
-    responses.emplace_back(_nss, CursorId(0), batch1);
-    scheduleNetworkResponses(std::move(responses),
-                             CursorResponse::ResponseType::SubsequentResponse);
-    executor()->waitForEvent(readyEvent);
-
-    ASSERT_TRUE(arm->ready());
-    ASSERT_BSONOBJ_EQ(fromjson("{_id: 1}"), *unittest::assertGet(arm->nextReady()).getResult());
-    ASSERT_TRUE(arm->ready());
-    ASSERT_TRUE(unittest::assertGet(arm->nextReady()).isEOF());
-}
-
 TEST_F(AsyncResultsMergerTest, AllowPartialResults) {
     BSONObj findCmd = fromjson("{find: 'testcoll', allowPartialResults: true}");
     std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
@@ -1522,8 +1491,7 @@ TEST_F(AsyncResultsMergerTest, GetMoreRequestIncludesMaxTimeMS) {
 }
 
 TEST_F(AsyncResultsMergerTest, SortedTailableCursorNotReadyIfOneOrMoreRemotesHasNoOplogTimestamp) {
-    auto params =
-        stdx::make_unique<ClusterClientCursorParams>(_nss, UserNameIterator(), boost::none);
+    auto params = stdx::make_unique<ClusterClientCursorParams>(_nss, boost::none);
     std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
     cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 123, {}));
     cursors.emplace_back(kTestShardIds[1], kTestShardHosts[1], CursorResponse(_nss, 456, {}));
@@ -1587,8 +1555,7 @@ TEST_F(AsyncResultsMergerTest, SortedTailableCursorNotReadyIfOneOrMoreRemotesHas
 
 TEST_F(AsyncResultsMergerTest,
        SortedTailableCursorNotReadyIfOneOrMoreRemotesHasNullOplogTimestamp) {
-    auto params =
-        stdx::make_unique<ClusterClientCursorParams>(_nss, UserNameIterator(), boost::none);
+    auto params = stdx::make_unique<ClusterClientCursorParams>(_nss, boost::none);
     std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
     cursors.emplace_back(
         kTestShardIds[0],
@@ -1636,8 +1603,7 @@ TEST_F(AsyncResultsMergerTest,
 }
 
 TEST_F(AsyncResultsMergerTest, SortedTailableCursorNotReadyIfOneRemoteHasLowerOplogTime) {
-    auto params =
-        stdx::make_unique<ClusterClientCursorParams>(_nss, UserNameIterator(), boost::none);
+    auto params = stdx::make_unique<ClusterClientCursorParams>(_nss, boost::none);
     std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
     Timestamp tooLow = Timestamp(1, 2);
     cursors.emplace_back(
@@ -1671,8 +1637,7 @@ TEST_F(AsyncResultsMergerTest, SortedTailableCursorNotReadyIfOneRemoteHasLowerOp
 }
 
 TEST_F(AsyncResultsMergerTest, SortedTailableCursorNewShardOrderedAfterExisting) {
-    auto params =
-        stdx::make_unique<ClusterClientCursorParams>(_nss, UserNameIterator(), boost::none);
+    auto params = stdx::make_unique<ClusterClientCursorParams>(_nss, boost::none);
     std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
     cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 123, {}));
     params->remotes = std::move(cursors);
@@ -1743,8 +1708,7 @@ TEST_F(AsyncResultsMergerTest, SortedTailableCursorNewShardOrderedAfterExisting)
 }
 
 TEST_F(AsyncResultsMergerTest, SortedTailableCursorNewShardOrderedBeforeExisting) {
-    auto params =
-        stdx::make_unique<ClusterClientCursorParams>(_nss, UserNameIterator(), boost::none);
+    auto params = stdx::make_unique<ClusterClientCursorParams>(_nss, boost::none);
     std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
     cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 123, {}));
     params->remotes = std::move(cursors);
@@ -1885,6 +1849,72 @@ TEST_F(AsyncResultsMergerTest, KillShouldNotWaitForRemoteCommandsBeforeSchedulin
     executor()->waitForEvent(killEvent);
 }
 
-}  // namespace
+TEST_F(AsyncResultsMergerTest, ShouldBeAbleToBlockUntilNextResultIsReady) {
+    std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
+    cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 1, {}));
+    makeCursorFromExistingCursors(std::move(cursors));
 
+    // Before any requests are scheduled, ARM is not ready to return results.
+    ASSERT_FALSE(arm->ready());
+    ASSERT_FALSE(arm->remotesExhausted());
+
+    // Issue a blocking wait for the next result asynchronously on a different thread.
+    auto future = launchAsync([&]() {
+        auto next = unittest::assertGet(arm->blockingNext());
+        ASSERT_FALSE(next.isEOF());
+        ASSERT_BSONOBJ_EQ(*next.getResult(), BSON("x" << 1));
+        next = unittest::assertGet(arm->blockingNext());
+        ASSERT_TRUE(next.isEOF());
+    });
+
+    // Schedule the response to the getMore which will return the next result and mark the cursor as
+    // exhausted.
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["getMore"]);
+        return CursorResponse(_nss, 0LL, {BSON("x" << 1)})
+            .toBSON(CursorResponse::ResponseType::SubsequentResponse);
+    });
+
+    future.timed_get(kFutureTimeout);
+}
+
+TEST_F(AsyncResultsMergerTest, ShouldBeInterruptableDuringBlockingNext) {
+    std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
+    cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 1, {}));
+    makeCursorFromExistingCursors(std::move(cursors));
+
+    // Issue a blocking wait for the next result asynchronously on a different thread.
+    auto future = launchAsync([&]() {
+        auto nextStatus = arm->blockingNext();
+        ASSERT_EQ(nextStatus.getStatus(), ErrorCodes::Interrupted);
+    });
+
+    // Now mark the OperationContext as killed from this thread.
+    {
+        stdx::lock_guard<Client> lk(*operationContext()->getClient());
+        operationContext()->markKilled(ErrorCodes::Interrupted);
+    }
+    future.timed_get(kFutureTimeout);
+    // Be careful not to use a blocking kill here, since the main thread is in charge of running the
+    // callbacks, and we'd block on ourselves.
+    auto killEvent = arm->kill(operationContext());
+
+    assertKillCusorsCmdHasCursorId(getNthPendingRequest(0u).cmdObj, 1);
+    runReadyCallbacks();
+    executor()->waitForEvent(killEvent);
+}
+
+TEST_F(AsyncResultsMergerTest, ShouldBeAbleToBlockUntilKilled) {
+    std::vector<ClusterClientCursorParams::RemoteCursor> cursors;
+    cursors.emplace_back(kTestShardIds[0], kTestShardHosts[0], CursorResponse(_nss, 1, {}));
+    makeCursorFromExistingCursors(std::move(cursors));
+
+    // Before any requests are scheduled, ARM is not ready to return results.
+    ASSERT_FALSE(arm->ready());
+    ASSERT_FALSE(arm->remotesExhausted());
+
+    arm->blockingKill(operationContext());
+}
+
+}  // namespace
 }  // namespace mongo

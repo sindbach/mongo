@@ -38,6 +38,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/repl/timestamp_block.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -115,18 +116,7 @@ void ReplicationConsistencyMarkersImpl::initializeMinValidDocument(OperationCont
     // the 'minValid' document, but we still want the initialization write to go into the next
     // checkpoint since a newly initialized 'minValid' document is always valid.
     upsert.timestamp = Timestamp();
-
-    Status status = _storageInterface->putSingleton(opCtx, _minValidNss, upsert);
-
-    // If the collection doesn't exist, create it and try again.
-    if (status == ErrorCodes::NamespaceNotFound) {
-        status = _storageInterface->createCollection(opCtx, _minValidNss, CollectionOptions());
-        fassertStatusOK(40509, status);
-
-        status = _storageInterface->putSingleton(opCtx, _minValidNss, upsert);
-    }
-
-    fassertStatusOK(40467, status);
+    fassert(40467, _storageInterface->putSingleton(opCtx, _minValidNss, upsert));
 }
 
 bool ReplicationConsistencyMarkersImpl::getInitialSyncFlag(OperationContext* opCtx) const {
@@ -330,20 +320,9 @@ ReplicationConsistencyMarkersImpl::_getOplogTruncateAfterPointDocument(
 
 void ReplicationConsistencyMarkersImpl::_upsertOplogTruncateAfterPointDocument(
     OperationContext* opCtx, const BSONObj& updateSpec) {
-    auto status = _storageInterface->upsertById(
-        opCtx, _oplogTruncateAfterPointNss, kOplogTruncateAfterPointId["_id"], updateSpec);
-
-    // If the collection doesn't exist, creates it and tries again.
-    if (status == ErrorCodes::NamespaceNotFound) {
-        status = _storageInterface->createCollection(
-            opCtx, _oplogTruncateAfterPointNss, CollectionOptions());
-        fassertStatusOK(40511, status);
-
-        status = _storageInterface->upsertById(
-            opCtx, _oplogTruncateAfterPointNss, kOplogTruncateAfterPointId["_id"], updateSpec);
-    }
-
-    fassertStatusOK(40512, status);
+    fassert(40512,
+            _storageInterface->upsertById(
+                opCtx, _oplogTruncateAfterPointNss, kOplogTruncateAfterPointId["_id"], updateSpec));
 }
 
 void ReplicationConsistencyMarkersImpl::setOplogTruncateAfterPoint(OperationContext* opCtx,
@@ -385,7 +364,10 @@ Timestamp ReplicationConsistencyMarkersImpl::_getOldOplogDeleteFromPoint(
 }
 
 void ReplicationConsistencyMarkersImpl::_upsertCheckpointTimestampDocument(
-    OperationContext* opCtx, const BSONObj& updateSpec) {
+    OperationContext* opCtx, const BSONObj& updateSpec, const Timestamp& ts) {
+    // Do all writes in this function at the timestamp 'ts'. This will also prevent any lower
+    // level functions from setting their own timestamps that are not 'ts'.
+    TimestampBlock tsBlock(opCtx, ts);
     auto status = _storageInterface->upsertById(
         opCtx, _checkpointTimestampNss, kCheckpointTimestampId["_id"], updateSpec);
 
@@ -393,13 +375,13 @@ void ReplicationConsistencyMarkersImpl::_upsertCheckpointTimestampDocument(
     if (status == ErrorCodes::NamespaceNotFound) {
         status = _storageInterface->createCollection(
             opCtx, _checkpointTimestampNss, CollectionOptions());
-        fassertStatusOK(40581, status);
+        fassert(40581, status);
 
         status = _storageInterface->upsertById(
             opCtx, _checkpointTimestampNss, kCheckpointTimestampId["_id"], updateSpec);
     }
 
-    fassertStatusOK(40582, status);
+    fassert(40582, status);
 }
 
 void ReplicationConsistencyMarkersImpl::writeCheckpointTimestamp(OperationContext* opCtx,
@@ -409,9 +391,7 @@ void ReplicationConsistencyMarkersImpl::writeCheckpointTimestamp(OperationContex
     auto timestampField = CheckpointTimestampDocument::kCheckpointTimestampFieldName;
     auto spec = BSON("$set" << BSON(timestampField << timestamp));
 
-    // TODO: When SERVER-28602 is completed, utilize RecoveryUnit::setTimestamp so that this
-    // write operation itself is committed with a timestamp that is included in the checkpoint.
-    _upsertCheckpointTimestampDocument(opCtx, spec);
+    _upsertCheckpointTimestampDocument(opCtx, spec, timestamp);
 }
 
 boost::optional<CheckpointTimestampDocument>
@@ -447,6 +427,19 @@ Timestamp ReplicationConsistencyMarkersImpl::getCheckpointTimestamp(OperationCon
     return out;
 }
 
+Status ReplicationConsistencyMarkersImpl::createInternalCollections(OperationContext* opCtx) {
+    for (auto nss : std::vector<NamespaceString>(
+             {_oplogTruncateAfterPointNss, _minValidNss, _checkpointTimestampNss})) {
+        auto status = _storageInterface->createCollection(opCtx, nss, CollectionOptions());
+        if (!status.isOK() && status.code() != ErrorCodes::NamespaceExists) {
+            return {ErrorCodes::CannotCreateCollection,
+                    str::stream() << "Failed to create collection. Ns: " << nss.ns() << " Error: "
+                                  << status.toString()};
+        }
+    }
+
+    return Status::OK();
+}
 
 }  // namespace repl
 }  // namespace mongo

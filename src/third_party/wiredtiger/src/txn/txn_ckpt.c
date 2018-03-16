@@ -612,7 +612,8 @@ __checkpoint_fail_reset(WT_SESSION_IMPL *session)
  *	Start the transaction for a checkpoint and gather handles.
  */
 static int
-__checkpoint_prepare(WT_SESSION_IMPL *session, const char *cfg[])
+__checkpoint_prepare(
+    WT_SESSION_IMPL *session, bool *trackingp, const char *cfg[])
 {
 	WT_CONFIG_ITEM cval;
 	WT_CONNECTION_IMPL *conn;
@@ -645,6 +646,10 @@ __checkpoint_prepare(WT_SESSION_IMPL *session, const char *cfg[])
 
 	/* Ensure a transaction ID is allocated prior to sharing it globally */
 	WT_RET(__wt_txn_id_check(session));
+
+	/* Keep track of handles acquired for locking. */
+	WT_RET(__wt_meta_track_on(session));
+	*trackingp = true;
 
 	/*
 	 * Mark the connection as clean. If some data gets modified after
@@ -706,7 +711,8 @@ __checkpoint_prepare(WT_SESSION_IMPL *session, const char *cfg[])
 		__wt_timestamp_set(
 		    &txn->read_timestamp, &txn_global->stable_timestamp);
 		F_SET(txn, WT_TXN_HAS_TS_READ);
-	}
+	} else
+		__wt_timestamp_set_zero(&txn->read_timestamp);
 #else
 	WT_UNUSED(use_timestamp);
 #endif
@@ -742,6 +748,7 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
 	WT_CACHE *cache;
 	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
+	WT_DECL_TIMESTAMP(ckpt_tmp_ts)
 	WT_TXN *txn;
 	WT_TXN_GLOBAL *txn_global;
 	WT_TXN_ISOLATION saved_isolation;
@@ -820,10 +827,6 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
 	generation = __wt_gen_next(session, WT_GEN_CHECKPOINT);
 	WT_STAT_CONN_SET(session, txn_checkpoint_generation, generation);
 
-	/* Keep track of handles acquired for locking. */
-	WT_ERR(__wt_meta_track_on(session));
-	tracking = true;
-
 	/*
 	 * We want to skip checkpointing clean handles whenever possible.  That
 	 * is, when the checkpoint is not named or forced.  However, we need to
@@ -839,7 +842,8 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
 	 * Hold the schema lock while starting the transaction and gathering
 	 * handles so the set we get is complete and correct.
 	 */
-	WT_WITH_SCHEMA_LOCK(session, ret = __checkpoint_prepare(session, cfg));
+	WT_WITH_SCHEMA_LOCK(session,
+	    ret = __checkpoint_prepare(session, &tracking, cfg));
 	WT_ERR(ret);
 
 	WT_ASSERT(session, txn->isolation == WT_ISO_SNAPSHOT);
@@ -896,6 +900,15 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
 	 * checkpointing the metadata since we know that all files in the
 	 * checkpoint are now in a consistent state.
 	 */
+#ifdef HAVE_TIMESTAMPS
+	/*
+	 * Record the timestamp from the transaction if we were successful.
+	 * Store it in a temp variable now because it will be invalidated during
+	 * commit but we don't want to set it until we know the checkpoint
+	 * is successful.
+	 */
+	__wt_timestamp_set(&ckpt_tmp_ts, &txn->read_timestamp);
+#endif
 	WT_ERR(__wt_txn_commit(session, NULL));
 
 	/*
@@ -939,8 +952,13 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
 	 */
 	txn_global->checkpoint_state.pinned_id = WT_TXN_NONE;
 
-	if (full)
+	if (full) {
 		__checkpoint_stats(session);
+#ifdef HAVE_TIMESTAMPS
+		__wt_timestamp_set(
+		    &conn->txn_global.last_ckpt_timestamp, &ckpt_tmp_ts);
+#endif
+	}
 
 err:	/*
 	 * Reset the timer so that next checkpoint tracks the progress only if
@@ -1778,6 +1796,14 @@ __wt_checkpoint_close(WT_SESSION_IMPL *session, bool final)
 
 	btree = S2BT(session);
 	bulk = F_ISSET(btree, WT_BTREE_BULK);
+
+	/*
+	 * We've done the final checkpoint before the final close, subsequent
+	 * writes to normal objects are wasted effort. Discard the objects to
+	 * validate exit accounting.
+	 */
+	if (final && !WT_IS_METADATA(session->dhandle))
+		return (__wt_cache_op(session, WT_SYNC_DISCARD));
 
 	/*
 	 * If closing an unmodified file, check that no update is required

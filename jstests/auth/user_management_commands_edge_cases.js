@@ -1,6 +1,7 @@
 /**
  * This tests that all the different commands for user manipulation all properly handle invalid and
  * atypical inputs.
+ * @tags: [requires_sharding]
  */
 
 function runTest(conn) {
@@ -87,9 +88,8 @@ function runTest(conn) {
         });
 
         // Try to update user that doesn't exist
-        assert.throws(function() {
-            db.updateUser('fakeUser', {roles: ['read']});
-        });
+        assert.commandFailedWithCode(db.runCommand({updateUser: 'fakeUser', roles: ['read']}),
+                                     ErrorCodes.UserNotFound);
 
         // Try to update user with invalid password
         assert.throws(function() {
@@ -282,6 +282,8 @@ runTest(conn);
 MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s);
 st.stop();

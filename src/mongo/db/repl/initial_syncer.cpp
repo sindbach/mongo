@@ -42,6 +42,7 @@
 #include "mongo/client/fetcher.h"
 #include "mongo/client/remote_command_retry_scheduler.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/jsobj.h"
@@ -384,6 +385,15 @@ void InitialSyncer::_tearDown_inlock(OperationContext* opCtx,
 
     _storage->setInitialDataTimestamp(opCtx->getServiceContext(),
                                       lastApplied.getValue().opTime.getTimestamp());
+
+    auto currentLastAppliedOpTime = _opts.getMyLastOptime();
+    if (currentLastAppliedOpTime.isNull()) {
+        _opts.setMyLastOptime(lastApplied.getValue().opTime,
+                              ReplicationCoordinator::DataConsistency::Consistent);
+    } else {
+        invariant(currentLastAppliedOpTime == lastApplied.getValue().opTime);
+    }
+
     _replicationProcess->getConsistencyMarkers()->clearInitialSyncFlag(opCtx);
     log() << "initial sync done; took "
           << duration_cast<Seconds>(_stats.initialSyncEnd - _stats.initialSyncStart) << ".";
@@ -427,9 +437,9 @@ void InitialSyncer::_startInitialSyncAttemptCallback(
     _lastApplied = {};
     _lastFetched = {};
 
-    LOG(2) << "Resetting feature compatibility version to 3.4. If the sync source is in feature "
-              "compatibility version 3.6, we will find out when we clone the admin.system.version "
-              "collection.";
+    LOG(2) << "Resetting feature compatibility version to last-stable. If the sync source is in "
+              "latest feature compatibility version, we will find out when we clone the "
+              "admin.system.version collection.";
     serverGlobalParams.featureCompatibility.reset();
 
     // Clear the oplog buffer.
@@ -603,7 +613,7 @@ void InitialSyncer::_lastOplogEntryFetcherCallbackForBeginTimestamp(
     BSONObjBuilder queryBob;
     queryBob.append("find", nsToCollectionSubstring(FeatureCompatibilityVersion::kCollection));
     auto filterBob = BSONObjBuilder(queryBob.subobjStart("filter"));
-    filterBob.append("_id", FeatureCompatibilityVersion::kParameterName);
+    filterBob.append("_id", FeatureCompatibilityVersionParser::kParameterName);
     filterBob.done();
 
     _fCVFetcher = stdx::make_unique<Fetcher>(
@@ -664,20 +674,22 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
         return;
     }
 
-    auto fCVParseSW = FeatureCompatibilityVersion::parse(docs.front());
+    auto fCVParseSW = FeatureCompatibilityVersionParser::parse(docs.front());
     if (!fCVParseSW.isOK()) {
         onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, fCVParseSW.getStatus());
         return;
     }
 
     auto version = fCVParseSW.getValue();
-    if (version > ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34 &&
-        version < ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo36) {
+
+    // Changing the featureCompatibilityVersion during initial sync is unsafe.
+    if (version > ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo36 &&
+        version < ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40) {
         onCompletionGuard->setResultAndCancelRemainingWork_inlock(
             lock,
             Status(ErrorCodes::IncompatibleServerVersion,
                    str::stream() << "Sync source had unsafe feature compatibility version: "
-                                 << FeatureCompatibilityVersion::toString(version)));
+                                 << FeatureCompatibilityVersionParser::toString(version)));
         return;
     }
 
@@ -923,8 +935,11 @@ void InitialSyncer::_getNextApplierBatchCallback(
     if (!ops.empty()) {
         _fetchCount.store(0);
         MultiApplier::ApplyOperationFn applyOperationsForEachReplicationWorkerThreadFn =
-            [ =, source = _syncSource ](MultiApplier::OperationPtrs * x) {
-            return _dataReplicatorExternalState->_multiInitialSyncApply(x, source, &_fetchCount);
+            [ =, source = _syncSource ](OperationContext * opCtx,
+                                        MultiApplier::OperationPtrs * x,
+                                        WorkerMultikeyPathInfo * workerMultikeyPathInfo) {
+            return _dataReplicatorExternalState->_multiInitialSyncApply(
+                opCtx, x, source, &_fetchCount, workerMultikeyPathInfo);
         };
         MultiApplier::MultiApplyFn applyBatchOfOperationsFn =
             [=](OperationContext* opCtx,
@@ -1072,26 +1087,6 @@ void InitialSyncer::_rollbackCheckerCheckForRollbackCallback(
                    str::stream() << "Rollback occurred on our sync source " << _syncSource
                                  << " during initial sync"));
         return;
-    }
-
-    // Set UUIDs for all non-replicated collections on secondaries. See comment in
-    // ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage() for the explanation of
-    // why we do this.
-    const NamespaceString nss("admin", "system.version");
-    auto opCtx = makeOpCtx();
-    auto statusWithUUID = _storage->getCollectionUUID(opCtx.get(), nss);
-    if (!statusWithUUID.isOK()) {
-        // If the admin database does not exist, we intentionally fail initial sync. As part of
-        // SERVER-29448, we disallow dropping the admin database, so failing here is fine.
-        onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, statusWithUUID.getStatus());
-        return;
-    }
-    if (statusWithUUID.getValue()) {
-        auto schemaStatus = _storage->upgradeUUIDSchemaVersionNonReplicated(opCtx.get());
-        if (!schemaStatus.isOK()) {
-            onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, schemaStatus);
-            return;
-        }
     }
 
     // Success!

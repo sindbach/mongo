@@ -35,13 +35,14 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/grid.h"
@@ -57,21 +58,21 @@ public:
     FlushRoutingTableCacheUpdates()
         : BasicCommand("_flushRoutingTableCacheUpdates", "forceRoutingTableRefresh") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command which waits for any pending routing table cache updates for a "
-                "particular namespace to be written locally. The operationTime returned in the "
-                "response metadata is guaranteed to be at least as late as the last routing table "
-                "cache update to the local disk. Takes a 'forceRemoteRefresh' option to make this "
-                "node refresh its cache from the config server before waiting for the last refresh "
-                "to be persisted.";
+    std::string help() const override {
+        return "Internal command which waits for any pending routing table cache updates for a "
+               "particular namespace to be written locally. The operationTime returned in the "
+               "response metadata is guaranteed to be at least as late as the last routing table "
+               "cache update to the local disk. Takes a 'forceRemoteRefresh' option to make this "
+               "node refresh its cache from the config server before waiting for the last refresh "
+               "to be persisted.";
     }
 
     bool adminOnly() const override {
         return true;
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -84,7 +85,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -94,7 +95,7 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::internal);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
@@ -128,13 +129,11 @@ public:
             // finish on the primary in case a secondary's caller has an afterClusterTime inclusive
             // of the commit (and new writes to the committed chunk) that hasn't yet propagated back
             // to this shard. This ensures the read your own writes causal consistency guarantee.
-            auto css = CollectionShardingState::get(opCtx, nss);
-            if (css->getMigrationSourceManager()) {
-                auto criticalSectionSignal =
-                    css->getMigrationSourceManager()->getMigrationCriticalSectionSignal(true);
-                if (criticalSectionSignal) {
-                    oss.setMigrationCriticalSectionSignal(criticalSectionSignal);
-                }
+            auto const css = CollectionShardingState::get(opCtx, nss);
+            auto criticalSectionSignal =
+                css->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead);
+            if (criticalSectionSignal) {
+                oss.setMigrationCriticalSectionSignal(criticalSectionSignal);
             }
         }
 
@@ -142,8 +141,7 @@ public:
 
         if (request.getSyncFromConfig()) {
             LOG(1) << "Forcing remote routing table refresh for " << nss;
-            ChunkVersion unusedShardVersion;
-            uassertStatusOK(shardingState->refreshMetadataNow(opCtx, nss, &unusedShardVersion));
+            forceShardFilteringMetadataRefresh(opCtx, nss);
         }
 
         CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, nss);

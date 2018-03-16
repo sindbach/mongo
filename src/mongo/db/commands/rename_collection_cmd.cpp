@@ -44,7 +44,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/insert.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/scopeguard.h"
 
@@ -62,19 +62,19 @@ public:
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         return rename_collection::checkAuthForRenameCollectionCommand(client, dbname, cmdObj);
     }
-    virtual void help(stringstream& help) const {
-        help << " example: { renameCollection: foo.a, to: bar.b }";
+    std::string help() const override {
+        return " example: { renameCollection: foo.a, to: bar.b }";
     }
 
     static void dropCollection(OperationContext* opCtx, Database* db, StringData collName) {

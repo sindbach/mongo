@@ -75,6 +75,13 @@ class AsyncResultsMerger {
     MONGO_DISALLOW_COPYING(AsyncResultsMerger);
 
 public:
+    // When mongos has to do a merge in order to return results to the client in the correct sort
+    // order, it requests a sortKey meta-projection using this field name.
+    static constexpr StringData kSortKeyField = "$sortKey"_sd;
+
+    // The expected sort key pattern when 'compareWholeSortKey' is true.
+    static const BSONObj kWholeSortKeySortPattern;
+
     /**
      * Takes ownership of the cursors from ClusterClientCursorParams by storing their cursorIds and
      * the hosts on which they exist in _remotes.
@@ -97,7 +104,7 @@ public:
      * In order to be destroyed, either the ARM must have been kill()'ed or all cursors must have
      * been exhausted. This is so that any unexhausted cursors are cleaned up by the ARM.
      */
-    virtual ~AsyncResultsMerger();
+    ~AsyncResultsMerger();
 
     /**
      * Returns true if all of the remote cursors are exhausted.
@@ -160,6 +167,12 @@ public:
     StatusWith<ClusterQueryResult> nextReady();
 
     /**
+     * Blocks until the next result is ready, all remote cursors are exhausted, or there is an
+     * error.
+     */
+    StatusWith<ClusterQueryResult> blockingNext();
+
+    /**
      * Schedules remote work as required in order to make further results available. If there is an
      * error in scheduling this work, returns a non-ok status. On success, returns an event handle.
      * The caller can pass this event handle to 'executor' in order to be blocked until further
@@ -203,6 +216,11 @@ public:
      */
     executor::TaskExecutor::EventHandle kill(OperationContext* opCtx);
 
+    /**
+     * A blocking version of kill() that will not return until this is safe to destroy.
+     */
+    void blockingKill(OperationContext*);
+
 private:
     /**
      * We instantiate one of these per remote host. It contains the buffer of results we've
@@ -229,11 +247,6 @@ private:
          * its cursor).
          */
         bool exhausted() const;
-
-        /**
-         * Returns the Shard object associated with this remote cursor.
-         */
-        std::shared_ptr<Shard> getShard();
 
         // Used when merging tailable awaitData cursors in sorted order. In order to return any
         // result to the client we have to know that no shard will ever return anything that sorts
@@ -389,10 +402,6 @@ private:
     OperationContext* _opCtx;
     executor::TaskExecutor* _executor;
     ClusterClientCursorParams* _params;
-
-    // The metadata obj to pass along with the command request. Used to indicate that the command is
-    // ok to run on secondaries.
-    BSONObj _metadataObj;
 
     // Must be acquired before accessing any data members (other than _params, which is read-only).
     stdx::mutex _mutex;

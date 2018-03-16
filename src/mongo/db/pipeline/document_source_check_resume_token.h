@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_sort.h"
@@ -65,6 +66,7 @@ public:
                 HostTypeRequirement::kAnyShard,
                 DiskUseRequirement::kNoDiskUse,
                 FacetRequirement::kNotAllowed,
+                TransactionRequirement::kNotAllowed,
                 ChangeStreamRequirement::kChangeStreamStage};
     }
 
@@ -103,6 +105,7 @@ public:
                                                              : HostTypeRequirement::kMongoS),
                 DiskUseRequirement::kNoDiskUse,
                 FacetRequirement::kNotAllowed,
+                TransactionRequirement::kNotAllowed,
                 ChangeStreamRequirement::kChangeStreamStage};
     }
 
@@ -122,7 +125,7 @@ public:
         const long long noLimit = -1;
         auto sortMergingPresorted =
             DocumentSourceSort::create(pExpCtx,
-                                       DocumentSourceChangeStream::kSortSpec,
+                                       change_stream_constants::kSortSpec,
                                        noLimit,
                                        DocumentSourceSort::kMaxMemoryUsageBytes,
                                        mergingPresorted);

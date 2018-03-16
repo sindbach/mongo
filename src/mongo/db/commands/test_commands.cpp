@@ -44,7 +44,6 @@
 #include "mongo/db/index_builder.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
 
@@ -62,8 +61,8 @@ public:
     virtual bool adminOnly() const {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
@@ -71,9 +70,9 @@ public:
     // No auth needed because it only works when enabled via command line.
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
-    virtual void help(stringstream& help) const {
-        help << "internal. for testing only.";
+                                       std::vector<Privilege>* out) const {}
+    std::string help() const override {
+        return "internal. for testing only.";
     }
     virtual bool errmsgRun(OperationContext* opCtx,
                            const string& dbname,
@@ -118,25 +117,25 @@ public:
         return true;
     }
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "internal testing command. Run a no-op command for an arbitrary amount of time. ";
-        help << "If neither 'secs' nor 'millis' is set, command will sleep for 10 seconds. ";
-        help << "If both are set, command will sleep for the sum of 'secs' and 'millis.'\n";
-        help << "   w:<bool> (deprecated: use 'lock' instead) if true, takes a write lock.\n";
-        help << "   lock: r, w, none. If r or w, db will block under a lock. Defaults to r.";
-        help << " 'lock' and 'w' may not both be set.\n";
-        help << "   secs:<seconds> Amount of time to sleep, in seconds.\n";
-        help << "   millis:<milliseconds> Amount of time to sleep, in ms.\n";
+    std::string help() const override {
+        return "internal testing command. Run a no-op command for an arbitrary amount of time. "
+               "If neither 'secs' nor 'millis' is set, command will sleep for 10 seconds. "
+               "If both are set, command will sleep for the sum of 'secs' and 'millis.'\n"
+               "   w:<bool> (deprecated: use 'lock' instead) if true, takes a write lock.\n"
+               "   lock: r, w, none. If r or w, db will block under a lock. Defaults to r."
+               " 'lock' and 'w' may not both be set.\n"
+               "   secs:<seconds> Amount of time to sleep, in seconds.\n"
+               "   millis:<milliseconds> Amount of time to sleep, in ms.\n";
     }
 
     // No auth needed because it only works when enabled via command line.
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
+                                       std::vector<Privilege>* out) const {}
 
     void _sleepInReadLock(mongo::OperationContext* opCtx, long long millis) {
         Lock::GlobalRead lk(opCtx);
@@ -201,8 +200,8 @@ public:
 class CapTrunc : public BasicCommand {
 public:
     CapTrunc() : BasicCommand("captrunc") {}
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
@@ -210,7 +209,7 @@ public:
     // No auth needed because it only works when enabled via command line.
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
+                                       std::vector<Privilege>* out) const {}
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
                      const BSONObj& cmdObj,
@@ -276,8 +275,8 @@ public:
 class EmptyCapped : public BasicCommand {
 public:
     EmptyCapped() : BasicCommand("emptycapped") {}
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
@@ -285,7 +284,7 @@ public:
     // No auth needed because it only works when enabled via command line.
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
+                                       std::vector<Privilege>* out) const {}
 
     virtual bool run(OperationContext* opCtx,
                      const string& dbname,
@@ -300,7 +299,7 @@ public:
 // ----------------------------
 
 MONGO_INITIALIZER(RegisterEmptyCappedCmd)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
+    if (getTestCommandsEnabled()) {
         // Leaked intentionally: a Command registers itself when constructed.
         new CapTrunc();
         new CmdSleep();

@@ -49,13 +49,12 @@
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/sharding_mongod_test_fixture.h"
+#include "mongo/s/shard_server_test_fixture.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
-
 namespace {
 
 using executor::RemoteCommandRequest;
@@ -98,6 +97,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                             object,            // o
                             object2,           // o2
                             sessionInfo,       // sessionInfo
+                            boost::none,       // isUpsert
                             wallClockTime,     // wall clock time
                             stmtId,            // statement id
                             boost::none,       // optime of previous write within same transaction
@@ -113,16 +113,12 @@ repl::OplogEntry extractInnerOplog(const repl::OplogEntry& oplog) {
     return oplogStatus.getValue();
 }
 
-class SessionCatalogMigrationDestinationTest : public ShardingMongodTestFixture {
+class SessionCatalogMigrationDestinationTest : public ShardServerTestFixture {
 public:
     void setUp() override {
-        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
-        ShardingMongodTestFixture::setUp();
+        ShardServerTestFixture::setUp();
 
-        ASSERT_OK(initializeGlobalShardingStateForMongodForTest(kConfigConnStr));
-
-        RemoteCommandTargeterMock::get(shardRegistry()->getConfigShard()->getTargeter())
-            ->setConnectionStringReturnValue(kConfigConnStr);
+        _migrationId = MigrationSessionId::generate("donor", "recipient");
 
         {
             auto donorShard = assertGet(
@@ -133,8 +129,6 @@ public:
                 ->setFindHostReturnValue(kDonorConnStr.getServers()[0]);
         }
 
-        _migrationId = MigrationSessionId::generate("donor", "recipient");
-
         SessionCatalog::create(getServiceContext());
         SessionCatalog::get(getServiceContext())->onStepUp(operationContext());
         LogicalSessionCache::set(getServiceContext(), stdx::make_unique<LogicalSessionCacheNoop>());
@@ -142,7 +136,7 @@ public:
 
     void tearDown() override {
         SessionCatalog::reset_forTest(getServiceContext());
-        ShardingMongodTestFixture::tearDown();
+        ShardServerTestFixture::tearDown();
     }
 
     void returnOplog(const std::vector<OplogEntry>& oplogList) {
@@ -178,7 +172,7 @@ public:
                                     const LogicalSessionId& sessionId,
                                     const TxnNumber& txnNum) {
         auto scopedSession = SessionCatalog::get(opCtx)->getOrCreateSession(opCtx, sessionId);
-        scopedSession->beginTxn(opCtx, txnNum);
+        scopedSession->beginOrContinueTxnOnMigration(opCtx, txnNum);
         return scopedSession;
     }
 
@@ -249,7 +243,8 @@ public:
             // requests with txnNumbers aren't allowed. To get around this, we have to manually set
             // up the session state and perform the insert.
             initializeOperationSessionInfo(innerOpCtx.get(), insertBuilder.obj(), true, true, true);
-            OperationContextSession sessionTxnState(innerOpCtx.get(), true);
+            OperationContextSession sessionTxnState(innerOpCtx.get(), true, boost::none);
+
             const auto reply = performInserts(innerOpCtx.get(), insertRequest);
             ASSERT(reply.results.size() == 1);
             ASSERT(reply.results[0].isOK());
@@ -357,7 +352,6 @@ TEST_F(SessionCatalogMigrationDestinationTest, OplogEntriesWithSameTxn) {
     returnOplog({oplog1, oplog2, oplog3});
 
     finishSessionExpectSuccess(&sessionMigration);
-
     auto opCtx = operationContext();
     auto session = getSessionWithTxn(opCtx, sessionId, 2);
     TransactionHistoryIterator historyIter(session->getLastWriteOpTime(2));

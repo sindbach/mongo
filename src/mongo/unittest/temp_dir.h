@@ -34,6 +34,7 @@
 
 namespace mongo {
 namespace unittest {
+
 /**
  * An RAII temporary directory that deletes itself and all contents files on scope exit.
  */
@@ -64,6 +65,13 @@ public:
     const std::string& path() {
         return _path;
     }
+
+    /**
+     * Set the path where TempDir() will create temporary directories. This is a workaround
+     * for situations where you might want to log, but you've not yet run the MONGO_INITIALIZERs,
+     * and should be removed if ever command line parsing is seperated from MONGO_INITIALIZERs.
+     */
+    static void setTempPath(std::string tempPath);
 
 private:
     std::string _path;

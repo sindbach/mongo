@@ -133,23 +133,15 @@ void DocumentSourceCursor::loadBatch() {
         case PlanExecutor::ADVANCED:
         case PlanExecutor::IS_EOF:
             return;  // We've reached our limit or exhausted the cursor.
-        case PlanExecutor::DEAD: {
-            _execStatus =
-                Status(ErrorCodes::QueryPlanKilled,
-                       str::stream() << "collection or index disappeared when cursor yielded: "
-                                     << WorkingSetCommon::toStatusString(resultObj));
-            break;
-        }
+        case PlanExecutor::DEAD:
         case PlanExecutor::FAILURE: {
-            _execStatus = Status(ErrorCodes::Error(17285),
-                                 str::stream() << "cursor encountered an error: "
-                                               << WorkingSetCommon::toStatusString(resultObj));
-            break;
+            _execStatus = WorkingSetCommon::getMemberObjectStatus(resultObj).withContext(
+                "Error in $cursor stage");
+            uassertStatusOK(_execStatus);
         }
         default:
             MONGO_UNREACHABLE;
     }
-    uassertStatusOK(_execStatus);
 }
 
 Pipeline::SourceContainer::iterator DocumentSourceCursor::doOptimizeAt(
@@ -210,8 +202,9 @@ Value DocumentSourceCursor::serialize(boost::optional<ExplainOptions::Verbosity>
 
     {
         auto opCtx = pExpCtx->opCtx;
-        AutoGetDb dbLock(opCtx, _exec->nss().db(), MODE_IS);
-        Lock::CollectionLock collLock(opCtx->lockState(), _exec->nss().ns(), MODE_IS);
+        auto lockMode = getLockModeForQuery(opCtx);
+        AutoGetDb dbLock(opCtx, _exec->nss().db(), lockMode);
+        Lock::CollectionLock collLock(opCtx->lockState(), _exec->nss().ns(), lockMode);
         auto collection =
             dbLock.getDb() ? dbLock.getDb()->getCollection(opCtx, _exec->nss()) : nullptr;
 
@@ -265,8 +258,10 @@ void DocumentSourceCursor::cleanupExecutor() {
     // return nullptr if the collection has since turned into a view. In this case, '_exec' will
     // already have been marked as killed when the collection was dropped, and we won't need to
     // access the CursorManager to properly dispose of it.
-    AutoGetDb dbLock(opCtx, _exec->nss().db(), MODE_IS);
-    Lock::CollectionLock collLock(opCtx->lockState(), _exec->nss().ns(), MODE_IS);
+    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+    auto lockMode = getLockModeForQuery(opCtx);
+    AutoGetDb dbLock(opCtx, _exec->nss().db(), lockMode);
+    Lock::CollectionLock collLock(opCtx->lockState(), _exec->nss().ns(), lockMode);
     auto collection = dbLock.getDb() ? dbLock.getDb()->getCollection(opCtx, _exec->nss()) : nullptr;
     auto cursorManager = collection ? collection->getCursorManager() : nullptr;
     _exec->dispose(opCtx, cursorManager);

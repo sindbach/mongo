@@ -39,8 +39,8 @@ class FlushRouterConfigCmd : public BasicCommand {
 public:
     FlushRouterConfigCmd() : BasicCommand("flushRouterConfig", "flushrouterconfig") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -52,13 +52,13 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "flush all router config";
+    std::string help() const override {
+        return "flush all router config";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::flushRouterConfig);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));

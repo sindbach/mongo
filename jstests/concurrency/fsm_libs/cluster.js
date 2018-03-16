@@ -33,7 +33,6 @@ var Cluster = function(options) {
 
     function validateClusterOptions(options) {
         var allowedKeys = [
-            'masterSlave',
             'replication.enabled',
             'replication.numNodes',
             'sameCollection',
@@ -47,7 +46,8 @@ var Cluster = function(options) {
             'sharded.stepdownOptions',
             'sharded.stepdownOptions.configStepdown',
             'sharded.stepdownOptions.shardStepdown',
-            'teardownFunctions'
+            'teardownFunctions',
+            'useExistingConnectionAsSeed',
         ];
 
         getObjectKeys(options).forEach(function(option) {
@@ -56,9 +56,6 @@ var Cluster = function(options) {
                             'invalid option: ' + tojson(option) + '; valid options are: ' +
                                 tojson(allowedKeys));
         });
-
-        options.masterSlave = options.masterSlave || false;
-        assert.eq('boolean', typeof options.masterSlave);
 
         options.replication = options.replication || {};
         assert.eq('object', typeof options.replication);
@@ -170,19 +167,18 @@ var Cluster = function(options) {
         assert(options.teardownFunctions.config.every(f => (typeof f === 'function')),
                'Expected teardownFunctions.config to be an array of functions');
 
-        assert(!options.masterSlave || !options.replication.enabled,
-               "Both 'masterSlave' and " + "'replication.enabled' cannot be true");
-        assert(!options.masterSlave || !options.sharded.enabled,
-               "Both 'masterSlave' and 'sharded.enabled' cannot" + "be true");
+        options.useExistingConnectionAsSeed = options.useExistingConnectionAsSeed || false;
+        assert.eq('boolean', typeof options.useExistingConnectionAsSeed);
     }
 
-    function makeReplSetTestConfig(numReplSetNodes) {
+    function makeReplSetTestConfig(numReplSetNodes, firstNodeOnlyVote) {
         const REPL_SET_VOTING_LIMIT = 7;
         // Workaround for SERVER-26893 to specify when numReplSetNodes > REPL_SET_VOTING_LIMIT.
+        var firstNodeNotVoting = firstNodeOnlyVote ? 1 : REPL_SET_VOTING_LIMIT;
         var rstConfig = [];
         for (var i = 0; i < numReplSetNodes; i++) {
             rstConfig[i] = {};
-            if (i >= REPL_SET_VOTING_LIMIT) {
+            if (i >= firstNodeNotVoting) {
                 rstConfig[i].rsConfig = {priority: 0, votes: 0};
             }
         }
@@ -211,6 +207,16 @@ var Cluster = function(options) {
         }
 
         if (options.sharded.enabled) {
+            if (options.useExistingConnectionAsSeed) {
+                // Note that depending on how SERVER-21485 is implemented, it may still not be
+                // possible to rehydrate a ShardingTest instance from an existing connection because
+                // it wouldn't be possible to discover other mongos processes running in the sharded
+                // cluster.
+                throw new Error(
+                    "Cluster cannot support 'useExistingConnectionAsSeed' option until" +
+                    ' SERVER-21485 is implemented');
+            }
+
             // TODO: allow 'options' to specify the number of shards and mongos processes
             var shardConfig = {
                 shards: options.sharded.numShards,
@@ -225,10 +231,13 @@ var Cluster = function(options) {
             // TODO: allow 'options' to specify an 'rs' config
             if (options.replication.enabled) {
                 shardConfig.rs = {
-                    nodes: makeReplSetTestConfig(options.replication.numNodes),
+                    nodes: makeReplSetTestConfig(options.replication.numNodes,
+                                                 !this.shouldPerformContinuousStepdowns()),
                     // Increase the oplog size (in MB) to prevent rollover
                     // during write-heavy workloads
                     oplogSize: 1024,
+                    // Set the electionTimeoutMillis to 1 day to prevent unintended elections
+                    settings: {electionTimeoutMillis: 60 * 60 * 24 * 1000},
                     verbose: verbosityLevel
                 };
                 shardConfig.rsOptions = {};
@@ -243,7 +252,7 @@ var Cluster = function(options) {
 
             conn = st.s;  // mongos
 
-            this.teardown = function teardown() {
+            this.teardown = function teardown(opts) {
                 options.teardownFunctions.mongod.forEach(this.executeOnMongodNodes);
                 options.teardownFunctions.mongos.forEach(this.executeOnMongosNodes);
                 options.teardownFunctions.config.forEach(this.executeOnConfigNodes);
@@ -254,7 +263,7 @@ var Cluster = function(options) {
                 if (this.shouldPerformContinuousStepdowns()) {
                     TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
                 }
-                st.stop();
+                st.stop(opts);
             };
 
             if (this.shouldPerformContinuousStepdowns()) {
@@ -295,46 +304,38 @@ var Cluster = function(options) {
             }
         } else if (options.replication.enabled) {
             var replSetConfig = {
-                nodes: makeReplSetTestConfig(options.replication.numNodes),
+                nodes: makeReplSetTestConfig(options.replication.numNodes,
+                                             !this.shouldPerformContinuousStepdowns()),
                 // Increase the oplog size (in MB) to prevent rollover during write-heavy workloads
                 oplogSize: 1024,
-                nodeOptions: {verbose: verbosityLevel}
+                nodeOptions: {verbose: verbosityLevel},
+                // Set the electionTimeoutMillis to 1 day to prevent unintended elections
+                settings: {electionTimeoutMillis: 60 * 60 * 24 * 1000}
             };
 
-            var rst = new ReplSetTest(replSetConfig);
-            rst.startSet();
+            var rst;
 
-            rst.initiate();
-            rst.awaitSecondaryNodes();
+            if (!options.useExistingConnectionAsSeed) {
+                rst = new ReplSetTest(replSetConfig);
+                rst.startSet();
+
+                rst.initiate();
+                rst.awaitSecondaryNodes();
+            } else {
+                rst = new ReplSetTest(db.getMongo().host);
+            }
 
             conn = rst.getPrimary();
             replSets = [rst];
 
-            this.teardown = function teardown() {
+            this.teardown = function teardown(opts) {
                 options.teardownFunctions.mongod.forEach(this.executeOnMongodNodes);
-
-                rst.stopSet();
+                if (!options.useExistingConnectionAsSeed) {
+                    rst.stopSet(undefined, undefined, opts);
+                }
             };
 
             this._addReplicaSetConns(rst);
-
-        } else if (options.masterSlave) {
-            var rt = new ReplTest('replTest');
-
-            var master = rt.start(true);
-            var slave = rt.start(false);
-            conn = master;
-
-            master.adminCommand({setParameter: 1, logLevel: verbosityLevel});
-            slave.adminCommand({setParameter: 1, logLevel: verbosityLevel});
-
-            this.teardown = function teardown() {
-                options.teardownFunctions.mongod.forEach(this.executeOnMongodNodes);
-
-                rt.stop();
-            };
-
-            _conns.mongod = [master, slave];
 
         } else {  // standalone server
             conn = db.getMongo();
@@ -424,7 +425,7 @@ var Cluster = function(options) {
     };
 
     this.isSharded = function isSharded() {
-        return options.sharded.enabled;
+        return Cluster.isSharded(options);
     };
 
     this.isReplication = function isReplication() {
@@ -716,8 +717,7 @@ var Cluster = function(options) {
  * and false otherwise.
  */
 Cluster.isStandalone = function isStandalone(clusterOptions) {
-    return !clusterOptions.sharded.enabled && !clusterOptions.replication.enabled &&
-        !clusterOptions.masterSlave;
+    return !clusterOptions.sharded.enabled && !clusterOptions.replication.enabled;
 };
 
 /**
@@ -725,4 +725,11 @@ Cluster.isStandalone = function isStandalone(clusterOptions) {
  */
 Cluster.isReplication = function isReplication(clusterOptions) {
     return clusterOptions.replication.enabled;
+};
+
+/**
+ * Returns true if 'clusterOptions' represents a sharded configuration, and returns false otherwise.
+ */
+Cluster.isSharded = function isSharded(clusterOptions) {
+    return clusterOptions.sharded.enabled;
 };

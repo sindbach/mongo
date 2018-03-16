@@ -32,21 +32,7 @@
 
 #include "mongo/db/s/sharded_connection_info.h"
 
-#include <boost/optional.hpp>
-#include <boost/utility/in_place_factory.hpp>
-
-#include "mongo/client/global_conn_pool.h"
 #include "mongo/db/client.h"
-#include "mongo/db/logical_time_metadata_hook.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/s/sharding_egress_metadata_hook_for_mongod.h"
-#include "mongo/db/service_context.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard_connection.h"
-#include "mongo/s/client/sharding_connection_hook.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -54,15 +40,9 @@ namespace {
 
 const auto clientSCI = Client::declareDecoration<boost::optional<ShardedConnectionInfo>>();
 
-stdx::mutex addHookMutex;
-
-AtomicUInt32 alreadyAddedHook{0};
-
 }  // namespace
 
-ShardedConnectionInfo::ShardedConnectionInfo() {
-    _forceVersionOk = false;
-}
+ShardedConnectionInfo::ShardedConnectionInfo() = default;
 
 ShardedConnectionInfo::~ShardedConnectionInfo() = default;
 
@@ -71,7 +51,7 @@ ShardedConnectionInfo* ShardedConnectionInfo::get(Client* client, bool create) {
 
     if (!current && create) {
         LOG(1) << "entering shard mode for connection";
-        current = boost::in_place();
+        current.emplace();
     }
 
     return current ? &current.value() : nullptr;
@@ -81,51 +61,17 @@ void ShardedConnectionInfo::reset(Client* client) {
     clientSCI(client) = boost::none;
 }
 
-ChunkVersion ShardedConnectionInfo::getVersion(const std::string& ns) const {
+boost::optional<ChunkVersion> ShardedConnectionInfo::getVersion(const std::string& ns) const {
     NSVersionMap::const_iterator it = _versions.find(ns);
     if (it != _versions.end()) {
         return it->second;
     } else {
-        return ChunkVersion::UNSHARDED();
+        return boost::none;
     }
 }
 
 void ShardedConnectionInfo::setVersion(const std::string& ns, const ChunkVersion& version) {
     _versions[ns] = version;
-}
-
-void ShardedConnectionInfo::addHook(ServiceContext* service) {
-    if (alreadyAddedHook.loadRelaxed()) {
-        return;
-    }
-
-    stdx::lock_guard<stdx::mutex> lk{addHookMutex};
-    if (alreadyAddedHook.load()) {
-        return;
-    }
-
-    log() << "first cluster operation detected, adding sharding hook to enable versioning "
-             "and authentication to remote servers";
-
-    {
-        auto unshardedHookList = stdx::make_unique<rpc::EgressMetadataHookList>();
-        unshardedHookList->addHook(stdx::make_unique<rpc::LogicalTimeMetadataHook>(service));
-        unshardedHookList->addHook(
-            stdx::make_unique<rpc::ShardingEgressMetadataHookForMongod>(service));
-
-        globalConnPool.addHook(new ShardingConnectionHook(false, std::move(unshardedHookList)));
-    }
-
-    {
-        auto shardedHookList = stdx::make_unique<rpc::EgressMetadataHookList>();
-        shardedHookList->addHook(stdx::make_unique<rpc::LogicalTimeMetadataHook>(service));
-        shardedHookList->addHook(
-            stdx::make_unique<rpc::ShardingEgressMetadataHookForMongod>(service));
-
-        shardConnectionPool.addHook(new ShardingConnectionHook(true, std::move(shardedHookList)));
-    }
-
-    alreadyAddedHook.store(1);
 }
 
 }  // namespace mongo

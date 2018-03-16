@@ -53,7 +53,6 @@ namespace {
 const auto getReplicationProcess =
     ServiceContext::declareDecoration<std::unique_ptr<ReplicationProcess>>();
 
-const auto kRollbackNamespacePrefix = "local.system.rollback."_sd;
 }  // namespace
 
 ReplicationProcess* ReplicationProcess::get(ServiceContext* service) {
@@ -83,25 +82,31 @@ ReplicationProcess::ReplicationProcess(
       _recovery(std::move(recovery)),
       _rbid(kUninitializedRollbackId) {}
 
-StatusWith<int> ReplicationProcess::getRollbackID(OperationContext* opCtx) {
+Status ReplicationProcess::refreshRollbackID(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
 
-    if (kUninitializedRollbackId != _rbid) {
-        return _rbid;
-    }
-
-    // The _rbid, which caches the rollback ID persisted in the local.system.rollback.id collection,
-    // may be uninitialized for a couple of reasons:
-    // 1) This is the first time we are retrieving the rollback ID; or
-    // 2) The rollback ID was incremented previously using this class which has the side-effect of
-    //    invalidating the cached value.
     auto rbidResult = _storageInterface->getRollbackID(opCtx);
     if (!rbidResult.isOK()) {
-        return rbidResult;
+        return rbidResult.getStatus();
+    }
+
+    if (kUninitializedRollbackId == _rbid) {
+        log() << "Rollback ID is " << rbidResult.getValue();
+    } else {
+        log() << "Rollback ID is " << rbidResult.getValue() << " (previously " << _rbid << ")";
     }
     _rbid = rbidResult.getValue();
 
-    invariant(kUninitializedRollbackId != _rbid);
+    return Status::OK();
+}
+
+int ReplicationProcess::getRollbackID() const {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (kUninitializedRollbackId == _rbid) {
+        // This may happen when serverStatus is called by an internal client before we have a chance
+        // to read the rollback ID from storage.
+        warning() << "Rollback ID is not initialized yet.";
+    }
     return _rbid;
 }
 
@@ -112,12 +117,13 @@ Status ReplicationProcess::initializeRollbackID(OperationContext* opCtx) {
 
     // Do not make any assumptions about the starting value of the rollback ID in the
     // local.system.rollback.id collection other than it cannot be "kUninitializedRollbackId".
-    // Leave _rbid uninitialized until the next getRollbackID() to retrieve the actual value
-    // from storage.
+    // Cache the rollback ID in _rbid to be returned the next time getRollbackID() is called.
 
     auto initRbidSW = _storageInterface->initializeRollbackID(opCtx);
     if (initRbidSW.isOK()) {
         log() << "Initialized the rollback ID to " << initRbidSW.getValue();
+        _rbid = initRbidSW.getValue();
+        invariant(kUninitializedRollbackId != _rbid);
     } else {
         warning() << "Failed to initialize the rollback ID: " << initRbidSW.getStatus().reason();
     }
@@ -129,11 +135,12 @@ Status ReplicationProcess::incrementRollbackID(OperationContext* opCtx) {
 
     auto status = _storageInterface->incrementRollbackID(opCtx);
 
-    // If the rollback ID was incremented successfully, reset _rbid so that we will read from
-    // storage next time getRollbackID() is called.
+    // If the rollback ID was incremented successfully, cache the new value in _rbid to be returned
+    // the next time getRollbackID() is called.
     if (status.isOK()) {
-        _rbid = kUninitializedRollbackId;
         log() << "Incremented the rollback ID to " << status.getValue();
+        _rbid = status.getValue();
+        invariant(kUninitializedRollbackId != _rbid);
     } else {
         warning() << "Failed to increment the rollback ID: " << status.getStatus().reason();
     }

@@ -154,21 +154,21 @@ bool dbEval(OperationContext* opCtx,
 
 class CmdEval : public ErrmsgCommandDeprecated {
 public:
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "DEPRECATED\n"
-             << "Evaluate javascript at the server.\n"
-             << "http://dochub.mongodb.org/core/serversidecodeexecution";
+    std::string help() const override {
+        return "DEPRECATED\n"
+               "Evaluate javascript at the server.\n"
+               "http://dochub.mongodb.org/core/serversidecodeexecution";
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         RoleGraph::generateUniversalPrivileges(out);
     }
 
@@ -182,20 +182,15 @@ public:
         // Note: 'eval' is not allowed to touch sharded namespaces, but we can't check the
         // shardVersions of the namespaces accessed in the script until the script is evaluated.
         // Instead, we enforce that the script does not access sharded namespaces by ensuring the
-        // shardVersion is set to UNSHARDED on the OperationContext before sending the script to be
-        // evaluated.
+        // shardVersion is set to UNSHARDED on the OperationShardingState. The "namespace" used does
+        // not matter, because if a shardVersion is set on the OperationShardingState, a check for a
+        // different namespace will default to UNSHARDED.
         auto& oss = OperationShardingState::get(opCtx);
         uassert(ErrorCodes::IllegalOperation,
                 "can't send a shardVersion with the 'eval' command, since you can't use sharded "
                 "collections from 'eval'",
                 !oss.hasShardVersion());
-
-        // Set the shardVersion to UNSHARDED. The "namespace" used does not matter, because if a
-        // shardVersion is set on the OperationContext, a check for a different namespace will
-        // default to UNSHARDED.
         oss.setShardVersion(NamespaceString(dbname), ChunkVersion::UNSHARDED());
-        const auto shardVersionGuard =
-            MakeGuard([&]() { oss.unsetShardVersion(NamespaceString(dbname)); });
 
         try {
             if (cmdObj["nolock"].trueValue()) {

@@ -269,6 +269,14 @@ inline void fassertWithLocation(int msgid, bool testOK, const char* file, unsign
     }
 }
 
+template <typename T>
+inline T fassertWithLocation(int msgid, StatusWith<T> sw, const char* file, unsigned line) {
+    if (MONGO_unlikely(!sw.isOK())) {
+        fassertFailedWithStatusWithLocation(msgid, sw.getStatus(), file, line);
+    }
+    return std::move(sw.getValue());
+}
+
 inline void fassertWithLocation(int msgid, const Status& status, const char* file, unsigned line) {
     if (MONGO_unlikely(!status.isOK())) {
         fassertFailedWithStatusWithLocation(msgid, status, file, line);
@@ -282,6 +290,14 @@ inline void fassertNoTraceWithLocation(int msgid, bool testOK, const char* file,
     if (MONGO_unlikely(!testOK)) {
         fassertFailedNoTraceWithLocation(msgid, file, line);
     }
+}
+
+template <typename T>
+inline T fassertNoTraceWithLocation(int msgid, StatusWith<T> sw, const char* file, unsigned line) {
+    if (MONGO_unlikely(!sw.isOK())) {
+        fassertFailedWithStatusNoTraceWithLocation(msgid, sw.getStatus(), file, line);
+    }
+    return std::move(sw.getValue());
 }
 
 inline void fassertNoTraceWithLocation(int msgid,
@@ -405,32 +421,6 @@ MONGO_COMPILER_NORETURN void msgassertedWithLocation(const Status& status,
 inline void massertStatusOKWithLocation(const Status& status, const char* file, unsigned line) {
     if (MONGO_unlikely(!status.isOK())) {
         msgassertedWithLocation(status, file, line);
-    }
-}
-
-/**
- * fassert is our fatal assert: if it fails, the process dies.
- *
- * Use this rather than invariant for cases that are possible, but we have chosen not to implement
- * recovery logic for.
- */
-#define fassertStatusOK MONGO_fassertStatusOK
-#define MONGO_fassertStatusOK(...) \
-    ::mongo::fassertStatusOKWithLocation(__VA_ARGS__, __FILE__, __LINE__)
-template <typename T>
-inline T fassertStatusOKWithLocation(int msgid, StatusWith<T> sw, const char* file, unsigned line) {
-    if (MONGO_unlikely(!sw.isOK())) {
-        fassertFailedWithStatusWithLocation(msgid, sw.getStatus(), file, line);
-    }
-    return std::move(sw.getValue());
-}
-
-inline void fassertStatusOKWithLocation(int msgid,
-                                        const Status& s,
-                                        const char* file,
-                                        unsigned line) {
-    if (MONGO_unlikely(!s.isOK())) {
-        fassertFailedWithStatusWithLocation(msgid, s, file, line);
     }
 }
 

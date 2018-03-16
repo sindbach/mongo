@@ -52,12 +52,12 @@ public:
         return true;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "get latest diagnostic data collection snapshot";
+    std::string help() const override {
+        return "get latest diagnostic data collection snapshot";
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -66,7 +66,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::serverStatus)) {

@@ -44,7 +44,7 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context.h"
@@ -125,12 +125,12 @@ Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj
 
 
 int dbtestsMain(int argc, char** argv, char** envp) {
-    Command::testCommandsEnabled = true;
+    ::mongo::setTestCommandsEnabled(true);
     ::mongo::setupSynchronousSignalHandlers();
     mongo::dbtests::initWireSpec();
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
     serverGlobalParams.featureCompatibility.setVersion(
-        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo36);
+        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40);
     repl::ReplSettings replSettings;
     replSettings.setOplogSizeBytes(10 * 1024 * 1024);
     ServiceContext* service = getGlobalServiceContext();
@@ -152,9 +152,11 @@ int dbtestsMain(int argc, char** argv, char** envp) {
     preciseClock->advance(Seconds(1));
     service->setPreciseClockSource(std::move(preciseClock));
 
-    repl::setGlobalReplicationCoordinator(
-        new repl::ReplicationCoordinatorMock(service, replSettings));
-    repl::getGlobalReplicationCoordinator()
+    repl::ReplicationCoordinator::set(
+        service,
+        std::unique_ptr<repl::ReplicationCoordinator>(
+            new repl::ReplicationCoordinatorMock(service, replSettings)));
+    repl::ReplicationCoordinator::get(getGlobalServiceContext())
         ->setFollowerMode(repl::MemberState::RS_PRIMARY)
         .ignore();
 

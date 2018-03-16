@@ -36,18 +36,12 @@
 #include <boost/algorithm/string.hpp>
 
 #include "mongo/config.h"
-#ifdef MONGO_CONFIG_SSL
-#include <asio/ssl.hpp>
-#endif
 
-#include "mongo/base/checked_cast.h"
 #include "mongo/base/system_error.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/transport/asio_utils.h"
 #include "mongo/transport/service_entry_point.h"
-#include "mongo/transport/ticket.h"
-#include "mongo/transport/ticket_asio.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/message.h"
@@ -55,6 +49,10 @@
 #include "mongo/util/net/sockaddr.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
+
+#ifdef MONGO_CONFIG_SSL
+#include "mongo/util/net/ssl.hpp"
+#endif
 
 // session_asio.h has some header dependencies that require it to be the last header.
 #include "mongo/transport/session_asio.h"
@@ -77,7 +75,8 @@ TransportLayerASIO::TransportLayerASIO(const TransportLayerASIO::Options& opts,
     : _workerIOContext(std::make_shared<asio::io_context>()),
       _acceptorIOContext(stdx::make_unique<asio::io_context>()),
 #ifdef MONGO_CONFIG_SSL
-      _sslContext(nullptr),
+      _ingressSSLContext(nullptr),
+      _egressSSLContext(nullptr),
 #endif
       _sep(sep),
       _listenerOptions(opts) {
@@ -85,65 +84,161 @@ TransportLayerASIO::TransportLayerASIO(const TransportLayerASIO::Options& opts,
 
 TransportLayerASIO::~TransportLayerASIO() = default;
 
-Ticket TransportLayerASIO::sourceMessage(const SessionHandle& session,
-                                         Message* message,
-                                         Date_t expiration) {
-    auto asioSession = checked_pointer_cast<ASIOSession>(session);
-    auto ticket = stdx::make_unique<ASIOSourceTicket>(asioSession, expiration, message);
-    return {this, std::move(ticket)};
+StatusWith<SessionHandle> TransportLayerASIO::connect(HostAndPort peer,
+                                                      ConnectSSLMode sslMode,
+                                                      Milliseconds timeout) {
+    std::error_code ec;
+    GenericSocket sock(*_workerIOContext);
+#ifndef _WIN32
+    if (mongoutils::str::contains(peer.host(), '/')) {
+        invariant(!peer.hasPort());
+        auto res =
+            _doSyncConnect(asio::local::stream_protocol::endpoint(peer.host()), peer, timeout);
+        if (!res.isOK()) {
+            return res.getStatus();
+        } else {
+            return static_cast<SessionHandle>(std::move(res.getValue()));
+        }
+    }
+#endif
+
+    using Resolver = asio::ip::tcp::resolver;
+    Resolver resolver(*_workerIOContext);
+    std::string portNumberStr = std::to_string(peer.port());
+    auto doResolve = [&](auto resolverFlags) -> StatusWith<Resolver::iterator> {
+        // If IPv6 is disabled, then we should specify that we only want IPv4 addresses, otherwise
+        // we should do a normal AF_UNSPEC resolution to get both IPv4/IPv6
+        Resolver::iterator resolverIt;
+        if (_listenerOptions.enableIPv6) {
+            resolverIt = resolver.resolve(peer.host(), portNumberStr, resolverFlags, ec);
+        } else {
+            resolverIt = resolver.resolve(
+                asio::ip::tcp::v4(), peer.host(), portNumberStr, resolverFlags, ec);
+        }
+
+        if (ec) {
+            return {ErrorCodes::HostNotFound,
+                    str::stream() << "Could not find address for " << peer.host() << ": "
+                                  << ec.message()};
+        } else if (resolverIt == Resolver::iterator()) {
+            return {ErrorCodes::HostNotFound,
+                    str::stream() << "Could not find address for " << peer.host()};
+        }
+
+        return resolverIt;
+    };
+
+    // We always want to resolve the "service" (port number) as a numeric.
+    //
+    // We intentionally don't set the Resolver::address_configured flag because it might prevent us
+    // from connecting to localhost on hosts with only a loopback interface (see SERVER-1579).
+    const auto resolverFlags = Resolver::numeric_service;
+
+    // We resolve in two steps, the first step tries to resolve the hostname as an IP address -
+    // that way if there's a DNS timeout, we can still connect to IP addresses quickly.
+    // (See SERVER-1709)
+    //
+    // Then, if the numeric (IP address) lookup failed, we fall back to DNS or return the error
+    // from the resolver.
+    auto swResolverIt = doResolve(resolverFlags | Resolver::numeric_host);
+    if (!swResolverIt.isOK()) {
+        if (swResolverIt == ErrorCodes::HostNotFound) {
+            swResolverIt = doResolve(resolverFlags);
+            if (!swResolverIt.isOK()) {
+                return swResolverIt.getStatus();
+            }
+        } else {
+            return swResolverIt.getStatus();
+        }
+    }
+
+    auto& resolverIt = swResolverIt.getValue();
+    auto sws = _doSyncConnect(resolverIt->endpoint(), peer, timeout);
+    if (!sws.isOK()) {
+        return sws.getStatus();
+    }
+
+    auto session = std::move(sws.getValue());
+    session->ensureSync();
+
+#ifndef MONGO_CONFIG_SSL
+    if (sslMode == kEnableSSL) {
+        return {ErrorCodes::InvalidSSLConfiguration, "SSL requested but not supported"};
+    }
+#else
+    auto globalSSLMode = _sslMode();
+    if (sslMode == kEnableSSL ||
+        (sslMode == kGlobalSSLMode && ((globalSSLMode == SSLParams::SSLMode_preferSSL) ||
+                                       (globalSSLMode == SSLParams::SSLMode_requireSSL)))) {
+        auto sslStatus = session->handshakeSSLForEgress(peer).getNoThrow();
+        if (!sslStatus.isOK()) {
+            return sslStatus;
+        }
+    }
+#endif
+
+    return static_cast<SessionHandle>(std::move(session));
 }
 
-Ticket TransportLayerASIO::sinkMessage(const SessionHandle& session,
-                                       const Message& message,
-                                       Date_t expiration) {
-    auto asioSession = checked_pointer_cast<ASIOSession>(session);
-    auto ticket = stdx::make_unique<ASIOSinkTicket>(asioSession, expiration, message);
-    return {this, std::move(ticket)};
+template <typename Endpoint>
+StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncConnect(
+    Endpoint endpoint, const HostAndPort& peer, const Milliseconds& timeout) {
+    GenericSocket sock(*_workerIOContext);
+    std::error_code ec;
+    sock.open(endpoint.protocol());
+    sock.non_blocking(true);
+
+    auto now = Date_t::now();
+    auto expiration = now + timeout;
+    do {
+        auto curTimeout = expiration - now;
+        sock.connect(endpoint, curTimeout.toSystemDuration(), ec);
+        if (ec) {
+            now = Date_t::now();
+        }
+        // We loop below if ec == interrupted to deal with EINTR failures, otherwise we handle
+        // the error/timeout below.
+    } while (ec == asio::error::interrupted && now < expiration);
+
+    if (ec) {
+        return errorCodeToStatus(ec);
+    } else if (now >= expiration) {
+        return {ErrorCodes::NetworkTimeout, str::stream() << "Timed out connecting to " << peer};
+    }
+
+    sock.non_blocking(false);
+    return std::make_shared<ASIOSession>(this, std::move(sock));
 }
 
-Status TransportLayerASIO::wait(Ticket&& ticket) {
-    auto ownedASIOTicket = getOwnedTicketImpl(std::move(ticket));
-    auto asioTicket = checked_cast<ASIOTicket*>(ownedASIOTicket.get());
-
-    Status waitStatus = Status::OK();
-    asioTicket->fill(true, [&waitStatus](Status result) { waitStatus = result; });
-
-    return waitStatus;
-}
-
-void TransportLayerASIO::asyncWait(Ticket&& ticket, TicketCallback callback) {
-    auto ownedASIOTicket = std::shared_ptr<TicketImpl>(getOwnedTicketImpl(std::move(ticket)));
-    auto asioTicket = checked_cast<ASIOTicket*>(ownedASIOTicket.get());
-
-    asioTicket->fill(
-        false,
-        [ callback = std::move(callback),
-          ownedASIOTicket = std::move(ownedASIOTicket) ](Status status) { callback(status); });
-}
-
-// Must not be called while holding the TransportLayerASIO mutex.
-void TransportLayerASIO::end(const SessionHandle& session) {
-    auto asioSession = checked_pointer_cast<ASIOSession>(session);
-    asioSession->shutdown();
+void TransportLayerASIO::asyncConnect(HostAndPort peer,
+                                      ConnectSSLMode sslMode,
+                                      Milliseconds timeout,
+                                      std::function<void(StatusWith<SessionHandle>)> callback) {
+    MONGO_UNREACHABLE;
 }
 
 Status TransportLayerASIO::setup() {
     std::vector<std::string> listenAddrs;
-    if (_listenerOptions.ipList.empty()) {
+    if (_listenerOptions.ipList.empty() && _listenerOptions.isIngress()) {
         listenAddrs = {"127.0.0.1"};
         if (_listenerOptions.enableIPv6) {
             listenAddrs.emplace_back("::1");
         }
-    } else {
+    } else if (!_listenerOptions.ipList.empty()) {
         boost::split(
             listenAddrs, _listenerOptions.ipList, boost::is_any_of(","), boost::token_compress_on);
     }
 
 #ifndef _WIN32
-    if (_listenerOptions.useUnixSockets) {
+    if (_listenerOptions.useUnixSockets && _listenerOptions.isIngress()) {
         listenAddrs.emplace_back(makeUnixSockPath(_listenerOptions.port));
     }
 #endif
+
+    if (!(_listenerOptions.isIngress()) && !listenAddrs.empty()) {
+        return {ErrorCodes::BadValue,
+                "Cannot bind to listening sockets with ingress networking is disabled"};
+    }
 
     _listenerPort = _listenerOptions.port;
 
@@ -222,20 +317,32 @@ Status TransportLayerASIO::setup() {
         }
     }
 
-    if (_acceptors.empty()) {
+    if (_acceptors.empty() && _listenerOptions.isIngress()) {
         return Status(ErrorCodes::SocketException, "No available addresses/ports to bind to");
     }
 
 #ifdef MONGO_CONFIG_SSL
     const auto& sslParams = getSSLGlobalParams();
+    auto sslManager = getSSLManager();
 
-    if (_sslMode() != SSLParams::SSLMode_disabled) {
-        _sslContext = stdx::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
+    if (_sslMode() != SSLParams::SSLMode_disabled && _listenerOptions.isIngress()) {
+        _ingressSSLContext = stdx::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
 
         Status status =
-            getSSLManager()->initSSLContext(_sslContext->native_handle(),
-                                            sslParams,
-                                            SSLManagerInterface::ConnectionDirection::kIncoming);
+            sslManager->initSSLContext(_ingressSSLContext->native_handle(),
+                                       sslParams,
+                                       SSLManagerInterface::ConnectionDirection::kIncoming);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    if (_listenerOptions.isEgress() && sslManager) {
+        _egressSSLContext = stdx::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
+        Status status =
+            sslManager->initSSLContext(_egressSSLContext->native_handle(),
+                                       sslParams,
+                                       SSLManagerInterface::ConnectionDirection::kOutgoing);
         if (!status.isOK()) {
             return status;
         }
@@ -249,31 +356,35 @@ Status TransportLayerASIO::start() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     _running.store(true);
 
-    _listenerThread = stdx::thread([this] {
-        setThreadName("listener");
-        while (_running.load()) {
-            asio::io_context::work work(*_acceptorIOContext);
-            try {
-                _acceptorIOContext->run();
-            } catch (...) {
-                severe() << "Uncaught exception in the listener: " << exceptionToStatus();
-                fassertFailed(40491);
-            }
+    if (_listenerOptions.isIngress()) {
+        for (auto& acceptor : _acceptors) {
+            acceptor.second.listen(serverGlobalParams.listenBacklog);
+            _acceptConnection(acceptor.second);
         }
-    });
 
-    for (auto& acceptor : _acceptors) {
-        acceptor.second.listen(serverGlobalParams.listenBacklog);
-        _acceptConnection(acceptor.second);
-    }
+        _listenerThread = stdx::thread([this] {
+            setThreadName("listener");
+            while (_running.load()) {
+                asio::io_context::work work(*_acceptorIOContext);
+                try {
+                    _acceptorIOContext->run();
+                } catch (...) {
+                    severe() << "Uncaught exception in the listener: " << exceptionToStatus();
+                    fassertFailed(40491);
+                }
+            }
+        });
 
-    const char* ssl = "";
+        const char* ssl = "";
 #ifdef MONGO_CONFIG_SSL
-    if (_sslMode() != SSLParams::SSLMode_disabled) {
-        ssl = " ssl";
-    }
+        if (_sslMode() != SSLParams::SSLMode_disabled) {
+            ssl = " ssl";
+        }
 #endif
-    log() << "waiting for connections on port " << _listenerPort << ssl;
+        log() << "waiting for connections on port " << _listenerPort << ssl;
+    } else {
+        invariant(_acceptors.empty());
+    }
 
     return Status::OK();
 }

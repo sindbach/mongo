@@ -125,7 +125,7 @@ public:
      * an error is returned.
      */
     virtual Status insertDocument(OperationContext* opCtx,
-                                  const NamespaceString& nss,
+                                  const NamespaceStringOrUUID& nsOrUUID,
                                   const TimestampedBSONObj& doc,
                                   long long term) = 0;
 
@@ -135,7 +135,7 @@ public:
      * It is an error to call this function with an empty set of documents.
      */
     virtual Status insertDocuments(OperationContext* opCtx,
-                                   const NamespaceString& nss,
+                                   const NamespaceStringOrUUID& nsOrUUID,
                                    const std::vector<InsertStatement>& docs) = 0;
 
     /**
@@ -178,6 +178,15 @@ public:
                                     const NamespaceString& toNS,
                                     bool stayTemp) = 0;
 
+    /**
+     * Sets the given index on the given namespace as multikey with the given paths. Does the
+     * write at the provided timestamp.
+     */
+    virtual Status setIndexIsMultikey(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      const std::string& indexName,
+                                      const MultikeyPaths& paths,
+                                      Timestamp ts) = 0;
     /**
      * Drops all databases except "local".
      */
@@ -268,7 +277,7 @@ public:
      * Not supported on collections with a default collation.
      */
     virtual StatusWith<BSONObj> findById(OperationContext* opCtx,
-                                         const NamespaceString& nss,
+                                         const NamespaceStringOrUUID& nsOrUUID,
                                          const BSONElement& idKey) = 0;
 
     /**
@@ -278,7 +287,7 @@ public:
      * Not supported on collections with a default collation.
      */
     virtual StatusWith<BSONObj> deleteById(OperationContext* opCtx,
-                                           const NamespaceString& nss,
+                                           const NamespaceStringOrUUID& nsOrUUID,
                                            const BSONElement& idKey) = 0;
 
     /**
@@ -290,7 +299,7 @@ public:
      * applied.
      */
     virtual Status upsertById(OperationContext* opCtx,
-                              const NamespaceString& nss,
+                              const NamespaceStringOrUUID& nsOrUUID,
                               const BSONElement& idKey,
                               const BSONObj& update) = 0;
 
@@ -324,12 +333,6 @@ public:
                                                                  const NamespaceString& nss) = 0;
 
     /**
-     * Adds UUIDs for non-replicated collections. To be called only at the end of initial
-     * sync and only if the admin.system.version collection has a UUID.
-     */
-    virtual Status upgradeUUIDSchemaVersionNonReplicated(OperationContext* opCtx) = 0;
-
-    /**
      * Sets the highest timestamp at which the storage engine is allowed to take a checkpoint.
      * This timestamp can never decrease, and thus should be a timestamp that can never roll back.
      */
@@ -345,12 +348,22 @@ public:
      * Reverts the state of all database data to the last stable timestamp.
      *
      * The "local" database is exempt and none of its state should be reverted except for
-     * "local.replset.minvalid" and "local.replset.checkpointTimestamp" which should be reverted to
-     * the last stable timestamp.
+     * "local.replset.minvalid" which should be reverted to the last stable timestamp.
      *
      * The 'stable' timestamp is set by calling StorageInterface::setStableTimestamp.
      */
-    virtual Status recoverToStableTimestamp(ServiceContext* serviceCtx) = 0;
+    virtual StatusWith<Timestamp> recoverToStableTimestamp(ServiceContext* serviceCtx) = 0;
+
+    /**
+     * Returns whether the storage engine supports "recover to stable timestamp".
+     */
+    virtual bool supportsRecoverToStableTimestamp(ServiceContext* serviceCtx) const = 0;
+
+    /**
+     * Returns the stable timestamp that the storage engine recovered to on startup. If the
+     * recovery point was not stable, returns "none".
+     */
+    virtual boost::optional<Timestamp> getRecoveryTimestamp(ServiceContext* serviceCtx) const = 0;
 
     /**
      * Waits for oplog writes to be visible in the oplog.

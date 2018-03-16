@@ -544,9 +544,10 @@ var DB;
         }
 
         if (!mechanism) {
-            mechanism = this._getDefaultAuthenticationMechanism();
+            mechanism = this._getDefaultAuthenticationMechanism(username, fromdb);
         }
-        assert(mechanism == "SCRAM-SHA-1" || mechanism == "MONGODB-CR");
+        assert(mechanism == "SCRAM-SHA-1" || mechanism == "SCRAM-SHA-256" ||
+               mechanism == "MONGODB-CR");
 
         // Check for no auth or copying from localhost
         if (!username || !password || fromhost == "") {
@@ -554,8 +555,8 @@ var DB;
                 {copydb: 1, fromhost: fromhost, fromdb: fromdb, todb: todb, slaveOk: slaveOk});
         }
 
-        // Use the copyDatabase native helper for SCRAM-SHA-1
-        if (mechanism == "SCRAM-SHA-1") {
+        // Use the copyDatabase native helper for SCRAM-SHA-1/256
+        if (mechanism != "MONGODB-CR") {
             // TODO SERVER-30886: Add session support for Mongo.prototype.copyDatabaseWithSCRAM().
             return this.getMongo().copyDatabaseWithSCRAM(
                 fromdb, todb, fromhost, username, password, slaveOk);
@@ -1045,11 +1046,6 @@ var DB;
            use local
            db.getReplicationInfo();
       </pre>
-      It is assumed that this database is a replication master -- the information returned is
-      about the operation log stored at local.oplog.$main on the replication master.  (It also
-      works on a machine in a replica pair: for replica pairs, both machines are "masters" from
-      an internal database perspective.
-      <p>
       * @return Object timeSpan: time span of the oplog from start to end  if slave is more out
       *                          of date than that, it can't recover without a complete resync
     */
@@ -1061,10 +1057,8 @@ var DB;
         var localCollections = localdb.getCollectionNames();
         if (localCollections.indexOf('oplog.rs') >= 0) {
             oplog = 'oplog.rs';
-        } else if (localCollections.indexOf('oplog.$main') >= 0) {
-            oplog = 'oplog.$main';
         } else {
-            result.errmsg = "neither master/slave nor replica set replication detected";
+            result.errmsg = "replication not detected";
             return result;
         }
 
@@ -1208,12 +1202,6 @@ var DB;
             for (i in status.members) {
                 r(status.members[i]);
             }
-        } else if (L.sources.count() != 0) {
-            startOptimeDate = new Date();
-            L.sources.find().forEach(g);
-        } else {
-            print("local.sources is empty; is this db a --slave?");
-            return;
         }
     };
 
@@ -1386,7 +1374,7 @@ var DB;
                 "Cannot specify 'digestPassword' through the user management shell helpers, " +
                 "use 'passwordDigestor' instead");
         }
-        var passwordDigestor = cmdObj["passwordDigestor"] ? cmdObj["passwordDigestor"] : "client";
+        var passwordDigestor = cmdObj["passwordDigestor"] ? cmdObj["passwordDigestor"] : "server";
         if (passwordDigestor == "server") {
             cmdObj["digestPassword"] = true;
         } else if (passwordDigestor == "client") {
@@ -1563,7 +1551,28 @@ var DB;
 
     DB.prototype._defaultAuthenticationMechanism = null;
 
-    DB.prototype._getDefaultAuthenticationMechanism = function() {
+    DB.prototype._getDefaultAuthenticationMechanism = function(username, database) {
+        if (username !== undefined) {
+            const userid = database + "." + username;
+            const result = this.runCommand({isMaster: 1, saslSupportedMechs: userid});
+            if (result.ok && (result.saslSupportedMechs !== undefined)) {
+                const mechs = result.saslSupportedMechs;
+                if (!Array.isArray(mechs)) {
+                    throw Error("Server replied with invalid saslSupportedMechs response");
+                }
+                // Never include PLAIN in auto-negotiation.
+                const priority = ["GSSAPI", "SCRAM-SHA-256", "SCRAM-SHA-1"];
+                for (var i = 0; i < priority.length; ++i) {
+                    if (mechs.includes(priority[i])) {
+                        return priority[i];
+                    }
+                }
+            }
+            // If isMaster doesn't support saslSupportedMechs,
+            // or if we couldn't agree on a mechanism,
+            // then fallthrough to configured default or SCRAM-SHA-1.
+        }
+
         // Use the default auth mechanism if set on the command line.
         if (this._defaultAuthenticationMechanism != null)
             return this._defaultAuthenticationMechanism;
@@ -1586,8 +1595,9 @@ var DB;
                 "auth expects either (username, password) or ({ user: username, pwd: password })");
         }
 
-        if (params.mechanism === undefined)
-            params.mechanism = this._getDefaultAuthenticationMechanism();
+        if (params.mechanism === undefined) {
+            params.mechanism = this._getDefaultAuthenticationMechanism(params.user, this.getName());
+        }
 
         if (params.db !== undefined) {
             throw Error("Do not override db field on db.auth(). Use getMongo().auth(), instead.");

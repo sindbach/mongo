@@ -67,16 +67,16 @@ class ValidateCmd : public BasicCommand {
 public:
     ValidateCmd() : BasicCommand("validate") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(stringstream& h) const {
-        h << "Validate contents of a namespace by scanning its data structures for correctness.  "
-             "Slow.\n"
-             "Add full:true option to do a more thorough check\n"
-             "Add scandata:false to skip the scan of the collection data without skipping scans "
-             "of any indexes";
+    std::string help() const override {
+        return "Validate contents of a namespace by scanning its data structures for correctness.  "
+               "Slow.\n"
+               "Add full:true option to do a more thorough check\n"
+               "Add scandata:false to skip the scan of the collection data without skipping scans "
+               "of any indexes";
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -84,7 +84,7 @@ public:
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::validate);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
@@ -207,26 +207,11 @@ public:
         bool skipUUIDCheck = nss.coll() == "system.indexes" || nss.coll() == "system.namespaces";
 
         if (!skipUUIDCheck) {
-            ServerGlobalParams::FeatureCompatibility::Version version =
-                serverGlobalParams.featureCompatibility.getVersion();
-
-            if (version >= ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo36) {
-                // All collections must have a UUID.
-                if (!opts.uuid) {
-                    results.errors.push_back(str::stream() << "UUID missing on collection "
-                                                           << nss.ns()
-                                                           << " but SchemaVersion=3.6");
-                    results.valid = false;
-                }
-            } else if (version ==
-                       ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34) {
-                // All collections must not have a UUID.
-                if (opts.uuid) {
-                    results.errors.push_back(str::stream() << "UUID present in collection "
-                                                           << nss.ns()
-                                                           << " but SchemaVersion=3.4");
-                    results.valid = false;
-                }
+            // All collections must have a UUID.
+            if (!opts.uuid) {
+                results.errors.push_back(str::stream() << "UUID missing on collection " << nss.ns()
+                                                       << " but SchemaVersion=3.6");
+                results.valid = false;
             }
         }
 

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "mongo/client/connpool.h"
+#include "mongo/db/auth/sasl_mechanism_registry.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/db_raii.h"
@@ -45,10 +46,9 @@
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/is_master_response.h"
-#include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplogreader.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_parameters.h"
@@ -57,6 +57,7 @@
 #include "mongo/executor/network_interface.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/client_metadata_ismaster.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/map_util.h"
 
 namespace mongo {
@@ -67,6 +68,12 @@ using std::string;
 using std::stringstream;
 
 namespace repl {
+
+namespace {
+
+MONGO_FP_DECLARE(impersonateFullyUpgradedFutureVersion);
+
+}  // namespace
 
 void appendReplicationInfo(OperationContext* opCtx, BSONObjBuilder& result, int level) {
     ReplicationCoordinator* replCoord = ReplicationCoordinator::get(opCtx);
@@ -80,15 +87,8 @@ void appendReplicationInfo(OperationContext* opCtx, BSONObjBuilder& result, int 
         return;
     }
 
-    // TODO(dannenberg) replAllDead is bad and should be removed when master slave is removed
-    if (replAllDead) {
-        result.append("ismaster", 0);
-        string s = string("dead: ") + replAllDead;
-        result.append("info", s);
-    } else {
-        result.appendBool("ismaster",
-                          ReplicationCoordinator::get(opCtx)->isMasterForReportingPurposes());
-    }
+    result.appendBool("ismaster",
+                      ReplicationCoordinator::get(opCtx)->isMasterForReportingPurposes());
 
     if (level) {
         BSONObjBuilder sources(result.subarrayStart("sources"));
@@ -171,9 +171,9 @@ public:
         BSONObjBuilder result;
         appendReplicationInfo(opCtx, result, level);
 
-        auto rbid = ReplicationProcess::get(opCtx)->getRollbackID(opCtx);
-        if (rbid.isOK()) {
-            result.append("rbid", rbid.getValue());
+        auto rbid = ReplicationProcess::get(opCtx)->getRollbackID();
+        if (ReplicationProcess::kUninitializedRollbackId != rbid) {
+            result.append("rbid", rbid);
         }
 
         return result.obj();
@@ -198,14 +198,10 @@ public:
         // TODO(siyuan) Output term of OpTime
         result.append("latestOptime", replCoord->getMyLastAppliedOpTime().getTimestamp());
 
-        const std::string& oplogNS =
-            replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet
-            ? NamespaceString::kRsOplogNamespace.ns()
-            : masterSlaveOplogName;
         BSONObj o;
         uassert(17347,
                 "Problem reading earliest entry from oplog",
-                Helpers::getSingleton(opCtx, oplogNS.c_str(), o));
+                Helpers::getSingleton(opCtx, NamespaceString::kRsOplogNamespace.ns().c_str(), o));
         result.append("earliestOptime", o["ts"].timestamp());
         return result.obj();
     }
@@ -216,20 +212,19 @@ public:
     bool requiresAuth() const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
-    virtual void help(stringstream& help) const {
-        help << "Check if this server is primary for a replica pair/set; also if it is --master or "
-                "--slave in simple master/slave setups.\n";
-        help << "{ isMaster : 1 }";
+    std::string help() const override {
+        return "Check if this server is primary for a replica set\n"
+               "{ isMaster : 1 }";
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
     CmdIsMaster() : BasicCommand("isMaster", "ismaster") {}
     virtual bool run(OperationContext* opCtx,
                      const string&,
@@ -364,7 +359,10 @@ public:
         result.appendDate("localTime", jsTime());
         result.append("logicalSessionTimeoutMinutes", localLogicalSessionTimeoutMinutes);
 
-        if (internalClientElement) {
+        if (MONGO_FAIL_POINT(impersonateFullyUpgradedFutureVersion)) {
+            result.append("minWireVersion", WireVersion::FUTURE_WIRE_VERSION_FOR_TESTING);
+            result.append("maxWireVersion", WireVersion::FUTURE_WIRE_VERSION_FOR_TESTING);
+        } else if (internalClientElement) {
             result.append("minWireVersion",
                           WireSpec::instance().incomingInternalClient.minWireVersion);
             result.append("maxWireVersion",
@@ -388,6 +386,9 @@ public:
             MessageCompressorManager::forSession(opCtx->getClient()->session())
                 .serverNegotiate(cmdObj, &result);
         }
+
+        auto& saslMechanismRegistry = SASLServerMechanismRegistry::get(opCtx->getServiceContext());
+        saslMechanismRegistry.advertiseMechanismNamesForUser(opCtx, cmdObj, &result);
 
         return true;
     }

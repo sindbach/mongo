@@ -48,7 +48,7 @@
 #include "mongo/db/cursor_server_params.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
@@ -84,7 +84,8 @@ ClientCursor::ClientCursor(ClientCursorParams params,
       _nss(std::move(params.nss)),
       _authenticatedUsers(std::move(params.authenticatedUsers)),
       _lsid(operationUsingCursor->getLogicalSessionId()),
-      _isReadCommitted(params.isReadCommitted),
+      _txnNumber(operationUsingCursor->getTxnNumber()),
+      _readConcernLevel(params.readConcernLevel),
       _cursorManager(cursorManager),
       _originatingCommand(params.originatingCommandObj),
       _queryOptions(params.queryOptions),
@@ -115,8 +116,8 @@ ClientCursor::~ClientCursor() {
     }
 }
 
-void ClientCursor::markAsKilled(const std::string& reason) {
-    _exec->markAsKilled(reason);
+void ClientCursor::markAsKilled(Status killStatus) {
+    _exec->markAsKilled(killStatus);
 }
 
 void ClientCursor::dispose(OperationContext* opCtx) {
@@ -126,23 +127,6 @@ void ClientCursor::dispose(OperationContext* opCtx) {
 
     _exec->dispose(opCtx, _cursorManager);
     _disposed = true;
-}
-
-void ClientCursor::updateSlaveLocation(OperationContext* opCtx) {
-    if (_slaveReadTill.isNull())
-        return;
-
-    verify(_nss.isOplog());
-
-    Client* c = opCtx->getClient();
-    verify(c);
-    OID rid = repl::ReplClientInfo::forClient(c).getRemoteID();
-    if (!rid.isSet())
-        return;
-
-    repl::ReplicationCoordinator::get(opCtx)
-        ->setLastOptimeForSlave(rid, _slaveReadTill)
-        .transitional_ignore();
 }
 
 //
@@ -209,9 +193,8 @@ void ClientCursorPin::release() {
     // Note it's not safe to dereference _cursor->_cursorManager unless we know we haven't been
     // killed. If we're not locked we assume we haven't been killed because we're working with the
     // global cursor manager which never kills cursors.
-    const bool isLocked =
-        _opCtx->lockState()->isCollectionLockedForMode(_cursor->_nss.ns(), MODE_IS);
-    dassert(isLocked || _cursor->_cursorManager->isGlobalManager());
+    dassert(_opCtx->lockState()->isCollectionLockedForMode(_cursor->_nss.ns(), MODE_IS) ||
+            _cursor->_cursorManager->isGlobalManager());
 
     invariant(_cursor->_operationUsingCursor);
 
@@ -242,9 +225,8 @@ void ClientCursorPin::deleteUnderlying() {
     // Note it's not safe to dereference _cursor->_cursorManager unless we know we haven't been
     // killed. If we're not locked we assume we haven't been killed because we're working with the
     // global cursor manager which never kills cursors.
-    const bool isLocked =
-        _opCtx->lockState()->isCollectionLockedForMode(_cursor->_nss.ns(), MODE_IS);
-    dassert(isLocked || _cursor->_cursorManager->isGlobalManager());
+    dassert(_opCtx->lockState()->isCollectionLockedForMode(_cursor->_nss.ns(), MODE_IS) ||
+            _cursor->_cursorManager->isGlobalManager());
 
     if (!_cursor->getExecutor()->isMarkedAsKilled()) {
         _cursor->_cursorManager->deregisterCursor(_cursor);

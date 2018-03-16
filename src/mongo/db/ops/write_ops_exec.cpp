@@ -38,10 +38,10 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop_metrics.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/delete.h"
 #include "mongo/db/exec/update.h"
 #include "mongo/db/introspect.h"
@@ -62,12 +62,15 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/implicit_create_collection.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/cannot_implicitly_create_collection_info.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -106,9 +109,9 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
                     curOp->isCommand(),
                     curOp->getReadWriteType());
 
-        if (!curOp->debug().exceptionInfo.isOK()) {
+        if (!curOp->debug().errInfo.isOK()) {
             LOG(3) << "Caught Assertion in " << redact(logicalOpToString(curOp->getLogicalOp()))
-                   << ": " << curOp->debug().exceptionInfo.toString();
+                   << ": " << curOp->debug().errInfo.toString();
         }
 
         const bool logAll = logger::globalLogDomain()->shouldLog(logger::LogComponent::kCommand,
@@ -125,7 +128,10 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
             log() << curOp->debug().report(opCtx->getClient(), *curOp, lockerInfo.stats);
         }
 
-        if (curOp->shouldDBProfile(shouldSample)) {
+        // Do not profile individual statements in a write command if we are in a transaction.
+        auto session = OperationContextSession::get(opCtx);
+        if (curOp->shouldDBProfile(shouldSample) &&
+            !(session && session->inSnapshotReadOrMultiDocumentTransaction())) {
             profile(opCtx, CurOp::get(opCtx)->getNetworkOp());
         }
     } catch (const DBException& ex) {
@@ -189,6 +195,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
         AutoGetOrCreateDb db(opCtx, ns.db(), MODE_X);
         assertCanWrite_inlock(opCtx, ns);
         if (!db.getDb()->getCollection(opCtx, ns)) {  // someone else may have beat us to it.
+            uassertStatusOK(userAllowedCreateNS(ns.db(), ns.coll()));
             WriteUnitOfWork wuow(opCtx);
             uassertStatusOK(userCreateNS(opCtx, db.getDb(), ns.ns(), BSONObj()));
             wuow.commit();
@@ -206,21 +213,38 @@ bool handleError(OperationContext* opCtx,
                  WriteResult* out) {
     LastError::get(opCtx->getClient()).setLastError(ex.code(), ex.reason());
     auto& curOp = *CurOp::get(opCtx);
-    curOp.debug().exceptionInfo = ex.toStatus();
+    curOp.debug().errInfo = ex.toStatus();
 
     if (ErrorCodes::isInterruption(ex.code())) {
         throw;  // These have always failed the whole batch.
     }
 
+    auto session = OperationContextSession::get(opCtx);
+    if (session && session->inSnapshotReadOrMultiDocumentTransaction()) {
+        // If we are in a transaction, we must fail the whole batch.
+        throw;
+    }
+
     if (auto staleInfo = ex.extraInfo<StaleConfigInfo>()) {
         if (!opCtx->getClient()->isInDirectClient()) {
-            ShardingState::get(opCtx)
-                ->onStaleShardVersion(opCtx, nss, staleInfo->getVersionReceived())
-                .ignore();  // We already have an error to report so ignore this one.
+            // We already have the StaleConfig exception, so just swallow any errors due to refresh
+            onShardVersionMismatch(opCtx, nss, staleInfo->getVersionReceived()).ignore();
         }
+
         // Don't try doing more ops since they will fail with the same error.
         // Command reply serializer will handle repeating this error if needed.
         out->results.emplace_back(ex.toStatus());
+        return false;
+    } else if (auto cannotImplicitCreateCollInfo =
+                   ex.extraInfo<CannotImplicitlyCreateCollectionInfo>()) {
+        // Don't try doing more ops since they will fail with the same error.
+        // Command reply serializer will handle repeating this error if needed.
+        out->results.emplace_back(ex.toStatus());
+
+        if (ShardingState::get(opCtx)->enabled()) {
+            onCannotImplicitlyCreateCollection(opCtx, cannotImplicitCreateCollInfo->getNss());
+        }
+
         return false;
     }
 
@@ -395,8 +419,11 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     out->results.emplace_back(std::move(result));
                     curOp.debug().ninserted++;
                 } catch (...) {
-                    // Release the lock following any error. Among other things, this ensures that
-                    // we don't sleep in the WCE retry loop with the lock held.
+                    // Release the lock following any error if we are not in multi-statement
+                    // transaction. Among other things, this ensures that we don't sleep in the WCE
+                    // retry loop with the lock held.
+                    // If we are in multi-statement transaction and under a under a WUOW, we will
+                    // not actually release the lock.
                     collection.reset();
                     throw;
                 }
@@ -428,7 +455,11 @@ SingleWriteResult makeWriteResultForInsertOrDeleteRetry() {
 }  // namespace
 
 WriteResult performInserts(OperationContext* opCtx, const write_ops::Insert& wholeOp) {
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());  // Does own retries.
+    // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run under
+    // snapshot read concern or in a transaction.
+    auto session = OperationContextSession::get(opCtx);
+    invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
+              (session && session->inSnapshotReadOrMultiDocumentTransaction()));
     auto& curOp = *CurOp::get(opCtx);
     ON_BLOCK_EXIT([&] {
         // This is the only part of finishCurOp we need to do for inserts because they reuse the
@@ -486,6 +517,7 @@ WriteResult performInserts(OperationContext* opCtx, const write_ops::Insert& who
             const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
             if (opCtx->getTxnNumber()) {
                 auto session = OperationContextSession::get(opCtx);
+                invariant(session);
                 if (session->checkStatementExecutedNoOplogEntryFetch(*opCtx->getTxnNumber(),
                                                                      stmtId)) {
                     containsRetry = true;
@@ -553,7 +585,12 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
     request.setArrayFilters(write_ops::arrayFiltersOf(op));
     request.setMulti(op.getMulti());
     request.setUpsert(op.getUpsert());
-    request.setYieldPolicy(PlanExecutor::YIELD_AUTO);  // ParsedUpdate overrides this for $isolated.
+
+    auto readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    request.setYieldPolicy(
+        readConcernArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern
+            ? PlanExecutor::INTERRUPT_ONLY
+            : PlanExecutor::YIELD_AUTO);  // ParsedUpdate overrides this for $isolated.
 
     ParsedUpdate parsedUpdate(opCtx, &request);
     uassertStatusOK(parsedUpdate.parseRequest());
@@ -622,7 +659,11 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 }
 
 WriteResult performUpdates(OperationContext* opCtx, const write_ops::Update& wholeOp) {
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());  // Does own retries.
+    // Update performs its own retries, so we should not be in a WriteUnitOfWork unless run under
+    // snapshot read concern or in a transaction.
+    auto session = OperationContextSession::get(opCtx);
+    invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
+              (session && session->inSnapshotReadOrMultiDocumentTransaction()));
     uassertStatusOK(userAllowedWriteNS(wholeOp.getNamespace()));
 
     DisableDocumentValidationIfTrue docValidationDisabler(
@@ -652,7 +693,7 @@ WriteResult performUpdates(OperationContext* opCtx, const write_ops::Update& who
         // TODO: don't create nested CurOp for legacy writes.
         // Add Command pointer to the nested CurOp.
         auto& parentCurOp = *CurOp::get(opCtx);
-        Command* cmd = parentCurOp.getCommand();
+        const Command* cmd = parentCurOp.getCommand();
         CurOp curOp(opCtx);
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -700,7 +741,11 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     request.setQuery(op.getQ());
     request.setCollation(write_ops::collationOf(op));
     request.setMulti(op.getMulti());
-    request.setYieldPolicy(PlanExecutor::YIELD_AUTO);  // ParsedDelete overrides this for $isolated.
+    auto readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    request.setYieldPolicy(
+        readConcernArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern
+            ? PlanExecutor::INTERRUPT_ONLY
+            : PlanExecutor::YIELD_AUTO);  // ParsedDelete overrides this for $isolated.
     request.setStmtId(stmtId);
 
     ParsedDelete parsedDelete(opCtx, &request);
@@ -755,7 +800,11 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 }
 
 WriteResult performDeletes(OperationContext* opCtx, const write_ops::Delete& wholeOp) {
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());  // Does own retries.
+    // Delete performs its own retries, so we should not be in a WriteUnitOfWork unless we are in a
+    // transaction.
+    auto session = OperationContextSession::get(opCtx);
+    invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
+              (session && session->inSnapshotReadOrMultiDocumentTransaction()));
     uassertStatusOK(userAllowedWriteNS(wholeOp.getNamespace()));
 
     DisableDocumentValidationIfTrue docValidationDisabler(
@@ -784,7 +833,7 @@ WriteResult performDeletes(OperationContext* opCtx, const write_ops::Delete& who
         // TODO: don't create nested CurOp for legacy writes.
         // Add Command pointer to the nested CurOp.
         auto& parentCurOp = *CurOp::get(opCtx);
-        Command* cmd = parentCurOp.getCommand();
+        const Command* cmd = parentCurOp.getCommand();
         CurOp curOp(opCtx);
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());

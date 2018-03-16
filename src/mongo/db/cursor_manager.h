@@ -39,8 +39,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/session_killer.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/duration.h"
@@ -80,7 +79,7 @@ class PlanExecutor;
  */
 class CursorManager {
 public:
-    using RegistrationToken = Partitioned<unordered_set<PlanExecutor*>>::PartitionId;
+    using RegistrationToken = Partitioned<stdx::unordered_set<PlanExecutor*>>::PartitionId;
 
     /**
      * Appends the sessions that have open cursors on the global cursor manager and across
@@ -133,9 +132,12 @@ public:
     /**
      * Destroys cursors that have been inactive for too long.
      *
-     * Returns the number of cursors that were timed out.
+     * Returns the number of cursors that were timed out. If any of the cursors were running in
+     * transactions, appends those transaction IDs to 'txnsToAbort'.
      */
-    std::size_t timeoutCursors(OperationContext* opCtx, Date_t now);
+    std::size_t timeoutCursors(OperationContext* opCtx,
+                               Date_t now,
+                               std::vector<std::pair<LogicalSessionId, TxnNumber>>* txnsToAbort);
 
     /**
      * Register an executor so that it can be notified of deletions, invalidations, collection
@@ -143,7 +145,8 @@ public:
      * happens automatically for yielding PlanExecutors, so this should only be called by a
      * PlanExecutor itself. Returns a token that must be stored for use during deregistration.
      */
-    Partitioned<unordered_set<PlanExecutor*>>::PartitionId registerExecutor(PlanExecutor* exec);
+    Partitioned<stdx::unordered_set<PlanExecutor*>>::PartitionId registerExecutor(
+        PlanExecutor* exec);
 
     /**
      * Remove an executor from the registry. It is legal to call this even if 'exec' is not
@@ -174,7 +177,8 @@ public:
 
     /**
      * Returns an OK status if the cursor was successfully killed, meaning either:
-     * (1) The cursor was erased from the cursor registry
+     * (1) The cursor was erased from the cursor registry. In this case, we also return the
+     * transaction ID of the transaction the cursor belonged to (if it exists).
      * (2) The cursor's operation was interrupted, and the cursor will be cleaned up when the
      * operation next checks for interruption.
      * Case (2) will only occur if the cursor is pinned.
@@ -184,7 +188,8 @@ public:
      *
      * If 'shouldAudit' is true, will perform audit logging.
      */
-    Status killCursor(OperationContext* opCtx, CursorId id, bool shouldAudit);
+    StatusWith<boost::optional<std::pair<LogicalSessionId, TxnNumber>>> killCursor(
+        OperationContext* opCtx, CursorId id, bool shouldAudit);
 
     /**
      * Returns an OK status if we're authorized to erase the cursor. Otherwise, returns
@@ -296,8 +301,9 @@ private:
     //   partition helpers to acquire mutexes for all partitions.
     mutable SimpleMutex _registrationLock;
     std::unique_ptr<PseudoRandom> _random;
-    Partitioned<unordered_set<PlanExecutor*>, kNumPartitions, PlanExecutorPartitioner>
+    Partitioned<stdx::unordered_set<PlanExecutor*>, kNumPartitions, PlanExecutorPartitioner>
         _registeredPlanExecutors;
-    std::unique_ptr<Partitioned<unordered_map<CursorId, ClientCursor*>, kNumPartitions>> _cursorMap;
+    std::unique_ptr<Partitioned<stdx::unordered_map<CursorId, ClientCursor*>, kNumPartitions>>
+        _cursorMap;
 };
 }  // namespace mongo

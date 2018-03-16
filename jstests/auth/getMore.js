@@ -1,4 +1,5 @@
 // Tests that a user can only run a getMore on a cursor that they created.
+// @tags: [requires_sharding]
 (function() {
     "use strict";
 
@@ -260,8 +261,13 @@
     MongoRunner.stopMongod(conn);
 
     // Run the test on a sharded cluster.
-    let cluster = new ShardingTest(
-        {shards: 1, mongos: 1, keyFile: "jstests/libs/key1", other: {shardOptions: {auth: ""}}});
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+    let cluster = new ShardingTest({
+        shards: 1,
+        mongos: 1,
+        keyFile: "jstests/libs/key1",
+        other: {shardOptions: {auth: ""}, shardAsReplicaSet: false}
+    });
     runTest(cluster);
     cluster.stop();
 }());

@@ -63,7 +63,7 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
     const auto versionString = VersionInfoInterface::instance().version();
     ClientMetadata::serialize(_options.instanceName, versionString, &bob);
 
-    if (Command::testCommandsEnabled) {
+    if (getTestCommandsEnabled()) {
         // Only include the host:port of this process in the isMaster command request if test
         // commands are enabled. mongobridge uses this field to identify the process opening a
         // connection to it.
@@ -116,6 +116,17 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
 
             return _completeOperation(op, validateStatus);
         }
+        auto egressTagManager = _options.connectionPoolOptions.egressTagCloserManager;
+        if (egressTagManager) {
+            // Tag outgoing connection so it can be kept open on FCV upgrade if it is not to a
+            // server with a lower binary version.
+            if (protocolSet.getValue().version.maxWireVersion >=
+                WireSpec::instance().outgoing.maxWireVersion) {
+                egressTagManager->mutateTags(
+                    op->command().target(),
+                    [](transport::Session::TagMask tags) { return transport::Session::kKeepOpen; });
+            }
+        }  // Some unit and integration tests do not set up an egress tag manager.
 
         op->connection().setServerProtocols(protocolSet.getValue().protocolSet);
 

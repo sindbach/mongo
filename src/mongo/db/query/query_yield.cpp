@@ -83,7 +83,8 @@ void QueryYield::yieldAllLocks(OperationContext* opCtx,
         whileYieldingFn();
     }
 
-    locker->restoreLockState(snapshot);
+    UninterruptibleLockGuard noInterrupt(locker);
+    locker->restoreLockState(opCtx, snapshot);
 }
 
 }  // namespace mongo

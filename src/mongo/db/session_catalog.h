@@ -31,6 +31,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/session.h"
+#include "mongo/db/session_killer.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
@@ -112,6 +113,18 @@ public:
     ScopedSession getOrCreateSession(OperationContext* opCtx, const LogicalSessionId& lsid);
 
     /**
+     * Returns a reference to the specified cached session if it exists, regardless of whether it is
+     * checked-out or not. The returned session is not returned checked-out and is allowed to be
+     * checked-out concurrently.
+     *
+     * The intended usage for this method is to allow cursor destruction that may abort the
+     * transaction to run in parallel with operations for the same session without blocking it.
+     * Because of this, it may not be used from operations which run on a session.
+     */
+    boost::optional<ScopedSession> getSession(OperationContext* opCtx,
+                                              const LogicalSessionId& lsid);
+
+    /**
      * Callback to be invoked when it is suspected that the on-disk session contents might not be in
      * sync with what is in the sessions cache.
      *
@@ -122,6 +135,15 @@ public:
      * will throw. This prevents invalid entries from making it in the collection.
      */
     void invalidateSessions(OperationContext* opCtx, boost::optional<BSONObj> singleSessionDoc);
+
+    /**
+     * Iterates through the SessionCatalog and applies 'workerFn' to each Session. This locks the
+     * SessionCatalog.
+     * TODO SERVER-33850: Take Matcher out of the SessionKiller namespace.
+     */
+    void scanSessions(OperationContext* opCtx,
+                      const SessionKiller::Matcher& matcher,
+                      stdx::function<void(OperationContext*, Session*)> workerFn);
 
 private:
     struct SessionRuntimeInfo {
@@ -146,12 +168,21 @@ private:
                                                       LogicalSessionIdHash>;
 
     /**
-     * Must be called with _mutex locked and returns it locked. May release and re-acquire it zero
-     * or more times before returning. The returned 'SessionRuntimeInfo' is guaranteed to be linked
-     * on the catalog's _txnTable as long as the lock is held.
+     * May release and re-acquire it zero or more times before returning. The returned
+     * 'SessionRuntimeInfo' is guaranteed to be linked on the catalog's _txnTable as long as the
+     * lock is held.
      */
     std::shared_ptr<SessionRuntimeInfo> _getOrCreateSessionRuntimeInfo(
-        OperationContext* opCtx, const LogicalSessionId& lsid, stdx::unique_lock<stdx::mutex>& ul);
+        WithLock, OperationContext* opCtx, const LogicalSessionId& lsid);
+
+    /**
+     * May release and re-acquire it zero or more times before returning. The returned
+     * 'SessionRuntimeInfo' is guaranteed to be linked on the catalog's _txnTable as long as the
+     * lock is held. If the requested 'SessionRuntimeInfo' does not exist, returns nullptr.
+     */
+    std::shared_ptr<SessionRuntimeInfo> _getSessionRuntimeInfo(WithLock,
+                                                               OperationContext* opCtx,
+                                                               const LogicalSessionId& lsid);
 
     /**
      * Makes a session, previously checked out through 'checkoutSession', available again.
@@ -241,15 +272,25 @@ private:
  * Scoped object, which checks out the session specified in the passed operation context and stores
  * it for later access by the command. The session is installed at construction time and is removed
  * at destruction.
+ *
+ * Nested OperationContextSessions only check out the session once at the top level, but the checked
+ * out session is accessible via get() in inner scopes. This could happen due to DBDirectClient.
  */
 class OperationContextSession {
     MONGO_DISALLOW_COPYING(OperationContextSession);
 
 public:
-    OperationContextSession(OperationContext* opCtx, bool checkOutSession);
+    OperationContextSession(OperationContext* opCtx,
+                            bool checkOutSession,
+                            boost::optional<bool> autocommit);
+
     ~OperationContextSession();
 
-    static Session* get(OperationContext* opCtx);
+    /**
+     * Returns the session checked out in the constructor. If "topLevelOnly" is true, it returns
+     * the session when it's at the top nesting level, and nullptr otherwise.
+     */
+    static Session* get(OperationContext* opCtx, bool topLevelOnly = false);
 
 private:
     OperationContext* const _opCtx;

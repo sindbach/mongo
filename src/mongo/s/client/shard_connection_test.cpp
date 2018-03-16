@@ -27,22 +27,12 @@
 
 #include "mongo/platform/basic.h"
 
-#include <cstdint>
 #include <vector>
 
-#include "mongo/base/init.h"
-#include "mongo/client/connpool.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/authorization_manager_global.h"
-#include "mongo/db/auth/authz_manager_external_state_mock.h"
 #include "mongo/db/client.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_noop.h"
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/s/client/shard_connection.h"
-#include "mongo/stdx/memory.h"
-#include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/socket_exception.h"
 
@@ -55,20 +45,12 @@
 namespace mongo {
 namespace {
 
-using std::string;
-using std::vector;
+const std::string TARGET_HOST = "$dummy:27017";
 
-const string TARGET_HOST = "$dummy:27017";
-
-/**
- * Warning: cannot run in parallel
- */
-class ShardConnFixture : public mongo::unittest::Test {
+class ShardConnFixture : public unittest::Test {
 public:
     void setUp() {
-        if (!haveClient()) {
-            Client::initThread("ShardConnFixture", getGlobalServiceContext(), NULL);
-        }
+        Client::initThreadIfNotAlready("ShardConnFixture");
         _maxPoolSizePerHost = mongo::shardConnectionPool.getMaxPoolSize();
 
         mongo::ConnectionString::setConnectionHook(
@@ -115,38 +97,32 @@ protected:
     void checkNewConns(void (*checkFunc)(uint64_t, uint64_t),
                        uint64_t arg2,
                        size_t newConnsToCreate) {
-        vector<ShardConnection*> newConnList;
+        std::vector<std::unique_ptr<ShardConnection>> newConnList;
         for (size_t x = 0; x < newConnsToCreate; x++) {
-            ShardConnection* newConn =
-                new ShardConnection(ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
+            auto newConn = std::make_unique<ShardConnection>(
+                ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
             checkFunc(newConn->get()->getSockCreationMicroSec(), arg2);
-            newConnList.push_back(newConn);
+            newConnList.emplace_back(std::move(newConn));
         }
 
         const uint64_t oldCreationTime = mongo::curTimeMicros64();
 
-        for (vector<ShardConnection*>::iterator iter = newConnList.begin();
-             iter != newConnList.end();
-             ++iter) {
-            (*iter)->done();
-            delete *iter;
+        for (auto& conn : newConnList) {
+            conn->done();
         }
 
         newConnList.clear();
 
         // Check that connections created after the purge was put back to the pool.
         for (size_t x = 0; x < newConnsToCreate; x++) {
-            ShardConnection* newConn =
-                new ShardConnection(ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
+            auto newConn = std::make_unique<ShardConnection>(
+                ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
             ASSERT_LESS_THAN(newConn->get()->getSockCreationMicroSec(), oldCreationTime);
-            newConnList.push_back(newConn);
+            newConnList.emplace_back(std::move(newConn));
         }
 
-        for (vector<ShardConnection*>::iterator iter = newConnList.begin();
-             iter != newConnList.end();
-             ++iter) {
-            (*iter)->done();
-            delete *iter;
+        for (auto& conn : newConnList) {
+            conn->done();
         }
     }
 

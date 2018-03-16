@@ -42,6 +42,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/fetch.h"
@@ -214,8 +215,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
         return {cq.getStatus()};
     }
 
-    return getExecutorFind(
-        opCtx, collection, nss, std::move(cq.getValue()), PlanExecutor::YIELD_AUTO, plannerOpts);
+    return getExecutorFind(opCtx, collection, nss, std::move(cq.getValue()), plannerOpts);
 }
 
 BSONObj removeSortKeyMetaProjection(BSONObj projectionObj) {
@@ -705,11 +705,12 @@ Status PipelineD::MongoDInterface::attachCursorSourceToPipeline(
 
     boost::optional<AutoGetCollectionForReadCommand> autoColl;
     if (expCtx->uuid) {
-        autoColl.emplace(expCtx->opCtx, expCtx->ns.db(), *expCtx->uuid);
-        if (autoColl->getCollection() == nullptr) {
-            // The UUID doesn't exist anymore.
-            return {ErrorCodes::NamespaceNotFound,
-                    "No namespace with UUID " + expCtx->uuid->toString()};
+        try {
+            autoColl.emplace(expCtx->opCtx,
+                             NamespaceStringOrUUID{expCtx->ns.db().toString(), *expCtx->uuid});
+        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
+            // The UUID doesn't exist anymore
+            return ex.toStatus();
         }
     } else {
         autoColl.emplace(expCtx->opCtx, expCtx->ns);
@@ -730,83 +731,6 @@ Status PipelineD::MongoDInterface::attachCursorSourceToPipeline(
     PipelineD::prepareCursorSource(autoColl->getCollection(), expCtx->ns, nullptr, pipeline);
 
     return Status::OK();
-}
-
-std::vector<BSONObj> PipelineD::MongoDInterface::getCurrentOps(
-    OperationContext* opCtx,
-    CurrentOpConnectionsMode connMode,
-    CurrentOpUserMode userMode,
-    CurrentOpTruncateMode truncateMode) const {
-    AuthorizationSession* ctxAuth = AuthorizationSession::get(opCtx->getClient());
-
-    const std::string hostName = getHostNameCachedAndPort();
-
-    std::vector<BSONObj> ops;
-
-    for (ServiceContext::LockedClientsCursor cursor(opCtx->getClient()->getServiceContext());
-         Client* client = cursor.next();) {
-        invariant(client);
-
-        stdx::lock_guard<Client> lk(*client);
-
-        // If auth is disabled, ignore the allUsers parameter.
-        if (ctxAuth->getAuthorizationManager().isAuthEnabled() &&
-            userMode == CurrentOpUserMode::kExcludeOthers &&
-            !ctxAuth->isCoauthorizedWithClient(client)) {
-            continue;
-        }
-
-        const OperationContext* clientOpCtx = client->getOperationContext();
-
-        if (!clientOpCtx && connMode == CurrentOpConnectionsMode::kExcludeIdle) {
-            continue;
-        }
-
-        BSONObjBuilder infoBuilder;
-
-        infoBuilder.append("host", hostName);
-
-        client->reportState(infoBuilder);
-        const auto& clientMetadata = ClientMetadataIsMasterState::get(client).getClientMetadata();
-
-        if (clientMetadata) {
-            auto appName = clientMetadata.get().getApplicationName();
-            if (!appName.empty()) {
-                infoBuilder.append("appName", appName);
-            }
-
-            auto clientMetadataDocument = clientMetadata.get().getDocument();
-            infoBuilder.append("clientMetadata", clientMetadataDocument);
-        }
-
-        // Fill out the rest of the BSONObj with opCtx specific details.
-        infoBuilder.appendBool("active", static_cast<bool>(clientOpCtx));
-        infoBuilder.append("currentOpTime",
-                           opCtx->getServiceContext()->getPreciseClockSource()->now().toString());
-
-        if (clientOpCtx) {
-            infoBuilder.append("opid", clientOpCtx->getOpID());
-            if (clientOpCtx->isKillPending()) {
-                infoBuilder.append("killPending", true);
-            }
-
-            if (clientOpCtx->getLogicalSessionId()) {
-                BSONObjBuilder bob(infoBuilder.subobjStart("lsid"));
-                clientOpCtx->getLogicalSessionId()->serialize(&bob);
-            }
-
-            CurOp::get(clientOpCtx)
-                ->reportState(&infoBuilder, (truncateMode == CurrentOpTruncateMode::kTruncateOps));
-
-            Locker::LockerInfo lockerInfo;
-            clientOpCtx->lockState()->getLockerInfo(&lockerInfo);
-            fillLockerInfo(lockerInfo, infoBuilder);
-        }
-
-        ops.emplace_back(infoBuilder.obj());
-    }
-
-    return ops;
 }
 
 std::string PipelineD::MongoDInterface::getShardName(OperationContext* opCtx) const {
@@ -864,14 +788,17 @@ boost::optional<Document> PipelineD::MongoDInterface::lookupSingleDocument(
     invariant(!readConcern);  // We don't currently support a read concern on mongod - it's only
                               // expected to be necessary on mongos.
 
-    // Be sure to do the lookup using the collection default collation.
-    auto foreignExpCtx = expCtx->copyWith(
-        nss, collectionUUID, _getCollectionDefaultCollator(expCtx->opCtx, nss, collectionUUID));
-    auto swPipeline = makePipeline({BSON("$match" << documentKey)}, foreignExpCtx);
-    if (swPipeline == ErrorCodes::NamespaceNotFound) {
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
+    try {
+        // Be sure to do the lookup using the collection default collation
+        auto foreignExpCtx = expCtx->copyWith(
+            nss,
+            collectionUUID,
+            _getCollectionDefaultCollator(expCtx->opCtx, nss.db(), collectionUUID));
+        pipeline = uassertStatusOK(makePipeline({BSON("$match" << documentKey)}, foreignExpCtx));
+    } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
         return boost::none;
     }
-    auto pipeline = uassertStatusOK(std::move(swPipeline));
 
     auto lookedUpDocument = pipeline->getNext();
     if (auto next = pipeline->getNext()) {
@@ -887,21 +814,45 @@ boost::optional<Document> PipelineD::MongoDInterface::lookupSingleDocument(
     return lookedUpDocument;
 }
 
-std::unique_ptr<CollatorInterface> PipelineD::MongoDInterface::_getCollectionDefaultCollator(
-    OperationContext* opCtx, const NamespaceString& nss, UUID collectionUUID) {
-    if (_collatorCache.find(collectionUUID) == _collatorCache.end()) {
-        AutoGetCollection autoColl(opCtx, nss, collectionUUID, MODE_IS);
-        if (!autoColl.getCollection()) {
-            // This collection doesn't exist - since we looked up by UUID, it will never exist in
-            // the future, so we cache a null pointer as the default collation.
-            _collatorCache[collectionUUID] = nullptr;
-        } else {
-            auto defaultCollator = autoColl.getCollection()->getDefaultCollator();
-            // Clone the collator so that we can safely use the pointer if the collection
-            // disappears right after we release the lock.
-            _collatorCache[collectionUUID] = defaultCollator ? defaultCollator->clone() : nullptr;
-        }
+BSONObj PipelineD::MongoDInterface::_reportCurrentOpForClient(
+    OperationContext* opCtx, Client* client, CurrentOpTruncateMode truncateOps) const {
+    BSONObjBuilder builder;
+
+    CurOp::reportCurrentOpForClient(
+        opCtx, client, (truncateOps == CurrentOpTruncateMode::kTruncateOps), &builder);
+
+    // Append lock stats before returning.
+    if (auto clientOpCtx = client->getOperationContext()) {
+        Locker::LockerInfo lockerInfo;
+        clientOpCtx->lockState()->getLockerInfo(&lockerInfo);
+        fillLockerInfo(lockerInfo, builder);
     }
-    return _collatorCache[collectionUUID] ? _collatorCache[collectionUUID]->clone() : nullptr;
+
+    return builder.obj();
 }
+
+std::unique_ptr<CollatorInterface> PipelineD::MongoDInterface::_getCollectionDefaultCollator(
+    OperationContext* opCtx, StringData dbName, UUID collectionUUID) {
+    auto it = _collatorCache.find(collectionUUID);
+    if (it == _collatorCache.end()) {
+        auto collator = [&]() -> std::unique_ptr<CollatorInterface> {
+            AutoGetCollection autoColl(opCtx, {dbName.toString(), collectionUUID}, MODE_IS);
+            if (!autoColl.getCollection()) {
+                // This collection doesn't exist, so assume a nullptr default collation
+                return nullptr;
+            } else {
+                auto defaultCollator = autoColl.getCollection()->getDefaultCollator();
+                // Clone the collator so that we can safely use the pointer if the collection
+                // disappears right after we release the lock.
+                return defaultCollator ? defaultCollator->clone() : nullptr;
+            }
+        }();
+
+        it = _collatorCache.emplace(collectionUUID, std::move(collator)).first;
+    }
+
+    auto& collator = it->second;
+    return collator ? collator->clone() : nullptr;
+}
+
 }  // namespace mongo

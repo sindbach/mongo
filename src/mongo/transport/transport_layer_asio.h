@@ -38,7 +38,6 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/transport/ticket_impl.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_mode.h"
 #include "mongo/util/net/hostandport.h"
@@ -78,6 +77,19 @@ public:
         explicit Options(const ServerGlobalParams* params);
         Options() = default;
 
+        constexpr static auto kIngress = 0x1;
+        constexpr static auto kEgress = 0x10;
+
+        int mode = kIngress | kEgress;
+
+        bool isIngress() const {
+            return mode & kIngress;
+        }
+
+        bool isEgress() const {
+            return mode & kEgress;
+        }
+
         int port = ServerGlobalParams::DefaultDBPort;  // port to bind to
         std::string ipList;                            // addresses to bind to
 #ifndef _WIN32
@@ -93,19 +105,13 @@ public:
 
     virtual ~TransportLayerASIO();
 
-    Ticket sourceMessage(const SessionHandle& session,
-                         Message* message,
-                         Date_t expiration = Ticket::kNoExpirationDate) final;
-
-    Ticket sinkMessage(const SessionHandle& session,
-                       const Message& message,
-                       Date_t expiration = Ticket::kNoExpirationDate) final;
-
-    Status wait(Ticket&& ticket) final;
-
-    void asyncWait(Ticket&& ticket, TicketCallback callback) final;
-
-    void end(const SessionHandle& session) final;
+    StatusWith<SessionHandle> connect(HostAndPort peer,
+                                      ConnectSSLMode sslMode,
+                                      Milliseconds timeout) final;
+    void asyncConnect(HostAndPort peer,
+                      ConnectSSLMode sslMode,
+                      Milliseconds timeout,
+                      std::function<void(StatusWith<SessionHandle>)> callback) final;
 
     Status setup() final;
     Status start() final;
@@ -120,15 +126,18 @@ public:
 
 private:
     class ASIOSession;
-    class ASIOTicket;
-    class ASIOSourceTicket;
-    class ASIOSinkTicket;
 
     using ASIOSessionHandle = std::shared_ptr<ASIOSession>;
     using ConstASIOSessionHandle = std::shared_ptr<const ASIOSession>;
     using GenericAcceptor = asio::basic_socket_acceptor<asio::generic::stream_protocol>;
 
     void _acceptConnection(GenericAcceptor& acceptor);
+
+    template <typename Endpoint>
+    StatusWith<ASIOSessionHandle> _doSyncConnect(Endpoint endpoint,
+                                                 const HostAndPort& peer,
+                                                 const Milliseconds& timeout);
+
 #ifdef MONGO_CONFIG_SSL
     SSLParams::SSLModes _sslMode() const;
 #endif
@@ -162,7 +171,8 @@ private:
     std::unique_ptr<asio::io_context> _acceptorIOContext;
 
 #ifdef MONGO_CONFIG_SSL
-    std::unique_ptr<asio::ssl::context> _sslContext;
+    std::unique_ptr<asio::ssl::context> _ingressSSLContext;
+    std::unique_ptr<asio::ssl::context> _egressSSLContext;
 #endif
 
     std::vector<std::pair<SockAddr, GenericAcceptor>> _acceptors;

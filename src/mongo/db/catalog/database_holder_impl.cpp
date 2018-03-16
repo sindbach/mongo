@@ -42,6 +42,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/log.h"
@@ -183,6 +184,15 @@ Database* DatabaseHolderImpl::openDb(OperationContext* opCtx, StringData ns, boo
     return it->second;
 }
 
+namespace {
+void evictDatabaseFromUUIDCatalog(OperationContext* opCtx, Database* db) {
+    UUIDCatalog::get(opCtx).onCloseDatabase(db);
+    for (auto&& coll : *db) {
+        NamespaceUUIDCache::get(opCtx).evictNamespace(coll->ns());
+    }
+}
+}  // namespace
+
 void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns, const std::string& reason) {
     invariant(opCtx->lockState()->isW());
 
@@ -196,10 +206,8 @@ void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns, const std
     }
 
     auto db = it->second;
-    UUIDCatalog::get(opCtx).onCloseDatabase(db);
-    for (auto&& coll : *db) {
-        NamespaceUUIDCache::get(opCtx).evictNamespace(coll->ns());
-    }
+    repl::oplogCheckCloseDatabase(opCtx, db);
+    evictDatabaseFromUUIDCatalog(opCtx, db);
 
     db->close(opCtx, reason);
     delete db;
@@ -213,10 +221,7 @@ void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns, const std
         .transitional_ignore();
 }
 
-bool DatabaseHolderImpl::closeAll(OperationContext* opCtx,
-                                  BSONObjBuilder& result,
-                                  bool force,
-                                  const std::string& reason) {
+void DatabaseHolderImpl::closeAll(OperationContext* opCtx, const std::string& reason) {
     invariant(opCtx->lockState()->isW());
 
     stdx::lock_guard<SimpleMutex> lk(_m);
@@ -226,21 +231,16 @@ bool DatabaseHolderImpl::closeAll(OperationContext* opCtx,
         dbs.insert(i->first);
     }
 
-    BSONArrayBuilder bb(result.subarrayStart("dbs"));
-    int nNotClosed = 0;
     for (set<string>::iterator i = dbs.begin(); i != dbs.end(); ++i) {
         string name = *i;
 
         LOG(2) << "DatabaseHolder::closeAll name:" << name;
 
-        if (!force && BackgroundOperation::inProgForDb(name)) {
-            log() << "WARNING: can't close database " << name
-                  << " because a bg job is in progress - try killOp command";
-            nNotClosed++;
-            continue;
-        }
+        BackgroundOperation::assertNoBgOpInProgForDb(name);
 
         Database* db = _dbs[name];
+        repl::oplogCheckCloseDatabase(opCtx, db);
+        evictDatabaseFromUUIDCatalog(opCtx, db);
         db->close(opCtx, reason);
         delete db;
 
@@ -250,15 +250,6 @@ bool DatabaseHolderImpl::closeAll(OperationContext* opCtx,
             ->getGlobalStorageEngine()
             ->closeDatabase(opCtx, name)
             .transitional_ignore();
-
-        bb.append(name);
     }
-
-    bb.done();
-    if (nNotClosed) {
-        result.append("nNotClosed", nNotClosed);
-    }
-
-    return true;
 }
 }  // namespace mongo

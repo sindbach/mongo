@@ -1,0 +1,28 @@
+test_kind: js_test
+
+selector:
+  roots:
+  - jstests/concurrency/*.js
+  exclude_files:
+  # Skip the sharding tests because they're run in different suites.
+  - jstests/concurrency/fsm_all_sharded*.js
+
+executor:
+  archive:
+    hooks:
+      - ValidateCollections
+    tests: true
+  config:
+    shell_options:
+      readMode: commands
+  hooks:
+  - class: ValidateCollections
+    shell_options:
+      global_vars:
+        TestData:
+          skipValidationOnNamespaceNotFound: false
+  fixture:
+    class: MongoDFixture
+    mongod_options:
+      set_parameters:
+        enableTestCommands: 1

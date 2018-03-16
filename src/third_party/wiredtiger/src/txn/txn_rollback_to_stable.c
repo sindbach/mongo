@@ -22,13 +22,13 @@ __txn_rollback_to_stable_lookaside_fixup(WT_SESSION_IMPL *session)
 	WT_DECL_TIMESTAMP(rollback_timestamp)
 	WT_ITEM las_key, las_timestamp, las_value;
 	WT_TXN_GLOBAL *txn_global;
-	uint64_t las_counter, las_pageid, las_total, las_txnid;
+	uint64_t las_counter, las_pageid, las_total, las_txnid, remove_cnt;
 	uint32_t las_id, session_flags;
 	uint8_t upd_type;
 
 	conn = S2C(session);
 	cursor = NULL;
-	las_total = 0;
+	las_total = remove_cnt = 0;
 	session_flags = 0;		/* [-Werror=maybe-uninitialized] */
 	WT_CLEAR(las_timestamp);
 
@@ -49,6 +49,7 @@ __txn_rollback_to_stable_lookaside_fixup(WT_SESSION_IMPL *session)
 	F_SET(session, WT_SESSION_READ_WONT_NEED);
 
 	/* Walk the file. */
+	__wt_writelock(session, &conn->cache->las_sweepwalk_lock);
 	while ((ret = cursor->next(cursor)) == 0) {
 		WT_ERR(cursor->get_key(cursor,
 		    &las_pageid, &las_id, &las_counter, &las_key));
@@ -70,13 +71,18 @@ __txn_rollback_to_stable_lookaside_fixup(WT_SESSION_IMPL *session)
 		 * be removed.
 		 */
 		if (__wt_timestamp_cmp(
-		    &rollback_timestamp, las_timestamp.data) < 0)
+		    &rollback_timestamp, las_timestamp.data) < 0) {
 			WT_ERR(cursor->remove(cursor));
-		else
+			++remove_cnt;
+			WT_STAT_CONN_INCR(session, txn_rollback_las_removed);
+		} else
 			++las_total;
 	}
 	WT_ERR_NOTFOUND_OK(ret);
-err:	WT_TRET(__wt_las_cursor_close(session, &cursor, session_flags));
+err:	__wt_writeunlock(session, &conn->cache->las_sweepwalk_lock);
+	WT_TRET(__wt_las_cursor_close(session, &cursor, session_flags));
+	__wt_cache_decr_check_uint64(session,
+	    &conn->cache->las_entry_count, remove_cnt, "lookaside entry count");
 	WT_STAT_CONN_SET(session, cache_lookaside_entries, las_total);
 
 	F_CLR(session, WT_SESSION_READ_WONT_NEED);
@@ -106,6 +112,7 @@ __txn_abort_newer_update(WT_SESSION_IMPL *session,
 		if (__wt_timestamp_cmp(
 		    rollback_timestamp, &next_upd->timestamp) < 0) {
 			next_upd->txnid = WT_TXN_ABORTED;
+			WT_STAT_CONN_INCR(session, txn_rollback_upd_aborted);
 			__wt_timestamp_set_zero(&next_upd->timestamp);
 
 			/*
@@ -274,7 +281,7 @@ __txn_rollback_to_stable_btree_walk(
 		/* Review deleted page saved to the ref */
 		if (ref->page_del != NULL && __wt_timestamp_cmp(
 		    rollback_timestamp, &ref->page_del->timestamp) < 0)
-			__wt_delete_page_rollback(session, ref);
+			WT_RET(__wt_delete_page_rollback(session, ref));
 
 		if (!__wt_page_is_modified(ref->page))
 			continue;
@@ -420,12 +427,19 @@ __wt_txn_rollback_to_stable(WT_SESSION_IMPL *session, const char *cfg[])
 
 	conn = S2C(session);
 
+	WT_STAT_CONN_INCR(session, txn_rollback_to_stable);
 	/*
 	 * Mark that a rollback operation is in progress and wait for eviction
 	 * to drain.  This is necessary because lookaside eviction uses
 	 * transactions and causes the check for a quiescent system to fail.
+	 *
+	 * Configuring lookaside eviction off isn't atomic, safe because the
+	 * flag is only otherwise set when closing down the database. Assert
+	 * to avoid confusion in the future.
 	 */
+	WT_ASSERT(session, !F_ISSET(conn, WT_CONN_EVICTION_NO_LOOKASIDE));
 	F_SET(conn, WT_CONN_EVICTION_NO_LOOKASIDE);
+
 	WT_ERR(__wt_conn_btree_apply(session,
 	    NULL, __txn_rollback_eviction_drain, NULL, cfg));
 

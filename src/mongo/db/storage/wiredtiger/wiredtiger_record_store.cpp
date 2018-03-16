@@ -40,7 +40,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
-#include "mongo/db/mongod_options.h"
+#include "mongo/db/global_settings.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_settings.h"
@@ -78,7 +78,7 @@ MONGO_STATIC_ASSERT(kCurrentRecordStoreVersion <= kMaximumRecordStoreVersion);
 
 void checkOplogFormatVersion(OperationContext* opCtx, const std::string& uri) {
     StatusWith<BSONObj> appMetadata = WiredTigerUtil::getApplicationMetadata(opCtx, uri);
-    fassertStatusOK(39999, appMetadata);
+    fassert(39999, appMetadata);
 
     fassertNoTrace(39998, appMetadata.getValue().getIntField("oplogKeyExtractionVersion") == 1);
 }
@@ -657,7 +657,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
 
 WiredTigerRecordStore::~WiredTigerRecordStore() {
     {
-        stdx::lock_guard<stdx::timed_mutex> lk(_cappedDeleterMutex);
+        stdx::lock_guard<stdx::mutex> lk(_cappedCallbackMutex);
         _shuttingDown = true;
     }
 
@@ -725,7 +725,7 @@ const char* WiredTigerRecordStore::name() const {
 }
 
 bool WiredTigerRecordStore::inShutdown() const {
-    stdx::lock_guard<stdx::timed_mutex> lk(_cappedDeleterMutex);
+    stdx::lock_guard<stdx::mutex> lk(_cappedCallbackMutex);
     return _shuttingDown;
 }
 
@@ -1042,7 +1042,7 @@ bool WiredTigerRecordStore::yieldAndAwaitOplogDeletionRequest(OperationContext* 
     oplogStones->awaitHasExcessStonesOrDead();
 
     // Reacquire the locks that were released.
-    locker->restoreLockState(snapshot);
+    locker->restoreLockState(opCtx, snapshot);
 
     return !oplogStones->isDead();
 }
@@ -1152,7 +1152,7 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
         }
         if (!ts.isNull()) {
             LOG(4) << "inserting record with timestamp " << ts;
-            fassertStatusOK(39001, opCtx->recoveryUnit()->setTimestamp(ts));
+            fassert(39001, opCtx->recoveryUnit()->setTimestamp(ts));
         }
         setKey(c, record.id);
         WiredTigerItem value(record.data.data(), record.data.size());
@@ -1189,6 +1189,11 @@ bool WiredTigerRecordStore::isOpHidden_forTest(const RecordId& id) const {
     invariant(_kvEngine->getOplogManager()->isRunning());
     return _kvEngine->getOplogManager()->getOplogReadTimestamp() <
         static_cast<std::uint64_t>(id.repr());
+}
+
+bool WiredTigerRecordStore::haveCappedWaiters() {
+    stdx::lock_guard<stdx::mutex> cappedCallbackLock(_cappedCallbackMutex);
+    return _cappedCallback && _cappedCallback->haveCappedWaiters();
 }
 
 void WiredTigerRecordStore::notifyCappedWaitersIfNeeded() {

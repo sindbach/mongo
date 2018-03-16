@@ -31,7 +31,6 @@
 #include "mongo/base/static_assert.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/pipeline/value_internal.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -128,6 +127,8 @@ public:
     /// Deep-convert from BSONElement to Value
     explicit Value(const BSONElement& elem);
 
+    static constexpr StringData kISOFormatString = "%Y-%m-%dT%H:%M:%S.%LZ"_sd;
+
     /** Construct a long or integer-valued Value.
      *
      *  Used when preforming arithmetic operations with int where the
@@ -168,6 +169,12 @@ public:
      */
     bool integral() const;
 
+    /**
+     * Returns true if this value is a numeric type that can be represented as a 64-bit integer,
+     * and false otherwise.
+     */
+    bool integral64Bit() const;
+
     /// Get the BSON type of the field.
     BSONType getType() const {
         return _storage.bsonType();
@@ -180,6 +187,9 @@ public:
     Decimal128 getDecimal() const;
     double getDouble() const;
     std::string getString() const;
+    // May contain embedded NUL bytes, the returned StringData is just a view into the string still
+    // owned by this Value.
+    StringData getStringData() const;
     Document getDocument() const;
     OID getOid() const;
     bool getBool() const;
@@ -340,6 +350,16 @@ public:
     void serializeForIDL(BSONArrayBuilder* builder) const;
     static Value deserializeForIDL(const BSONElement& element);
 
+    /**
+     * Constant double representation of 2^63, the smallest value that will overflow a long long.
+     *
+     * It is not safe to obtain this value by casting std::numeric_limits<long long>::max() to
+     * double, because the conversion loses precision, and the C++ standard leaves it up to the
+     * implentation to decide whether to round up to 2^63 or round down to the next representable
+     * value (2^63 - 2^10).
+     */
+    static const double kLongLongMaxPlusOneAsDouble;
+
 private:
     /** This is a "honeypot" to prevent unexpected implicit conversions to the accepted argument
      *  types. bool is especially bad since without this it will accept any pointer.
@@ -351,8 +371,8 @@ private:
 
     explicit Value(const ValueStorage& storage) : _storage(storage) {}
 
-    // does no type checking
-    StringData getStringData() const;  // May contain embedded NUL bytes
+    // May contain embedded NUL bytes, does not check the type.
+    StringData getRawData() const;
 
     ValueStorage _storage;
     friend class MutableValue;  // gets and sets _storage.genericRCPtr
@@ -394,6 +414,11 @@ inline size_t Value::getArrayLength() const {
 }
 
 inline StringData Value::getStringData() const {
+    verify(getType() == String);
+    return getRawData();
+}
+
+inline StringData Value::getRawData() const {
     return _storage.getString();
 }
 
@@ -468,4 +493,4 @@ inline BSONBinData Value::getBinData() const {
     auto stringData = _storage.getString();
     return BSONBinData(stringData.rawData(), stringData.size(), _storage.binDataType());
 }
-};
+}  // namespace mongo

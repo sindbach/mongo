@@ -40,18 +40,18 @@ class CmdAuthenticate : public BasicCommand {
 public:
     static void disableAuthMechanism(std::string authMechanism);
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
-    virtual void help(std::stringstream& ss) const {
-        ss << "internal";
+    std::string help() const override {
+        return "internal";
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
 
     CmdAuthenticate() : BasicCommand("authenticate") {}
     bool run(OperationContext* opCtx,
@@ -76,7 +76,6 @@ private:
                          const std::string& mechanism,
                          const UserName& user,
                          const BSONObj& cmdObj);
-    Status _authenticateCR(OperationContext* opCtx, const UserName& user, const BSONObj& cmdObj);
     Status _authenticateX509(OperationContext* opCtx, const UserName& user, const BSONObj& cmdObj);
 };
 

@@ -36,16 +36,11 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/chunk_version.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
-
-class CachedCollectionRoutingInfo;
-class CachedDatabaseInfo;
-class OperationContext;
-class ShardId;
 
 /**
  * This function appends the provided writeConcernError BSONElement to the sharded response.
@@ -57,6 +52,16 @@ void appendWriteConcernErrorToCmdResponse(const ShardId& shardID,
  * Returns a copy of 'cmdObj' with 'version' appended.
  */
 BSONObj appendShardVersion(BSONObj cmdObj, ChunkVersion version);
+
+/**
+ * Returns a copy of 'cmdObj' with 'allowImplicitCollectionCreation' appended.
+ */
+BSONObj appendAllowImplicitCreate(BSONObj cmdObj, bool allow);
+
+/**
+ * Returns a copy of 'cmdObj' with atClusterTime appended to a readConcern.
+ */
+BSONObj appendAtClusterTime(BSONObj cmdObj, LogicalTime atClusterTime);
 
 /**
  * Utility for dispatching unversioned commands to all shards in a cluster.
@@ -73,8 +78,7 @@ BSONObj appendShardVersion(BSONObj cmdObj, ChunkVersion version);
  */
 std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShards(
     OperationContext* opCtx,
-    const std::string& dbName,
-    boost::optional<NamespaceString> nss,
+    StringData dbName,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy);
@@ -89,8 +93,8 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
  */
 std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRoutingTable(
     OperationContext* opCtx,
-    const std::string& dbName,
     const NamespaceString& nss,
+    const CachedCollectionRoutingInfo& routingInfo,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy,
@@ -110,7 +114,6 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
  */
 std::vector<AsyncRequestsSender::Response> scatterGatherOnlyVersionIfUnsharded(
     OperationContext* opCtx,
-    const std::string& dbName,
     const NamespaceString& nss,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
@@ -133,6 +136,19 @@ bool appendRawResponses(OperationContext* opCtx,
                         std::set<ErrorCodes::Error> ignoredErrors = {});
 
 /**
+ * Extracts the query from a query-embedding command ('query' or 'q' fields). If the command does
+ * not have an embedded query, returns an empty BSON object.
+ */
+BSONObj extractQuery(const BSONObj& cmdObj);
+
+/**
+ * Extracts the collation from a collation-embedding command ('collation' field). If the command
+ * does not specify a collation, returns an empty BSON object. If the 'collation' field is of wrong
+ * type, throws.
+ */
+BSONObj extractCollation(const BSONObj& cmdObj);
+
+/**
  * Utility function to compute a single error code from a vector of command results.
  *
  * @return If there is an error code common to all of the error results, returns that error
@@ -146,16 +162,15 @@ int getUniqueCodeFromCommandResults(const std::vector<Strategy::CommandResult>& 
 bool appendEmptyResultSet(BSONObjBuilder& result, Status status, const std::string& ns);
 
 /**
- * Abstracts the common pattern of refreshing a collection and checking if it is sharded used across
- * multiple commands.
- */
-CachedCollectionRoutingInfo getShardedCollection(OperationContext* opCtx,
-                                                 const NamespaceString& nss);
-
-/**
  * If the specified database exists already, loads it in the cache (if not already there) and
  * returns it. Otherwise, if it does not exist, this call will implicitly create it as non-sharded.
  */
 StatusWith<CachedDatabaseInfo> createShardDatabase(OperationContext* opCtx, StringData dbName);
+
+/**
+ *  Computes the cluster snapshot time for provided shards. Returns uninitialized LogicalTime if
+ *  the set is empty or every shard's lastCommittedOpTime is not initialized.
+ */
+LogicalTime computeAtClusterTime(OperationContext* opCtx, std::set<ShardId> shardIds);
 
 }  // namespace mongo

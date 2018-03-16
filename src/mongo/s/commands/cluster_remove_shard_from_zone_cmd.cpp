@@ -69,8 +69,8 @@ class RemoveShardFromZoneCmd : public BasicCommand {
 public:
     RemoveShardFromZoneCmd() : BasicCommand("removeShardFromZone", "removeshardfromzone") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -81,22 +81,20 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "removes a shard from the zone";
+    std::string help() const override {
+        return "removes a shard from the zone";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(ShardType::ConfigNS)),
-                ActionType::update)) {
+                ResourcePattern::forExactNamespace(ShardType::ConfigNS), ActionType::update)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(TagsType::ConfigNS)),
-                ActionType::find)) {
+                ResourcePattern::forExactNamespace(TagsType::ConfigNS), ActionType::find)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 

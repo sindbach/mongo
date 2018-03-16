@@ -41,12 +41,12 @@
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_last_error_info.h"
-#include "mongo/s/commands/chunk_manager_targeter.h"
 #include "mongo/s/commands/cluster_explain.h"
-#include "mongo/s/commands/cluster_write.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/s/write_ops/chunk_manager_targeter.h"
+#include "mongo/s/write_ops/cluster_write.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
 
@@ -139,15 +139,28 @@ class ClusterWriteCmd : public Command {
 public:
     virtual ~ClusterWriteCmd() {}
 
-    bool slaveOk() const final {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
+        return AllowedOnSecondary::kNever;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const final {
         return true;
     }
 
-    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) final {
+    LogicalOp getLogicalOp() const {
+        switch (_writeType) {
+            case BatchedCommandRequest::BatchType::BatchType_Insert:
+                return LogicalOp::opInsert;
+            case BatchedCommandRequest::BatchType::BatchType_Delete:
+                return LogicalOp::opDelete;
+            case BatchedCommandRequest::BatchType::BatchType_Update:
+                return LogicalOp::opUpdate;
+        }
+
+        MONGO_UNREACHABLE;
+    }
+
+    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) const final {
         Status status = auth::checkAuthForWriteCommand(
             AuthorizationSession::get(opCtx->getClient()), _writeType, request);
 
@@ -160,14 +173,9 @@ public:
     }
 
     Status explain(OperationContext* opCtx,
-                   const std::string& dbname,
-                   const BSONObj& cmdObj,
+                   const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    BSONObjBuilder* out) const final {
-        OpMsgRequest request;
-        request.body = cmdObj;
-        invariant(request.getDatabase() == dbname);  // Ensured by explain command's run() method.
-
         const auto batchedRequest(parseRequest(_writeType, request));
 
         // We can only explain write batches of size 1.
@@ -175,7 +183,7 @@ public:
             return Status(ErrorCodes::InvalidLength, "explained write batches must be of size 1");
         }
 
-        const auto explainCmd = ClusterExplain::wrapAsExplain(cmdObj, verbosity);
+        const auto explainCmd = ClusterExplain::wrapAsExplain(request.body, verbosity);
 
         // We will time how long it takes to run the commands on the shards.
         Timer timer;
@@ -183,8 +191,8 @@ public:
         // Target the command to the shards based on the singleton batch item.
         BatchItemRef targetingBatchItem(&batchedRequest, 0);
         std::vector<Strategy::CommandResult> shardResults;
-        Status status =
-            _commandOpWrite(opCtx, dbname, explainCmd, targetingBatchItem, &shardResults);
+        Status status = _commandOpWrite(
+            opCtx, request.getDatabase().toString(), explainCmd, targetingBatchItem, &shardResults);
         if (!status.isOK()) {
             return status;
         }
@@ -196,7 +204,12 @@ public:
     bool enhancedRun(OperationContext* opCtx,
                      const OpMsgRequest& request,
                      BSONObjBuilder& result) final {
-        const auto batchedRequest(parseRequest(_writeType, request));
+        auto batchedRequest(parseRequest(_writeType, request));
+
+        auto db = batchedRequest.getNS().db();
+        if (db != NamespaceString::kAdminDb && db != NamespaceString::kConfigDb) {
+            batchedRequest.setAllowImplicitCreate(false);
+        }
 
         BatchWriteExecStats stats;
         BatchedCommandResponse response;
@@ -336,8 +349,8 @@ class ClusterCmdInsert : public ClusterWriteCmd {
 public:
     ClusterCmdInsert() : ClusterWriteCmd("insert", BatchedCommandRequest::BatchType_Insert) {}
 
-    void help(std::stringstream& help) const {
-        help << "insert documents";
+    std::string help() const override {
+        return "insert documents";
     }
 
 } clusterInsertCmd;
@@ -346,8 +359,8 @@ class ClusterCmdUpdate : public ClusterWriteCmd {
 public:
     ClusterCmdUpdate() : ClusterWriteCmd("update", BatchedCommandRequest::BatchType_Update) {}
 
-    void help(std::stringstream& help) const {
-        help << "update documents";
+    std::string help() const override {
+        return "update documents";
     }
 
 } clusterUpdateCmd;
@@ -356,8 +369,8 @@ class ClusterCmdDelete : public ClusterWriteCmd {
 public:
     ClusterCmdDelete() : ClusterWriteCmd("delete", BatchedCommandRequest::BatchType_Delete) {}
 
-    void help(std::stringstream& help) const {
-        help << "delete documents";
+    std::string help() const override {
+        return "delete documents";
     }
 
 } clusterDeleteCmd;

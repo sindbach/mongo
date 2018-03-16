@@ -1,94 +1,56 @@
 // Tests that manipulating the featureCompatibilityVersion document in admin.system.version changes
 // the value of the featureCompatibilityVersion server parameter.
 
-// TODO: SERVER-32829 add 4.0 FCV test coverage.
-
 (function() {
     "use strict";
 
     load("jstests/libs/feature_compatibility_version.js");
-
-    // Skip collection validation since this test leaves collections in an invalid state, where
-    // FCV=3.4 but UUIDs exist.
-    TestData.skipCollectionAndIndexValidation = true;
-
-    /**
-     * Checks that the featureCompatibilityVersion document is missing, and the
-     * featureCompatibilityVersion server parameter is "3.4".
-     */
-    let checkFCVDocumentMissing = function(adminDB) {
-        assert.eq(null, adminDB.system.version.findOne({_id: "featureCompatibilityVersion"}));
-    };
 
     const conn = MongoRunner.runMongod({});
     assert.neq(null, conn, "mongod was unable to start up");
 
     let adminDB = conn.getDB("admin");
 
-    // Initially the featureCompatibilityVersion is 3.6.
-    checkFCV(adminDB, "3.6");
+    // Initially the featureCompatibilityVersion is latestFCV.
+    checkFCV(adminDB, latestFCV);
 
     // Updating the featureCompatibilityVersion document changes the featureCompatibilityVersion
     // server parameter.
     assert.writeOK(adminDB.system.version.update({_id: "featureCompatibilityVersion"},
-                                                 {$set: {version: "3.4"}}));
-    checkFCV(adminDB, "3.4");
-
-    assert.writeOK(adminDB.system.version.update({_id: "featureCompatibilityVersion"},
-                                                 {$set: {version: "3.4", targetVersion: "3.6"}}));
-    checkFCV(adminDB, "3.4", "3.6");
-
-    assert.writeOK(adminDB.system.version.update({_id: "featureCompatibilityVersion"},
-                                                 {$set: {version: "3.4", targetVersion: "3.4"}}));
-    checkFCV(adminDB, "3.4", "3.4");
+                                                 {$set: {version: lastStableFCV}}));
+    checkFCV(adminDB, lastStableFCV);
 
     assert.writeOK(
         adminDB.system.version.update({_id: "featureCompatibilityVersion"},
-                                      {$set: {version: "3.6"}, $unset: {targetVersion: true}}));
-    checkFCV(adminDB, "3.6");
+                                      {$set: {version: lastStableFCV, targetVersion: latestFCV}}));
+    checkFCV(adminDB, lastStableFCV, latestFCV);
+
+    assert.writeOK(adminDB.system.version.update(
+        {_id: "featureCompatibilityVersion"},
+        {$set: {version: lastStableFCV, targetVersion: lastStableFCV}}));
+    checkFCV(adminDB, lastStableFCV, lastStableFCV);
+
+    assert.writeOK(
+        adminDB.system.version.update({_id: "featureCompatibilityVersion"},
+                                      {$set: {version: latestFCV}, $unset: {targetVersion: true}}));
+    checkFCV(adminDB, latestFCV);
 
     // Updating the featureCompatibilityVersion document with an invalid version fails.
     assert.writeErrorWithCode(adminDB.system.version.update({_id: "featureCompatibilityVersion"},
                                                             {$set: {version: "3.2"}}),
                               ErrorCodes.BadValue);
-    checkFCV(adminDB, "3.6");
+    checkFCV(adminDB, latestFCV);
 
     // Updating the featureCompatibilityVersion document with an invalid targetVersion fails.
     assert.writeErrorWithCode(adminDB.system.version.update({_id: "featureCompatibilityVersion"},
-                                                            {$set: {targetVersion: "3.4"}}),
+                                                            {$set: {targetVersion: lastStableFCV}}),
                               ErrorCodes.BadValue);
-    checkFCV(adminDB, "3.6");
+    checkFCV(adminDB, latestFCV);
 
-    // Deleting the featureCompatibilityVersion document changes the featureCompatibilityVersion
-    // server parameter to 3.4.
-    removeFCVDocument(adminDB);
-    checkFCVDocumentMissing(adminDB);
-
-    // Inserting a featureCompatibilityVersion document with an invalid version fails.
-    assert.writeErrorWithCode(
-        adminDB.system.version.insert({_id: "featureCompatibilityVersion", version: "3.2"}),
-        ErrorCodes.BadValue);
-    checkFCVDocumentMissing(adminDB);
-
-    assert.writeErrorWithCode(
-        adminDB.system.version.insert({_id: "featureCompatibilityVersion", version: "3.8"}),
-        ErrorCodes.BadValue);
-    checkFCVDocumentMissing(adminDB);
-
-    // Inserting a featureCompatibilityVersion document with an invalid targetVersion fails.
-    assert.writeErrorWithCode(
-        adminDB.system.version.insert(
-            {_id: "featureCompatibilityVersion", version: "3.6", targetVersion: "3.4"}),
-        ErrorCodes.BadValue);
-    checkFCVDocumentMissing(adminDB);
-
-    assert.writeOK(
-        adminDB.system.version.insert({_id: "featureCompatibilityVersion", version: "3.6"}));
-    checkFCV(adminDB, "3.6");
-
-    // Dropping the admin database changes the featureCompatibilityVersion server parameter to 3.4.
-    adminDB.dropDatabase();
-    checkFCVDocumentMissing(adminDB);
+    assert.writeErrorWithCode(adminDB.system.version.update({_id: "featureCompatibilityVersion"},
+                                                            {$set: {targetVersion: latestFCV}}),
+                              ErrorCodes.BadValue);
+    checkFCV(adminDB, latestFCV);
 
     MongoRunner.stopMongod(conn);
 }());

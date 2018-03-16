@@ -29,12 +29,15 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/mock_repl_coord_server_fixture.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session_catalog.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -65,18 +68,24 @@ TEST_F(SessionCatalogTest, CheckoutAndReleaseSession) {
     ASSERT_EQ(*opCtx()->getLogicalSessionId(), scopedSession->getSessionId());
 }
 
-TEST_F(SessionCatalogTest, OperationContextSession) {
+TEST_F(SessionCatalogTest, OperationContextCheckedOutSession) {
+    opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
+    const TxnNumber txnNum = 20;
+    opCtx()->setTxnNumber(txnNum);
+
+    OperationContextSession ocs(opCtx(), true, boost::none);
+    auto session = OperationContextSession::get(opCtx());
+    ASSERT(session);
+    ASSERT_EQ(*opCtx()->getLogicalSessionId(), session->getSessionId());
+}
+
+TEST_F(SessionCatalogTest, OperationContextNonCheckedOutSession) {
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
 
-    {
-        OperationContextSession ocs(opCtx(), true);
-        auto session = OperationContextSession::get(opCtx());
+    OperationContextSession ocs(opCtx(), false, boost::none);
+    auto session = OperationContextSession::get(opCtx());
 
-        ASSERT(session);
-        ASSERT_EQ(*opCtx()->getLogicalSessionId(), session->getSessionId());
-    }
-
-    ASSERT(!OperationContextSession::get(opCtx()));
+    ASSERT(!session);
 }
 
 TEST_F(SessionCatalogTest, GetOrCreateNonExistentSession) {
@@ -92,7 +101,7 @@ TEST_F(SessionCatalogTest, GetOrCreateSessionAfterCheckOutSession) {
     opCtx()->setLogicalSessionId(lsid);
 
     boost::optional<OperationContextSession> ocs;
-    ocs.emplace(opCtx(), true);
+    ocs.emplace(opCtx(), true, boost::none);
 
     stdx::async(stdx::launch::async, [&] {
         Client::initThreadIfNotAlready();
@@ -121,10 +130,10 @@ TEST_F(SessionCatalogTest, NestedOperationContextSession) {
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
 
     {
-        OperationContextSession outerScopedSession(opCtx(), true);
+        OperationContextSession outerScopedSession(opCtx(), true, boost::none);
 
         {
-            OperationContextSession innerScopedSession(opCtx(), true);
+            OperationContextSession innerScopedSession(opCtx(), true, boost::none);
 
             auto session = OperationContextSession::get(opCtx());
             ASSERT(session);
@@ -141,18 +150,60 @@ TEST_F(SessionCatalogTest, NestedOperationContextSession) {
     ASSERT(!OperationContextSession::get(opCtx()));
 }
 
-TEST_F(SessionCatalogTest, OnlyCheckOutSessionWithCheckOutSessionTrue) {
+TEST_F(SessionCatalogTest, CannotAccessTopLevelSessionInNestedOnes) {
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
+    opCtx()->setTxnNumber(1);
 
     {
-        OperationContextSession ocs(opCtx(), true);
-        ASSERT(OperationContextSession::get(opCtx()));
+        OperationContextSession outerScopedSession(opCtx(), true, boost::none);
+
+        auto* session = outerScopedSession.get(opCtx(), true);
+        ASSERT(session);
+        {
+            OperationContextSession innerScopedSession(opCtx(), true, boost::none);
+
+            // Cannot get the top level session since we're a nested one.
+            const bool topLevelOnly = true;
+            auto* innerSession = OperationContextSession::get(opCtx(), topLevelOnly);
+            ASSERT(!innerSession);
+        }
+    }
+}
+
+TEST_F(SessionCatalogTest, ScanSessions) {
+    std::vector<LogicalSessionId> lsids;
+    auto workerFn = [&](OperationContext* opCtx, Session* session) {
+        lsids.push_back(session->getSessionId());
+    };
+
+    // Scan over zero Sessions.
+    SessionKiller::Matcher matcherAllSessions(
+        KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx())});
+    catalog()->scanSessions(opCtx(), matcherAllSessions, workerFn);
+    ASSERT(lsids.empty());
+
+    // Create three sessions in the catalog.
+    auto lsid1 = makeLogicalSessionIdForTest();
+    auto lsid2 = makeLogicalSessionIdForTest();
+    auto lsid3 = makeLogicalSessionIdForTest();
+    {
+        auto scopedSession1 = catalog()->getOrCreateSession(opCtx(), lsid1);
+        auto scopedSession2 = catalog()->getOrCreateSession(opCtx(), lsid2);
+        auto scopedSession3 = catalog()->getOrCreateSession(opCtx(), lsid3);
     }
 
-    {
-        OperationContextSession ocs(opCtx(), false);
-        ASSERT(!OperationContextSession::get(opCtx()));
-    }
+    // Scan over all Sessions.
+    lsids.clear();
+    catalog()->scanSessions(opCtx(), matcherAllSessions, workerFn);
+    ASSERT_EQ(lsids.size(), 3U);
+
+    // Scan over all Sessions, visiting a particular Session.
+    SessionKiller::Matcher matcherLSID2(
+        KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx(), lsid2)});
+    lsids.clear();
+    catalog()->scanSessions(opCtx(), matcherLSID2, workerFn);
+    ASSERT_EQ(lsids.size(), 1U);
+    ASSERT_EQ(lsids.front(), lsid2);
 }
 
 }  // namespace

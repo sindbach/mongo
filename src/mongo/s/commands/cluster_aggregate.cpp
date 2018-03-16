@@ -40,6 +40,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/pipeline/document_source_merge_cursors.h"
 #include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
@@ -52,7 +53,6 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/commands/cluster_commands_helpers.h"
 #include "mongo/s/commands/pipeline_s.h"
@@ -230,7 +230,8 @@ BSONObj createCommandForTargetedShards(
         targetedCmd.reset(wrapAggAsExplain(targetedCmd.freeze(), *explainVerbosity));
     }
 
-    return targetedCmd.freeze().toBson();
+    // agg creates temp collection and should handle implicit create separately.
+    return appendAllowImplicitCreate(targetedCmd.freeze().toBson(), true);
 }
 
 BSONObj createCommandForMergingShard(
@@ -252,7 +253,8 @@ BSONObj createCommandForMergingShard(
             : Value(Document{CollationSpec::kSimpleSpec});
     }
 
-    return mergeCmd.freeze().toBson();
+    // agg creates temp collection and should handle implicit create separately.
+    return appendAllowImplicitCreate(mergeCmd.freeze().toBson(), true);
 }
 
 std::vector<ClusterClientCursorParams::RemoteCursor> establishShardCursors(
@@ -444,8 +446,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
                     // should not participate in the shard version protocol.
                     shardResults =
                         scatterGatherUnversionedTargetAllShards(opCtx,
-                                                                executionNss.db().toString(),
-                                                                executionNss,
+                                                                executionNss.db(),
                                                                 targetedCommand,
                                                                 ReadPreferenceSetting::get(opCtx),
                                                                 Shard::RetryPolicy::kIdempotent);
@@ -454,8 +455,8 @@ DispatchShardPipelineResults dispatchShardPipeline(
                     // shards, and should participate in the shard version protocol.
                     shardResults = scatterGatherVersionedTargetByRoutingTable(
                         opCtx,
-                        executionNss.db().toString(),
                         executionNss,
+                        executionNsRoutingInfo,
                         targetedCommand,
                         ReadPreferenceSetting::get(opCtx),
                         Shard::RetryPolicy::kIdempotent,
@@ -489,27 +490,19 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                         targetedCommand};
 }
 
-std::pair<ShardId, Shard::CommandResponse> establishMergingShardCursor(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    const std::vector<ClusterClientCursorParams::RemoteCursor>& cursors,
-    const BSONObj mergeCmdObj,
-    const boost::optional<ShardId> primaryShard) {
-    // Run merging command on random shard, unless we need to run on the primary shard.
-    auto& prng = opCtx->getClient()->getPrng();
-    const auto mergingShardId =
-        primaryShard ? primaryShard.get() : cursors[prng.nextInt32(cursors.size())].shardId;
+Shard::CommandResponse establishMergingShardCursor(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   const BSONObj mergeCmdObj,
+                                                   const ShardId& mergingShardId) {
     const auto mergingShard =
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, mergingShardId));
 
-    auto shardCmdResponse = uassertStatusOK(
+    return uassertStatusOK(
         mergingShard->runCommandWithFixedRetryAttempts(opCtx,
                                                        ReadPreferenceSetting::get(opCtx),
                                                        nss.db().toString(),
                                                        mergeCmdObj,
                                                        Shard::RetryPolicy::kIdempotent));
-
-    return {std::move(mergingShardId), std::move(shardCmdResponse)};
 }
 
 BSONObj establishMergingMongosCursor(OperationContext* opCtx,
@@ -520,10 +513,7 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
                                      std::unique_ptr<Pipeline, PipelineDeleter> pipelineForMerging,
                                      std::vector<ClusterClientCursorParams::RemoteCursor> cursors) {
 
-    ClusterClientCursorParams params(
-        requestedNss,
-        AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
-        ReadPreferenceSetting::get(opCtx));
+    ClusterClientCursorParams params(requestedNss, ReadPreferenceSetting::get(opCtx));
 
     params.tailableMode = pipelineForMerging->getContext()->tailableMode;
     params.mergePipeline = std::move(pipelineForMerging);
@@ -595,12 +585,14 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
     CursorId clusterCursorId = 0;
 
     if (cursorState == ClusterCursorManager::CursorState::NotExhausted) {
+        auto authUsers = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames();
         clusterCursorId = uassertStatusOK(Grid::get(opCtx)->getCursorManager()->registerCursor(
             opCtx,
             ccc.releaseCursor(),
             requestedNss,
             ClusterCursorManager::CursorType::MultiTarget,
-            ClusterCursorManager::CursorLifetime::Mortal));
+            ClusterCursorManager::CursorLifetime::Mortal,
+            authUsers));
     }
 
     responseBuilder.done(clusterCursorId, requestedNss.ns());
@@ -637,6 +629,19 @@ BSONObj getDefaultCollationForUnshardedCollection(const Shard* primaryShard,
     return defaultCollation;
 }
 
+ShardId pickMergingShard(OperationContext* opCtx,
+                         const DispatchShardPipelineResults& dispatchResults,
+                         ShardId primaryShard) {
+    auto& prng = opCtx->getClient()->getPrng();
+    // If we cannot merge on mongoS, establish the merge cursor on a shard. Perform the merging
+    // command on random shard, unless the pipeline dictates that it needs to be run on the primary
+    // shard for the database.
+    return dispatchResults.needsPrimaryShardMerge
+        ? primaryShard
+        : dispatchResults.remoteCursors[prng.nextInt32(dispatchResults.remoteCursors.size())]
+              .shardId;
+}
+
 }  // namespace
 
 Status ClusterAggregate::runAggregate(OperationContext* opCtx,
@@ -644,6 +649,12 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                       const AggregationRequest& request,
                                       BSONObj cmdObj,
                                       BSONObjBuilder* result) {
+    // TODO SERVER-33683 allowing an aggregation within a transaction can lead to a deadlock in the
+    // SessionCatalog when a pipeline with a $mergeCursors sends a getMore to itself.
+    uassert(50732,
+            "Cannot specify a transaction number in combination with an aggregation on mongos",
+            !opCtx->getTxnNumber());
+
     const auto catalogCache = Grid::get(opCtx)->catalogCache();
 
     auto executionNsRoutingInfoStatus =
@@ -814,47 +825,30 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         return getStatusFromCommandResult(result->asTempObj());
     }
 
-    // If we cannot merge on mongoS, establish the merge cursor on a shard.
-    mergingPipeline->addInitialSource(
-        DocumentSourceMergeCursors::create(parseCursors(dispatchResults.remoteCursors), mergeCtx));
+    ShardId mergingShardId =
+        pickMergingShard(opCtx, dispatchResults, executionNsRoutingInfo.primaryId());
+
+    mergingPipeline->addInitialSource(DocumentSourceMergeCursors::create(
+        std::move(dispatchResults.remoteCursors),
+        Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
+        mergeCtx));
     auto mergeCmdObj = createCommandForMergingShard(request, mergeCtx, cmdObj, mergingPipeline);
 
     auto mergeResponse =
-        establishMergingShardCursor(opCtx,
-                                    namespaces.executionNss,
-                                    dispatchResults.remoteCursors,
-                                    mergeCmdObj,
-                                    boost::optional<ShardId>{dispatchResults.needsPrimaryShardMerge,
-                                                             executionNsRoutingInfo.primaryId()});
-
-    auto mergingShardId = mergeResponse.first;
-    auto response = mergeResponse.second;
+        establishMergingShardCursor(opCtx, namespaces.executionNss, mergeCmdObj, mergingShardId);
 
     // The merging shard is remote, so if a response was received, a HostAndPort must have been set.
-    invariant(response.hostAndPort);
+    invariant(mergeResponse.hostAndPort);
     auto mergeCursorResponse = uassertStatusOK(
         storePossibleCursor(opCtx,
                             mergingShardId,
-                            *response.hostAndPort,
-                            response.response,
+                            *mergeResponse.hostAndPort,
+                            mergeResponse.response,
                             namespaces.requestedNss,
                             Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
                             Grid::get(opCtx)->getCursorManager()));
 
     return appendCursorResponseToCommandResult(mergingShardId, mergeCursorResponse, result);
-}
-
-std::vector<DocumentSourceMergeCursors::CursorDescriptor> ClusterAggregate::parseCursors(
-    const std::vector<ClusterClientCursorParams::RemoteCursor>& responses) {
-    std::vector<DocumentSourceMergeCursors::CursorDescriptor> cursors;
-    for (const auto& response : responses) {
-        invariant(0 != response.cursorResponse.getCursorId());
-        invariant(response.cursorResponse.getBatch().empty());
-        cursors.emplace_back(ConnectionString(response.hostAndPort),
-                             response.cursorResponse.getNSS().toString(),
-                             response.cursorResponse.getCursorId());
-    }
-    return cursors;
 }
 
 void ClusterAggregate::uassertAllShardsSupportExplain(

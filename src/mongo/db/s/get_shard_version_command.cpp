@@ -35,11 +35,12 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/s/grid.h"
 #include "mongo/util/log.h"
 #include "mongo/util/stringutils.h"
 
@@ -50,16 +51,16 @@ class GetShardVersion : public BasicCommand {
 public:
     GetShardVersion() : BasicCommand("getShardVersion") {}
 
-    void help(std::stringstream& help) const override {
-        help << " example: { getShardVersion : 'alleyinsider.foo'  } ";
+    std::string help() const override {
+        return " example: { getShardVersion : 'alleyinsider.foo'  } ";
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -68,7 +69,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
                 ActionType::getShardVersion)) {
@@ -89,15 +90,18 @@ public:
 
         ShardingState* const shardingState = ShardingState::get(opCtx);
         if (shardingState->enabled()) {
-            result.append("configServer", shardingState->getConfigServer(opCtx).toString());
+            result.append(
+                "configServer",
+                Grid::get(opCtx)->shardRegistry()->getConfigServerConnectionString().toString());
         } else {
             result.append("configServer", "");
         }
 
         ShardedConnectionInfo* const sci = ShardedConnectionInfo::get(opCtx->getClient(), false);
         result.appendBool("inShardedMode", sci != nullptr);
-        if (sci) {
-            result.appendTimestamp("mine", sci->getVersion(nss.ns()).toLong());
+
+        if (sci && sci->getVersion(nss.ns())) {
+            result.appendTimestamp("mine", sci->getVersion(nss.ns())->toLong());
         } else {
             result.appendTimestamp("mine", 0);
         }

@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 
 namespace mongo {
@@ -58,7 +57,7 @@ public:
 
     StatusWith<repl::OpTimeWith<CollectionType>> getCollection(
         OperationContext* opCtx,
-        const std::string& collNs,
+        const NamespaceString& nss,
         repl::ReadConcernLevel readConcernLevel) override;
 
     StatusWith<std::vector<CollectionType>> getCollections(
@@ -66,6 +65,9 @@ public:
         const std::string* dbName,
         repl::OpTime* optime,
         repl::ReadConcernLevel readConcernLevel) override;
+
+    std::vector<NamespaceString> getAllShardedCollectionsForDb(
+        OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) override;
 
     StatusWith<std::vector<std::string>> getDatabasesForShard(OperationContext* opCtx,
                                                               const ShardId& shardName) override;
@@ -77,8 +79,8 @@ public:
                                                  repl::OpTime* opTime,
                                                  repl::ReadConcernLevel readConcern) override;
 
-    StatusWith<std::vector<TagsType>> getTagsForCollection(
-        OperationContext* opCtx, const std::string& collectionNs) override;
+    StatusWith<std::vector<TagsType>> getTagsForCollection(OperationContext* opCtx,
+                                                           const NamespaceString& nss) override;
 
     StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
         OperationContext* opCtx, repl::ReadConcernLevel readConcern) override;
@@ -97,7 +99,7 @@ public:
     Status applyChunkOpsDeprecated(OperationContext* opCtx,
                                    const BSONArray& updateOps,
                                    const BSONArray& preCondition,
-                                   const std::string& nss,
+                                   const NamespaceString& nss,
                                    const ChunkVersion& lastChunkVersion,
                                    const WriteConcernOptions& writeConcern,
                                    repl::ReadConcernLevel readConcern) override;
@@ -123,19 +125,19 @@ public:
                                  BatchedCommandResponse* response) override;
 
     Status insertConfigDocument(OperationContext* opCtx,
-                                const std::string& ns,
+                                const NamespaceString& nss,
                                 const BSONObj& doc,
                                 const WriteConcernOptions& writeConcern) override;
 
     StatusWith<bool> updateConfigDocument(OperationContext* opCtx,
-                                          const std::string& ns,
+                                          const NamespaceString& nss,
                                           const BSONObj& query,
                                           const BSONObj& update,
                                           bool upsert,
                                           const WriteConcernOptions& writeConcern) override;
 
     Status removeConfigDocuments(OperationContext* opCtx,
-                                 const std::string& ns,
+                                 const NamespaceString& nss,
                                  const BSONObj& query,
                                  const WriteConcernOptions& writeConcern) override;
 

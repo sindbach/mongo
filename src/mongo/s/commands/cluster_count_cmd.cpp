@@ -51,8 +51,8 @@ class ClusterCountCmd : public ErrmsgCommandDeprecated {
 public:
     ClusterCountCmd() : ErrmsgCommandDeprecated("count") {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -65,7 +65,7 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
@@ -142,10 +142,12 @@ public:
 
         std::vector<AsyncRequestsSender::Response> shardResponses;
         try {
+            const auto routingInfo = uassertStatusOK(
+                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
             shardResponses =
                 scatterGatherVersionedTargetByRoutingTable(opCtx,
-                                                           dbname,
                                                            nss,
+                                                           routingInfo,
                                                            countCmdObj,
                                                            ReadPreferenceSetting::get(opCtx),
                                                            Shard::RetryPolicy::kIdempotent,
@@ -218,10 +220,11 @@ public:
     }
 
     Status explain(OperationContext* opCtx,
-                   const std::string& dbname,
-                   const BSONObj& cmdObj,
+                   const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    BSONObjBuilder* out) const override {
+        std::string dbname = request.getDatabase().toString();
+        const BSONObj& cmdObj = request.body;
         const NamespaceString nss(parseNs(dbname, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
@@ -251,10 +254,12 @@ public:
 
         std::vector<AsyncRequestsSender::Response> shardResponses;
         try {
+            const auto routingInfo = uassertStatusOK(
+                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
             shardResponses =
                 scatterGatherVersionedTargetByRoutingTable(opCtx,
-                                                           dbname,
                                                            nss,
+                                                           routingInfo,
                                                            explainCmd,
                                                            ReadPreferenceSetting::get(opCtx),
                                                            Shard::RetryPolicy::kIdempotent,

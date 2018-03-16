@@ -10,7 +10,7 @@ conn.getDB('admin').createUser({user: "root", pwd: "pass", roles: ["root"]});
 conn.getDB('admin').auth("root", "pass");
 var cmdOut = conn.getDB('admin').runCommand({getParameter: 1, authenticationMechanisms: 1});
 if (cmdOut.ok) {
-    TestData.authMechanism = "MONGODB-X509";  // SERVER-10353
+    TestData.authMechanism = "MONGODB-X509,SCRAM-SHA-1";  // SERVER-10353
 }
 conn.getDB('admin').dropAllUsers();
 conn.getDB('admin').logout();
@@ -92,6 +92,7 @@ MongoRunner.stopMongod(mongo);
 
 print("2. Testing x.509 auth to mongos");
 
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 var st = new ShardingTest({
     shards: 1,
     mongos: 1,
@@ -101,7 +102,9 @@ var st = new ShardingTest({
         mongosOptions: x509_options,
         shardOptions: x509_options,
         useHostname: false,
+        shardAsReplicaSet: false
     }
 });
 
 authAndTest(new Mongo("localhost:" + st.s0.port));
+st.stop();

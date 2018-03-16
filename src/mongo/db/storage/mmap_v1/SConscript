@@ -53,6 +53,7 @@ env.Library(
     LIBDEPS = [
         'record_store_v1',
         'record_access_tracker',
+        'repair_database_interface',
         'btree',
         'file_allocator',
         'logfile',
@@ -75,6 +76,15 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
         '$BUILD_DIR/mongo/db/index/index_access_methods',
         '$BUILD_DIR/mongo/db/write_ops',
+    ],
+)
+
+env.Library(
+    target = 'repair_database_interface',
+    source = [ 
+        "repair_database_interface.cpp",
+    ],
+    LIBDEPS = [
     ],
 )
 
@@ -207,6 +217,7 @@ if mmapv1:
         LIBDEPS=[
             '$BUILD_DIR/mongo/db/serveronly',
             '$BUILD_DIR/mongo/db/service_context',
+            '$BUILD_DIR/mongo/db/service_context_d',
             '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
             '$BUILD_DIR/mongo/db/storage/storage_options',
             ],
@@ -228,7 +239,6 @@ if mmapv1:
         source=['record_store_v1_simple_test.cpp',
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/util/decorable',
             'record_store_v1_test_help'
             ]
         )
@@ -238,7 +248,6 @@ if mmapv1:
         source=['record_store_v1_capped_test.cpp',
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/util/decorable',
             'record_store_v1_test_help'
             ]
         )
@@ -271,7 +280,6 @@ if mmapv1:
         source=['btree/btree_logic_test.cpp'
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/util/decorable',
             'btree_test_help'
             ]
         )

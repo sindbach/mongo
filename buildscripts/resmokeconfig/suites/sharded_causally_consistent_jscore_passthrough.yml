@@ -10,6 +10,7 @@ selector:
   # mongos. This command or functionality is placed in a comment next to the failing test.
   - jstests/core/apitest_db.js  # profiling.
   - jstests/core/apply_ops*.js  # applyOps, SERVER-1439.
+  - jstests/core/awaitdata_getmore_cmd.js  # capped collections.
   - jstests/core/bypass_doc_validation.js  # copyDatabase
   - jstests/core/capped*.js  # capped collections.
   - jstests/core/check_shard_index.js  # checkShardingIndex.
@@ -50,6 +51,7 @@ selector:
   # The following tests fail because mongos behaves differently from mongod when testing certain
   # functionality. The differences are in a comment next to the failing test.
   - jstests/core/explain_missing_database.js  # Behavior with no db different on mongos, SERVER-18047.
+  - jstests/core/cannot_create_system_dot_indexes.js  # Insertion into system.indexes, SERVER-33890.
   - jstests/core/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/geo_s2sparse.js  # keysPerIndex in different spot in validate().
@@ -194,6 +196,10 @@ selector:
   - cannot_create_unique_index_when_using_hashed_shard_key
 
 executor:
+  archive:
+    hooks:
+      - CheckReplDBHash
+      - ValidateCollections
   config:
     shell_options:
       eval: |

@@ -28,6 +28,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/auth/sasl_mechanism_registry.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/logical_session_id.h"
@@ -53,18 +54,22 @@ public:
         return false;
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "test if this is master half of a replica pair";
+    std::string help() const override {
+        return "test if this is master half of a replica pair";
     }
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         // No auth required
+    }
+
+    bool requiresAuth() const override {
+        return false;
     }
 
     bool run(OperationContext* opCtx,
@@ -127,6 +132,9 @@ public:
 
         MessageCompressorManager::forSession(opCtx->getClient()->session())
             .serverNegotiate(cmdObj, &result);
+
+        auto& saslMechanismRegistry = SASLServerMechanismRegistry::get(opCtx->getServiceContext());
+        saslMechanismRegistry.advertiseMechanismNamesForUser(opCtx, cmdObj, &result);
 
         return true;
     }

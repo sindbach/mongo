@@ -4,62 +4,15 @@ Parser for command line arguments.
 
 from __future__ import absolute_import
 
-import collections
 import os
 import os.path
+
+import datetime
 import optparse
 
 from . import config as _config
-from . import errors
-from . import testing
 from . import utils
 from .. import resmokeconfig
-
-
-# Mapping of the attribute of the parsed arguments (dest) to its key as it appears in the options
-# YAML configuration file. Most should only be converting from snake_case to camelCase.
-DEST_TO_CONFIG = {
-    "base_port": "basePort",
-    "buildlogger_url": "buildloggerUrl",
-    "continue_on_failure": "continueOnFailure",
-    "dbpath_prefix": "dbpathPrefix",
-    "dbtest_executable": "dbtest",
-    "distro_id": "distroId",
-    "dry_run": "dryRun",
-    "exclude_with_any_tags": "excludeWithAnyTags",
-    "include_with_any_tags": "includeWithAnyTags",
-    "jobs": "jobs",
-    "mongo_executable": "mongo",
-    "mongod_executable": "mongod",
-    "mongod_parameters": "mongodSetParameters",
-    "mongos_executable": "mongos",
-    "mongos_parameters": "mongosSetParameters",
-    "no_journal": "nojournal",
-    "num_clients_per_fixture": "numClientsPerFixture",
-    "patch_build": "patchBuild",
-    "prealloc_journal": "preallocJournal",
-    "repeat": "repeat",
-    "report_failure_status": "reportFailureStatus",
-    "report_file": "reportFile",
-    "seed": "seed",
-    "service_executor": "serviceExecutor",
-    "shell_conn_string": "shellConnString",
-    "shell_port": "shellPort",
-    "shell_read_mode": "shellReadMode",
-    "shell_write_mode": "shellWriteMode",
-    "shuffle": "shuffle",
-    "stagger_jobs": "staggerJobs",
-    "storage_engine": "storageEngine",
-    "storage_engine_cache_size": "storageEngineCacheSizeGB",
-    "tag_file": "tagFile",
-    "task_id": "taskId",
-    "task_name": "taskName",
-    "transport_layer": "transportLayer",
-    "variant_name": "variantName",
-    "wt_coll_config": "wiredTigerCollectionConfigString",
-    "wt_engine_config": "wiredTigerEngineConfigString",
-    "wt_index_config": "wiredTigerIndexConfigString"
-}
 
 
 def parse_command_line():
@@ -82,8 +35,22 @@ def parse_command_line():
                             " located in the resmokeconfig/suites/ directory, then the basename"
                             " without the .yml extension can be specified, e.g. 'console'."))
 
-    parser.add_option("--options", dest="options_file", metavar="OPTIONS",
-                      help="A YAML file that specifies global options to resmoke.py.")
+    parser.add_option("--archiveFile", dest="archive_file", metavar="ARCHIVE_FILE",
+                      help=("Sets the archive file name for the Evergreen task running the tests."
+                            " The archive file is JSON format containing a list of tests that were"
+                            " successfully archived to S3. If unspecified, no data files from tests"
+                            " will be archived in S3. Tests can be designated for archival in the"
+                            " task suite configuration file."))
+
+    parser.add_option("--archiveLimitMb", type="int", dest="archive_limit_mb",
+                      metavar="ARCHIVE_LIMIT_MB",
+                      help=("Sets the limit (in MB) for archived files to S3. A value of 0"
+                            " indicates there is no limit."))
+
+    parser.add_option("--archiveLimitTests", type="int", dest="archive_limit_tests",
+                      metavar="ARCHIVE_LIMIT_TESTS",
+                      help=("Sets the maximum number of tests to archive to S3. A value"
+                            " of 0 indicates there is no limit."))
 
     parser.add_option("--basePort", dest="base_port", metavar="PORT",
                       help=("The starting port number to use for mongod and mongos processes"
@@ -109,7 +76,7 @@ def parse_command_line():
                             " specified tags will be excluded from any suites that are run."))
 
     parser.add_option("-f", "--findSuites", action="store_true", dest="find_suites",
-                      help="List the names of the suites that will execute the specified tests.")
+                      help="Lists the names of the suites that will execute the specified tests.")
 
     parser.add_option("--includeWithAnyTags", action="append", dest="include_with_any_tags",
                       metavar="TAG1,TAG2",
@@ -118,20 +85,20 @@ def parse_command_line():
                             " run."))
 
     parser.add_option("-n", action="store_const", const="tests", dest="dry_run",
-                      help=("Output the tests that would be run."))
+                      help="Outputs the tests that would be run.")
 
     # TODO: add support for --dryRun=commands
     parser.add_option("--dryRun", type="choice", action="store", dest="dry_run",
                       choices=("off", "tests"), metavar="MODE",
-                      help=("Instead of running the tests, output the tests that would be run"
+                      help=("Instead of running the tests, outputs the tests that would be run"
                             " (if MODE=tests). Defaults to MODE=%default."))
 
     parser.add_option("-j", "--jobs", type="int", dest="jobs", metavar="JOBS",
-                      help=("The number of Job instances to use. Each instance will receive its own"
-                            " MongoDB deployment to dispatch tests to."))
+                      help=("The number of Job instances to use. Each instance will receive its"
+                            " own MongoDB deployment to dispatch tests to."))
 
     parser.add_option("-l", "--listSuites", action="store_true", dest="list_suites",
-                      help="List the names of the suites available to execute.")
+                      help="Lists the names of the suites available to execute.")
 
     parser.add_option("--mongo", dest="mongo_executable", metavar="PATH",
                       help="The path to the mongo shell executable for resmoke.py to use.")
@@ -139,38 +106,41 @@ def parse_command_line():
     parser.add_option("--mongod", dest="mongod_executable", metavar="PATH",
                       help="The path to the mongod executable for resmoke.py to use.")
 
-    parser.add_option("--mongodSetParameters", dest="mongod_parameters",
+    parser.add_option("--mongodSetParameters", dest="mongod_set_parameters",
                       metavar="{key1: value1, key2: value2, ..., keyN: valueN}",
-                      help=("Pass one or more --setParameter options to all mongod processes"
+                      help=("Passes one or more --setParameter options to all mongod processes"
                             " started by resmoke.py. The argument is specified as bracketed YAML -"
                             " i.e. JSON with support for single quoted and unquoted keys."))
 
     parser.add_option("--mongos", dest="mongos_executable", metavar="PATH",
                       help="The path to the mongos executable for resmoke.py to use.")
 
-    parser.add_option("--mongosSetParameters", dest="mongos_parameters",
+    parser.add_option("--mongosSetParameters", dest="mongos_set_parameters",
                       metavar="{key1: value1, key2: value2, ..., keyN: valueN}",
-                      help=("Pass one or more --setParameter options to all mongos processes"
+                      help=("Passes one or more --setParameter options to all mongos processes"
                             " started by resmoke.py. The argument is specified as bracketed YAML -"
                             " i.e. JSON with support for single quoted and unquoted keys."))
 
     parser.add_option("--nojournal", action="store_true", dest="no_journal",
-                      help="Disable journaling for all mongod's.")
+                      help="Disables journaling for all mongod's.")
 
     parser.add_option("--nopreallocj", action="store_const", const="off", dest="prealloc_journal",
-                      help="Disable preallocation of journal files for all mongod processes.")
+                      help="Disables preallocation of journal files for all mongod processes.")
 
     parser.add_option("--numClientsPerFixture", type="int", dest="num_clients_per_fixture",
-                      help="Number of clients running tests per fixture")
+                      help="Number of clients running tests per fixture.")
+
+    parser.add_option("--perfReportFile", dest="perf_report_file", metavar="PERF_REPORT",
+                      help="Writes a JSON file with performance test results.")
 
     parser.add_option("--preallocJournal", type="choice", action="store", dest="prealloc_journal",
                       choices=("on", "off"), metavar="ON|OFF",
-                      help=("Enable or disable preallocation of journal files for all mongod"
+                      help=("Enables or disables preallocation of journal files for all mongod"
                             " processes. Defaults to %default."))
 
     parser.add_option("--shellConnString", dest="shell_conn_string",
                       metavar="CONN_STRING",
-                      help="Override the default fixture and connect to an existing MongoDB"
+                      help="Overrides the default fixture and connect to an existing MongoDB"
                            " cluster instead. This is useful for connecting to a MongoDB"
                            " deployment started outside of resmoke.py including one running in a"
                            " debugger.")
@@ -181,7 +151,7 @@ def parse_command_line():
                            " This is useful for connecting to a server running in a debugger.")
 
     parser.add_option("--repeat", type="int", dest="repeat", metavar="N",
-                      help="Repeat the given suite(s) N times, or until one fails.")
+                      help="Repeats the given suite(s) N times, or until one fails.")
 
     parser.add_option("--reportFailureStatus", type="choice", action="store",
                       dest="report_failure_status", choices=("fail", "silentfail"),
@@ -191,7 +161,7 @@ def parse_command_line():
                            " never be silently ignored. Defaults to STATUS=%default.")
 
     parser.add_option("--reportFile", dest="report_file", metavar="REPORT",
-                      help="Write a JSON file with test status and timing information.")
+                      help="Writes a JSON file with test status and timing information.")
 
     parser.add_option("--seed", type="int", dest="seed", metavar="SEED",
                       help=("Seed for the random number generator. Useful in combination with the"
@@ -212,38 +182,38 @@ def parse_command_line():
                       help="The write mode used by the mongo shell.")
 
     parser.add_option("--shuffle", action="store_const", const="on", dest="shuffle",
-                      help=("Randomize the order in which tests are executed. This is equivalent"
+                      help=("Randomizes the order in which tests are executed. This is equivalent"
                             " to specifying --shuffleMode=on."))
 
     parser.add_option("--shuffleMode", type="choice", action="store", dest="shuffle",
                       choices=("on", "off", "auto"), metavar="ON|OFF|AUTO",
-                      help=("Control whether to randomize the order in which tests are executed."
+                      help=("Controls whether to randomize the order in which tests are executed."
                             " Defaults to auto when not supplied. auto enables randomization in"
                             " all cases except when the number of jobs requested is 1."))
 
     parser.add_option("--staggerJobs", type="choice", action="store", dest="stagger_jobs",
                       choices=("on", "off"), metavar="ON|OFF",
-                      help=("Enable or disable the stagger of launching resmoke jobs."
+                      help=("Enables or disables the stagger of launching resmoke jobs."
                             " Defaults to %default."))
 
     parser.add_option("--storageEngine", dest="storage_engine", metavar="ENGINE",
                       help="The storage engine used by dbtests and jstests.")
 
-    parser.add_option("--storageEngineCacheSizeGB", dest="storage_engine_cache_size",
-                      metavar="CONFIG", help="Set the storage engine cache size configuration"
-                      " setting for all mongod's.")
+    parser.add_option("--storageEngineCacheSizeGB", dest="storage_engine_cache_size_gb",
+                      metavar="CONFIG", help="Sets the storage engine cache size configuration"
+                                             " setting for all mongod's.")
 
     parser.add_option("--tagFile", dest="tag_file", metavar="OPTIONS",
                       help="A YAML file that associates tests and tags.")
 
     parser.add_option("--wiredTigerCollectionConfigString", dest="wt_coll_config", metavar="CONFIG",
-                      help="Set the WiredTiger collection configuration setting for all mongod's.")
+                      help="Sets the WiredTiger collection configuration setting for all mongod's.")
 
     parser.add_option("--wiredTigerEngineConfigString", dest="wt_engine_config", metavar="CONFIG",
-                      help="Set the WiredTiger engine configuration setting for all mongod's.")
+                      help="Sets the WiredTiger engine configuration setting for all mongod's.")
 
     parser.add_option("--wiredTigerIndexConfigString", dest="wt_index_config", metavar="CONFIG",
-                      help="Set the WiredTiger index configuration setting for all mongod's.")
+                      help="Sets the WiredTiger index configuration setting for all mongod's.")
 
     parser.add_option("--executor", dest="executor_file",
                       help="OBSOLETE: Superceded by --suites; specify --suites=SUITE path/to/test"
@@ -257,22 +227,68 @@ def parse_command_line():
     parser.add_option_group(evergreen_options)
 
     evergreen_options.add_option("--distroId", dest="distro_id", metavar="DISTRO_ID",
-                                 help=("Set the identifier for the Evergreen distro running the"
+                                 help=("Sets the identifier for the Evergreen distro running the"
+                                       " tests."))
+
+    evergreen_options.add_option("--executionNumber", type="int", dest="execution_number",
+                                 metavar="EXECUTION_NUMBER",
+                                 help=("Sets the number for the Evergreen execution running the"
+                                       " tests."))
+
+    evergreen_options.add_option("--gitRevision", dest="git_revision", metavar="GIT_REVISION",
+                                 help=("Sets the git revision for the Evergreen task running the"
                                        " tests."))
 
     evergreen_options.add_option("--patchBuild", action="store_true", dest="patch_build",
-                                 help=("Indicate that the Evergreen task running the tests is a"
+                                 help=("Indicates that the Evergreen task running the tests is a"
                                        " patch build."))
 
+    evergreen_options.add_option("--projectName", dest="project_name", metavar="PROJECT_NAME",
+                                 help=("Sets the name of the Evergreen project running the tests."
+                                       ))
+
     evergreen_options.add_option("--taskName", dest="task_name", metavar="TASK_NAME",
-                                 help="Set the name of the Evergreen task running the tests.")
+                                 help="Sets the name of the Evergreen task running the tests.")
 
     evergreen_options.add_option("--taskId", dest="task_id", metavar="TASK_ID",
-                                 help="Set the Id of the Evergreen task running the tests.")
+                                 help="Sets the Id of the Evergreen task running the tests.")
 
     evergreen_options.add_option("--variantName", dest="variant_name", metavar="VARIANT_NAME",
-                                 help=("Set the name of the Evergreen build variant running the"
+                                 help=("Sets the name of the Evergreen build variant running the"
                                        " tests."))
+
+    benchmark_options = optparse.OptionGroup(
+        parser,
+        title="Benchmark test options",
+        description="Options for running Benchmark tests"
+    )
+
+    parser.add_option_group(benchmark_options)
+
+    benchmark_options.add_option("--benchmarkFilter", type="string", dest="benchmark_filter",
+                                 metavar="BENCHMARK_FILTER",
+                                 help="Regex to filter benchmark tests to run.")
+
+    benchmark_options.add_option("--benchmarkListTests", dest="benchmark_list_tests",
+                                 action="store_true",
+                                 metavar="BENCHMARK_LIST_TESTS",
+                                 help="Lists all benchmark test configurations in each test file.")
+
+    benchmark_min_time_help = (
+        "Minimum time to run each benchmark test for. Use this option instead of "
+        "--benchmarkRepetitions to make a test run for a longer or shorter duration.")
+    benchmark_options.add_option("--benchmarkMinTimeSecs", type="int",
+                                 dest="benchmark_min_time_secs", metavar="BENCHMARK_MIN_TIME",
+                                 help=benchmark_min_time_help)
+
+    benchmark_repetitions_help = (
+        "Set --benchmarkRepetitions=1 if you'd like to run the benchmark tests only once. By "
+        "default, each test is run multiple times to provide statistics on the variance between "
+        "runs; use --benchmarkMinTimeSecs if you'd like to run a test for a longer or shorter "
+        "duration.")
+    benchmark_options.add_option("--benchmarkRepetitions", type="int", dest="benchmark_repetitions",
+                                 metavar="BENCHMARK_REPETITIONS",
+                                 help=benchmark_repetitions_help)
 
     parser.set_defaults(logger_file="console",
                         dry_run="off",
@@ -300,8 +316,30 @@ def validate_options(parser, options, args):
 
     if options.executor_file:
         parser.error("--executor is superseded by --suites; specify --suites={} {} to run the"
-                     "test(s) under those suite configuration(s)"
+                     " test(s) under those suite configuration(s)"
                      .format(options.executor_file, " ".join(args)))
+
+
+def validate_benchmark_options():
+    """
+    Some options are incompatible with benchmark test suites, we error out early if any of
+    these options are specified.
+
+    :return: None
+    """
+
+    if _config.REPEAT > 1:
+        raise optparse.OptionValueError(
+            "--repeat cannot be used with benchmark tests. Please use --benchmarkMinTimeSecs to "
+            "increase the runtime of a single benchmark configuration.")
+
+    if _config.JOBS > 1:
+        raise optparse.OptionValueError(
+            "--jobs=%d cannot be used for benchmark tests. Parallel jobs affect CPU cache access "
+            "patterns and cause additional context switching, which lead to inaccurate benchmark "
+            "results. Please use --jobs=1"
+            % _config.JOBS
+        )
 
 
 def get_logging_config(values):
@@ -309,56 +347,73 @@ def get_logging_config(values):
 
 
 def update_config_vars(values):
-    options = _get_options_config(values.options_file)
-
     config = _config.DEFAULTS.copy()
-    config.update(options)
 
-    values = vars(values)
-    for dest in values:
-        if dest not in DEST_TO_CONFIG:
+    # Override `config` with values from command line arguments.
+    cmdline_vars = vars(values)
+    for cmdline_key in cmdline_vars:
+        if cmdline_key not in _config.DEFAULTS:
+            # Ignore options that don't map to values in config.py
             continue
-        config_var = DEST_TO_CONFIG[dest]
-        if values[dest] is not None:
-            config[config_var] = values[dest]
+        if cmdline_vars[cmdline_key] is not None:
+            config[cmdline_key] = cmdline_vars[cmdline_key]
 
-    _config.BASE_PORT = int(config.pop("basePort"))
-    _config.BUILDLOGGER_URL = config.pop("buildloggerUrl")
-    _config.DBPATH_PREFIX = _expand_user(config.pop("dbpathPrefix"))
-    _config.DBTEST_EXECUTABLE = _expand_user(config.pop("dbtest"))
-    _config.DRY_RUN = config.pop("dryRun")
-    _config.EVERGREEN_DISTRO_ID = config.pop("distroId")
-    _config.EVERGREEN_PATCH_BUILD = config.pop("patchBuild")
-    _config.EVERGREEN_TASK_ID = config.pop("taskId")
-    _config.EVERGREEN_TASK_NAME = config.pop("taskName")
-    _config.EVERGREEN_VARIANT_NAME = config.pop("variantName")
-    _config.EXCLUDE_WITH_ANY_TAGS = _tags_from_list(config.pop("excludeWithAnyTags"))
-    _config.FAIL_FAST = not config.pop("continueOnFailure")
-    _config.INCLUDE_WITH_ANY_TAGS = _tags_from_list(config.pop("includeWithAnyTags"))
+    _config.ARCHIVE_FILE = config.pop("archive_file")
+    _config.ARCHIVE_LIMIT_MB = config.pop("archive_limit_mb")
+    _config.ARCHIVE_LIMIT_TESTS = config.pop("archive_limit_tests")
+    _config.BASE_PORT = int(config.pop("base_port"))
+    _config.BUILDLOGGER_URL = config.pop("buildlogger_url")
+    _config.DBPATH_PREFIX = _expand_user(config.pop("dbpath_prefix"))
+    _config.DBTEST_EXECUTABLE = _expand_user(config.pop("dbtest_executable"))
+    _config.DRY_RUN = config.pop("dry_run")
+    _config.EXCLUDE_WITH_ANY_TAGS = _tags_from_list(config.pop("exclude_with_any_tags"))
+    _config.FAIL_FAST = not config.pop("continue_on_failure")
+    _config.INCLUDE_WITH_ANY_TAGS = _tags_from_list(config.pop("include_with_any_tags"))
     _config.JOBS = config.pop("jobs")
-    _config.MONGO_EXECUTABLE = _expand_user(config.pop("mongo"))
-    _config.MONGOD_EXECUTABLE = _expand_user(config.pop("mongod"))
-    _config.MONGOD_SET_PARAMETERS = config.pop("mongodSetParameters")
-    _config.MONGOS_EXECUTABLE = _expand_user(config.pop("mongos"))
-    _config.MONGOS_SET_PARAMETERS = config.pop("mongosSetParameters")
-    _config.NO_JOURNAL = config.pop("nojournal")
-    _config.NO_PREALLOC_JOURNAL = config.pop("preallocJournal") == "off"
-    _config.NUM_CLIENTS_PER_FIXTURE = config.pop("numClientsPerFixture")
+    _config.MONGO_EXECUTABLE = _expand_user(config.pop("mongo_executable"))
+    _config.MONGOD_EXECUTABLE = _expand_user(config.pop("mongod_executable"))
+    _config.MONGOD_SET_PARAMETERS = config.pop("mongod_set_parameters")
+    _config.MONGOS_EXECUTABLE = _expand_user(config.pop("mongos_executable"))
+    _config.MONGOS_SET_PARAMETERS = config.pop("mongos_set_parameters")
+    _config.NO_JOURNAL = config.pop("no_journal")
+    _config.NO_PREALLOC_JOURNAL = config.pop("prealloc_journal") == "off"
+    _config.NUM_CLIENTS_PER_FIXTURE = config.pop("num_clients_per_fixture")
+    _config.PERF_REPORT_FILE = config.pop("perf_report_file")
     _config.RANDOM_SEED = config.pop("seed")
     _config.REPEAT = config.pop("repeat")
-    _config.REPORT_FAILURE_STATUS = config.pop("reportFailureStatus")
-    _config.REPORT_FILE = config.pop("reportFile")
-    _config.SERVICE_EXECUTOR = config.pop("serviceExecutor")
-    _config.SHELL_READ_MODE = config.pop("shellReadMode")
-    _config.SHELL_WRITE_MODE = config.pop("shellWriteMode")
-    _config.STAGGER_JOBS = config.pop("staggerJobs") == "on"
-    _config.STORAGE_ENGINE = config.pop("storageEngine")
-    _config.STORAGE_ENGINE_CACHE_SIZE = config.pop("storageEngineCacheSizeGB")
-    _config.TAG_FILE = config.pop("tagFile")
-    _config.TRANSPORT_LAYER = config.pop("transportLayer")
-    _config.WT_COLL_CONFIG = config.pop("wiredTigerCollectionConfigString")
-    _config.WT_ENGINE_CONFIG = config.pop("wiredTigerEngineConfigString")
-    _config.WT_INDEX_CONFIG = config.pop("wiredTigerIndexConfigString")
+    _config.REPORT_FAILURE_STATUS = config.pop("report_failure_status")
+    _config.REPORT_FILE = config.pop("report_file")
+    _config.SERVICE_EXECUTOR = config.pop("service_executor")
+    _config.SHELL_READ_MODE = config.pop("shell_read_mode")
+    _config.SHELL_WRITE_MODE = config.pop("shell_write_mode")
+    _config.STAGGER_JOBS = config.pop("stagger_jobs") == "on"
+    _config.STORAGE_ENGINE = config.pop("storage_engine")
+    _config.STORAGE_ENGINE_CACHE_SIZE = config.pop("storage_engine_cache_size_gb")
+    _config.TAG_FILE = config.pop("tag_file")
+    _config.TRANSPORT_LAYER = config.pop("transport_layer")
+
+    # Evergreen options.
+    _config.EVERGREEN_DISTRO_ID = config.pop("distro_id")
+    _config.EVERGREEN_EXECUTION = config.pop("execution_number")
+    _config.EVERGREEN_PATCH_BUILD = config.pop("patch_build")
+    _config.EVERGREEN_PROJECT_NAME = config.pop("project_name")
+    _config.EVERGREEN_REVISION = config.pop("git_revision")
+    _config.EVERGREEN_TASK_ID = config.pop("task_id")
+    _config.EVERGREEN_TASK_NAME = config.pop("task_name")
+    _config.EVERGREEN_VARIANT_NAME = config.pop("variant_name")
+
+    # Wiredtiger options.
+    _config.WT_COLL_CONFIG = config.pop("wt_coll_config")
+    _config.WT_ENGINE_CONFIG = config.pop("wt_engine_config")
+    _config.WT_INDEX_CONFIG = config.pop("wt_index_config")
+
+    # Benchmark options.
+    _config.BENCHMARK_FILTER = config.pop("benchmark_filter")
+    _config.BENCHMARK_LIST_TESTS = config.pop("benchmark_list_tests")
+    benchmark_min_time = config.pop("benchmark_min_time_secs")
+    if benchmark_min_time is not None:
+        _config.BENCHMARK_MIN_TIME = datetime.timedelta(seconds=benchmark_min_time)
+    _config.BENCHMARK_REPETITIONS = config.pop("benchmark_repetitions")
 
     shuffle = config.pop("shuffle")
     if shuffle == "auto":
@@ -369,8 +424,8 @@ def update_config_vars(values):
     else:
         _config.SHUFFLE = shuffle == "on"
 
-    conn_string = config.pop("shellConnString")
-    port = config.pop("shellPort")
+    conn_string = config.pop("shell_conn_string")
+    port = config.pop("shell_port")
 
     if port is not None:
         conn_string = "mongodb://localhost:" + port
@@ -382,73 +437,6 @@ def update_config_vars(values):
         raise optparse.OptionValueError("Unknown option(s): %s" % (config.keys()))
 
 
-def create_test_membership_map(fail_on_missing_selector=False, test_kind=None):
-    """
-    Returns a dict keyed by test name containing all of the suites that will run that test.
-
-    If 'test_kind' is specified then only the mappings for that kind are returned.
-    Since this iterates through every available suite, it should only be run once.
-    """
-
-    test_membership = collections.defaultdict(list)
-    suite_names = get_named_suites()
-    for suite_name in suite_names:
-        try:
-            suite_config = _get_suite_config(suite_name)
-            if test_kind and suite_config.get("test_kind") != test_kind:
-                continue
-            suite = testing.suite.Suite(suite_name, suite_config)
-        except IOError as err:
-            # If unittests.txt or integration_tests.txt aren't there we'll ignore the error because
-            # unittests haven't been built yet (this is highly likely using find interactively).
-            if err.filename in _config.EXTERNAL_SUITE_SELECTORS:
-                if not fail_on_missing_selector:
-                    continue
-            raise
-
-        for testfile in suite.tests:
-            if isinstance(testfile, dict):
-                continue
-            test_membership[testfile].append(suite_name)
-    return test_membership
-
-
-def get_suites(values, args):
-    suite_roots = None
-    if args:
-        # Do not change the execution order of the tests passed as args, unless a tag option is
-        # specified. If an option is specified, then sort the tests for consistent execution order.
-        _config.ORDER_TESTS_BY_NAME = any(tag_filter is not None for
-                                          tag_filter in (_config.EXCLUDE_WITH_ANY_TAGS,
-                                                         _config.INCLUDE_WITH_ANY_TAGS))
-        # Build configuration for list of files to run.
-        suite_roots = _get_suite_roots(args)
-
-    suite_files = values.suite_files.split(",")
-
-    suites = []
-    for suite_filename in suite_files:
-        suite_config = _get_suite_config(suite_filename)
-        if suite_roots:
-            # Override the suite's default test files with those passed in from the command line.
-            suite_config.update(suite_roots)
-        suite = testing.suite.Suite(suite_filename, suite_config)
-        suites.append(suite)
-    return suites
-
-
-def get_named_suites():
-    """
-    Returns the list of suites available to execute.
-    """
-
-    # Skip "with_*server" and "no_server" because they do not define any test files to run.
-    executor_only = set(["with_server", "with_external_server", "no_server"])
-    suite_names = [suite for suite in resmokeconfig.NAMED_SUITES if suite not in executor_only]
-    suite_names.sort()
-    return suite_names
-
-
 def _get_logging_config(pathname):
     """
     Attempts to read a YAML configuration from 'pathname' that describes
@@ -458,51 +446,13 @@ def _get_logging_config(pathname):
     # Named loggers are specified as the basename of the file, without the .yml extension.
     if not utils.is_yaml_file(pathname) and not os.path.dirname(pathname):
         if pathname not in resmokeconfig.NAMED_LOGGERS:
-            raise optparse.OptionValueError("Unknown logger '%s'" % (pathname))
+            raise optparse.OptionValueError("Unknown logger '%s'" % pathname)
         pathname = resmokeconfig.NAMED_LOGGERS[pathname]  # Expand 'pathname' to full path.
 
     if not utils.is_yaml_file(pathname) or not os.path.isfile(pathname):
-        raise optparse.OptionValueError("Expected a logger YAML config, but got '%s'" % (pathname))
+        raise optparse.OptionValueError("Expected a logger YAML config, but got '%s'" % pathname)
 
     return utils.load_yaml_file(pathname).pop("logging")
-
-
-def _get_options_config(pathname):
-    """
-    Attempts to read a YAML configuration from 'pathname' that describes
-    any modifications to global options.
-    """
-
-    if pathname is None:
-        return {}
-
-    return utils.load_yaml_file(pathname).pop("options")
-
-
-def _get_suite_config(pathname):
-    """
-    Attempts to read a YAML configuration from 'pathname' that describes
-    what tests to run and how to run them.
-    """
-    return _get_yaml_config("suite", pathname)
-
-
-def _get_suite_roots(files):
-    return {"selector": {"roots": files}}
-
-
-def _get_yaml_config(kind, pathname):
-    # Named executors or suites are specified as the basename of the file, without the .yml
-    # extension.
-    if not utils.is_yaml_file(pathname) and not os.path.dirname(pathname):
-        if pathname not in resmokeconfig.NAMED_SUITES:
-            raise errors.SuiteNotFound("Unknown %s '%s'" % (kind, pathname))
-        pathname = resmokeconfig.NAMED_SUITES[pathname]  # Expand 'pathname' to full path.
-
-    if not utils.is_yaml_file(pathname) or not os.path.isfile(pathname):
-        raise optparse.OptionValueError("Expected a %s YAML config, but got '%s'"
-                                        % (kind, pathname))
-    return utils.load_yaml_file(pathname)
 
 
 def _expand_user(pathname):

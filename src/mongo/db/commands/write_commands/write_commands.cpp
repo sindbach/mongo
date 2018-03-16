@@ -46,7 +46,7 @@
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/write_concern.h"
@@ -99,13 +99,16 @@ void serializeReply(OperationContext* opCtx,
     if (shouldSkipOutput(opCtx))
         return;
 
-    if (continueOnError && !result.results.empty() &&
-        result.results.back() == ErrorCodes::StaleConfig) {
-        // For ordered:false commands we need to duplicate the StaleConfig result for all ops
-        // after we stopped. See handleError() in write_ops_exec.cpp for more info.
-        auto err = result.results.back();
-        while (result.results.size() < opsInBatch) {
-            result.results.emplace_back(err);
+    if (continueOnError && !result.results.empty()) {
+        const auto& lastResult = result.results.back();
+        if (lastResult == ErrorCodes::StaleConfig ||
+            lastResult == ErrorCodes::CannotImplicitlyCreateCollection) {
+            // For ordered:false commands we need to duplicate these error results for all ops
+            // after we stopped. See handleError() in write_ops_exec.cpp for more info.
+            auto err = result.results.back();
+            while (result.results.size() < opsInBatch) {
+                result.results.emplace_back(err);
+            }
         }
     }
 
@@ -198,8 +201,8 @@ class WriteCommand : public Command {
 public:
     explicit WriteCommand(StringData name) : Command(name) {}
 
-    bool slaveOk() const final {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
+        return AllowedOnSecondary::kNever;
     }
 
     bool shouldAffectCommandCounter() const final {
@@ -242,15 +245,15 @@ class CmdInsert final : public WriteCommand {
 public:
     CmdInsert() : WriteCommand("insert") {}
 
-    void redactForLogging(mutablebson::Document* cmdObj) final {
+    void redactForLogging(mutablebson::Document* cmdObj) const final {
         redactTooLongLog(cmdObj, "documents");
     }
 
-    void help(std::stringstream& help) const final {
-        help << "insert documents";
+    std::string help() const final {
+        return "insert documents";
     }
 
-    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) final {
+    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) const final {
         return checkAuthForWriteCommand(
             opCtx->getClient(), BatchedCommandRequest::BatchType_Insert, request);
     }
@@ -273,15 +276,15 @@ class CmdUpdate final : public WriteCommand {
 public:
     CmdUpdate() : WriteCommand("update") {}
 
-    void redactForLogging(mutablebson::Document* cmdObj) final {
+    void redactForLogging(mutablebson::Document* cmdObj) const final {
         redactTooLongLog(cmdObj, "updates");
     }
 
-    void help(std::stringstream& help) const final {
-        help << "update documents";
+    std::string help() const final {
+        return "update documents";
     }
 
-    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) final {
+    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) const final {
         return checkAuthForWriteCommand(
             opCtx->getClient(), BatchedCommandRequest::BatchType_Update, request);
     }
@@ -300,11 +303,9 @@ public:
     }
 
     Status explain(OperationContext* opCtx,
-                   const std::string& dbname,
-                   const BSONObj& cmdObj,
+                   const OpMsgRequest& opMsgRequest,
                    ExplainOptions::Verbosity verbosity,
                    BSONObjBuilder* out) const final {
-        const auto opMsgRequest(OpMsgRequest::fromDBAndBody(dbname, cmdObj));
         const auto batch = UpdateOp::parse(opMsgRequest);
         uassert(ErrorCodes::InvalidLength,
                 "explained write batches must be of size 1",
@@ -340,15 +341,15 @@ class CmdDelete final : public WriteCommand {
 public:
     CmdDelete() : WriteCommand("delete") {}
 
-    void redactForLogging(mutablebson::Document* cmdObj) final {
+    void redactForLogging(mutablebson::Document* cmdObj) const final {
         redactTooLongLog(cmdObj, "deletes");
     }
 
-    void help(std::stringstream& help) const final {
-        help << "delete documents";
+    std::string help() const final {
+        return "delete documents";
     }
 
-    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) final {
+    Status checkAuthForRequest(OperationContext* opCtx, const OpMsgRequest& request) const final {
         return checkAuthForWriteCommand(
             opCtx->getClient(), BatchedCommandRequest::BatchType_Delete, request);
     }
@@ -367,11 +368,9 @@ public:
     }
 
     Status explain(OperationContext* opCtx,
-                   const std::string& dbname,
-                   const BSONObj& cmdObj,
+                   const OpMsgRequest& opMsgRequest,
                    ExplainOptions::Verbosity verbosity,
                    BSONObjBuilder* out) const final {
-        const auto opMsgRequest(OpMsgRequest::fromDBAndBody(dbname, cmdObj));
         const auto batch = DeleteOp::parse(opMsgRequest);
         uassert(ErrorCodes::InvalidLength,
                 "explained write batches must be of size 1",

@@ -48,7 +48,7 @@ public:
 
     executor::TaskExecutor* getTaskExecutor() const override;
 
-    OldThreadPool* getDbWorkThreadPool() const override;
+    ThreadPool* getDbWorkThreadPool() const override;
 
     OpTimeWithTerm getCurrentTermAndLastCommittedOpTime() override;
 
@@ -61,8 +61,6 @@ public:
 
     std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(OperationContext* opCtx) const override;
 
-    std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(OperationContext* opCtx) const override;
-
     StatusWith<ReplSetConfig> getCurrentConfig() const override;
 
 private:
@@ -70,11 +68,11 @@ private:
                                    MultiApplier::Operations ops,
                                    MultiApplier::ApplyOperationFn applyOperation) override;
 
-    Status _multiSyncApply(MultiApplier::OperationPtrs* ops) override;
-
-    Status _multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
+    Status _multiInitialSyncApply(OperationContext* opCtx,
+                                  MultiApplier::OperationPtrs* ops,
                                   const HostAndPort& source,
-                                  AtomicUInt32* fetchCount) override;
+                                  AtomicUInt32* fetchCount,
+                                  WorkerMultikeyPathInfo* workerMultikeyPathInfo) override;
 
 protected:
     ReplicationCoordinator* getReplicationCoordinator() const;

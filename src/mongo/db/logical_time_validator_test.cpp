@@ -34,15 +34,11 @@
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/logical_time_validator.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/signed_logical_time.h"
 #include "mongo/db/time_proof_service.h"
-#include "mongo/platform/basic.h"
 #include "mongo/s/catalog/dist_lock_manager_mock.h"
 #include "mongo/s/config_server_test_fixture.h"
-#include "mongo/s/grid.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
@@ -79,9 +75,12 @@ protected:
         ConfigServerTestFixture::tearDown();
     }
 
+    /**
+     * Intentionally create a DistLockManagerMock, even though this is a config serfver test in
+     * order to avoid the lock pinger thread from executing and accessing uninitialized state.
+     */
     std::unique_ptr<DistLockManager> makeDistLockManager(
         std::unique_ptr<DistLockCatalog> distLockCatalog) override {
-        invariant(distLockCatalog);
         return stdx::make_unique<DistLockManagerMock>(std::move(distLockCatalog));
     }
 
@@ -179,6 +178,24 @@ TEST_F(LogicalTimeValidatorTest, ShouldGossipLogicalTimeIsFalseUntilKeysAreFound
 
     ASSERT_EQ(true, validator()->shouldGossipLogicalTime());
     ASSERT_OK(validator()->validate(operationContext(), newTime));
+}
+
+TEST_F(LogicalTimeValidatorTest, CanSignTimesAfterReset) {
+    validator()->enableKeyGenerator(operationContext(), true);
+
+    LogicalTime t1(Timestamp(10, 0));
+    auto newTime = validator()->trySignLogicalTime(t1);
+
+    ASSERT_EQ(t1.asTimestamp(), newTime.getTime().asTimestamp());
+    ASSERT_TRUE(newTime.getProof());
+
+    validator()->resetKeyManagerCache();
+
+    LogicalTime t2(Timestamp(20, 0));
+    auto newTime2 = validator()->trySignLogicalTime(t2);
+
+    ASSERT_EQ(t2.asTimestamp(), newTime2.getTime().asTimestamp());
+    ASSERT_TRUE(newTime2.getProof());
 }
 
 }  // unnamed namespace

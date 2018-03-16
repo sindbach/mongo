@@ -33,22 +33,14 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version_documentation.h"
+#include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/query/query_request.h"
 #include "mongo/util/version.h"
 
 namespace mongo {
-namespace {
-constexpr StringData kVersion32 = "3.2"_sd;
-}  // namespace
 
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersion34;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersion36;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersion40;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersionUpgradingTo36;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersionDowngradingTo34;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersionUpgradingTo40;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersionDowngradingTo36;
-constexpr StringData FeatureCompatibilityVersionCommandParser::kVersionUnset;
+constexpr StringData FeatureCompatibilityVersionCommandParser::kCommandName;
 
 StatusWith<std::string> FeatureCompatibilityVersionCommandParser::extractVersionFromCommand(
     StringData commandName, const BSONObj& cmdObj) {
@@ -68,7 +60,7 @@ StatusWith<std::string> FeatureCompatibilityVersionCommandParser::extractVersion
                               << " in: "
                               << cmdObj
                               << ". See "
-                              << feature_compatibility_version::kDochubLink
+                              << feature_compatibility_version_documentation::kCompatibilityLink
                               << "."};
     }
 
@@ -84,37 +76,25 @@ StatusWith<std::string> FeatureCompatibilityVersionCommandParser::extractVersion
                                 << " in "
                                 << cmdObj
                                 << ". See "
-                                << feature_compatibility_version::kDochubLink
+                                << feature_compatibility_version_documentation::kCompatibilityLink
                                 << ".");
     }
 
     const std::string version = versionElem.String();
 
-    if (version == kVersion32) {
-        return {ErrorCodes::BadValue,
-                str::stream() << "Invalid command argument: '" << kVersion32
-                              << "'. You must downgrade to MongoDB 3.4 to enable "
-                                 "featureCompatibilityVersion 3.2. See "
-                              << feature_compatibility_version::kDochubLink
-                              << "."};
-    }
-
-    if (version != FeatureCompatibilityVersionCommandParser::kVersion40 &&
-        version != FeatureCompatibilityVersionCommandParser::kVersion36 &&
-        version != FeatureCompatibilityVersionCommandParser::kVersion34) {
+    if (version != FeatureCompatibilityVersionParser::kVersion40 &&
+        version != FeatureCompatibilityVersionParser::kVersion36) {
         return {ErrorCodes::BadValue,
                 str::stream() << "Invalid command argument. Expected '"
-                              << FeatureCompatibilityVersionCommandParser::kVersion40
-                              << "', '"
-                              << FeatureCompatibilityVersionCommandParser::kVersion36
+                              << FeatureCompatibilityVersionParser::kVersion40
                               << "' or '"
-                              << FeatureCompatibilityVersionCommandParser::kVersion34
+                              << FeatureCompatibilityVersionParser::kVersion36
                               << "', found "
                               << version
                               << " in: "
                               << cmdObj
                               << ". See "
-                              << feature_compatibility_version::kDochubLink
+                              << feature_compatibility_version_documentation::kCompatibilityLink
                               << "."};
     }
 

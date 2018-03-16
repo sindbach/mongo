@@ -34,20 +34,20 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/background.h"
-#include "mongo/db/catalog/catalog_raii.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/rename_collection.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/scopeguard.h"
 
@@ -78,7 +78,7 @@ mongo::Status mongo::emptyCapped(OperationContext* opCtx, const NamespaceString&
                                     << collectionName.ns());
     }
 
-    if (NamespaceString::virtualized(collectionName.ns())) {
+    if (collectionName.isVirtualized()) {
         return Status(ErrorCodes::IllegalOperation,
                       str::stream() << "Cannot truncate a virtual collection: "
                                     << collectionName.ns());

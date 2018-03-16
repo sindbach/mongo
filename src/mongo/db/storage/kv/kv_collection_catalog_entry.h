@@ -64,7 +64,9 @@ public:
 
     Status removeIndex(OperationContext* opCtx, StringData indexName) final;
 
-    Status prepareForIndexBuild(OperationContext* opCtx, const IndexDescriptor* spec) final;
+    Status prepareForIndexBuild(OperationContext* opCtx,
+                                const IndexDescriptor* spec,
+                                bool isBackgroundSecondaryBuild) final;
 
     void indexBuildSuccess(OperationContext* opCtx, StringData indexName) final;
 
@@ -85,9 +87,7 @@ public:
 
     void addUUID(OperationContext* opCtx, CollectionUUID uuid, Collection* coll) final;
 
-    void removeUUID(OperationContext* opCtx) final;
-
-    bool isEqualToMetadataUUID(OperationContext* opCtx, OptionalCollectionUUID uuid) final;
+    bool isEqualToMetadataUUID(OperationContext* opCtx, CollectionUUID uuid) final;
 
     RecordStore* getRecordStore() {
         return _recordStore.get();

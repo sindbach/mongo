@@ -46,14 +46,15 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/sessions_collection.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_database.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/commands/cluster_commands_helpers.h"
 #include "mongo/s/config_server_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
@@ -121,7 +122,7 @@ BSONObj makeCreateIndexesCmd(const NamespaceString& nss,
     createIndexes.append("createIndexes", nss.coll());
     createIndexes.append("indexes", BSON_ARRAY(index.obj()));
     createIndexes.append("writeConcern", WriteConcernOptions::Majority);
-    return createIndexes.obj();
+    return appendAllowImplicitCreate(createIndexes.obj(), true);
 }
 
 /**
@@ -261,7 +262,7 @@ boost::optional<CollectionType> checkIfAlreadyShardedWithSameOptions(
                             opCtx,
                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                             repl::ReadConcernLevel::kLocalReadConcern,
-                            NamespaceString(CollectionType::ConfigNS),
+                            CollectionType::ConfigNS,
                             BSON("_id" << nss.ns() << "dropped" << false),
                             BSONObj(),
                             1))
@@ -569,7 +570,7 @@ void migrateAndFurtherSplitInitialChunks(OperationContext* opCtx,
         }
 
         ChunkType chunkType;
-        chunkType.setNS(nss.ns());
+        chunkType.setNS(nss);
         chunkType.setMin(chunk->getMin());
         chunkType.setMax(chunk->getMax());
         chunkType.setShard(chunk->getShardId());
@@ -643,11 +644,6 @@ void migrateAndFurtherSplitInitialChunks(OperationContext* opCtx,
 
 boost::optional<UUID> getUUIDFromPrimaryShard(const NamespaceString& nss,
                                               ScopedDbConnection& conn) {
-    // UUIDs were introduced in featureCompatibilityVersion 3.6.
-    if (!serverGlobalParams.featureCompatibility.isSchemaVersion36()) {
-        return boost::none;
-    }
-
     // Obtain the collection's UUID from the primary shard's listCollections response.
     BSONObj res;
     {
@@ -698,7 +694,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -706,8 +702,8 @@ public:
         return Status::OK();
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -718,10 +714,10 @@ public:
         return true;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-             << "directly. Shards a collection. Requires key. Optional unique. Sharding must "
-                "already be enabled for the database";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Shards a collection. Requires key. Optional unique. Sharding must "
+               "already be enabled for the database";
     }
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
@@ -742,10 +738,6 @@ public:
                               << cmdObj,
                 opCtx->getWriteConcern().wMode == WriteConcernOptions::kMajority);
 
-        // Do not allow sharding collections while a featureCompatibilityVersion upgrade or
-        // downgrade is in progress (see SERVER-31231 for details).
-        Lock::ExclusiveLock lk(opCtx->lockState(), FeatureCompatibilityVersion::fcvLock);
-
         const NamespaceString nss(parseNs(dbname, cmdObj));
         auto request = ConfigsvrShardCollectionRequest::parse(
             IDLParserErrorContext("ConfigsvrShardCollectionRequest"), cmdObj);
@@ -755,13 +747,6 @@ public:
         auto const catalogClient = Grid::get(opCtx)->catalogClient();
 
         // Make the distlocks boost::optional so that they can be released by being reset below.
-        // Remove the backwards compatible lock after 3.6 ships.
-        boost::optional<DistLockManager::ScopedDistLock> backwardsCompatibleDbDistLock(
-            uassertStatusOK(
-                catalogClient->getDistLockManager()->lock(opCtx,
-                                                          nss.db() + "-movePrimary",
-                                                          "shardCollection",
-                                                          DistLockManager::kDefaultLockTimeout)));
         boost::optional<DistLockManager::ScopedDistLock> dbDistLock(
             uassertStatusOK(catalogClient->getDistLockManager()->lock(
                 opCtx, nss.db(), "shardCollection", DistLockManager::kDefaultLockTimeout)));
@@ -801,8 +786,7 @@ public:
             // (unless we are in test mode)
             uassert(ErrorCodes::IllegalOperation,
                     "only special collections in the config db may be sharded",
-                    nss.ns() == SessionsCollection::kSessionsFullNS ||
-                        Command::testCommandsEnabled);
+                    nss.ns() == SessionsCollection::kSessionsFullNS || getTestCommandsEnabled());
 
             auto configShard = uassertStatusOK(
                 Grid::get(opCtx)->shardRegistry()->getShard(opCtx, dbType.getPrimary()));
@@ -881,7 +865,7 @@ public:
 
         // Step 6. Actually shard the collection.
         catalogManager->shardCollection(opCtx,
-                                        nss.ns(),
+                                        nss,
                                         uuid,
                                         shardKeyPattern,
                                         *request.getCollation(),
@@ -900,7 +884,6 @@ public:
         // Free the distlocks to allow the splits and migrations below to proceed.
         collDistLock.reset();
         dbDistLock.reset();
-        backwardsCompatibleDbDistLock.reset();
 
         // Step 7. Migrate initial chunks to distribute them across shards.
         migrateAndFurtherSplitInitialChunks(

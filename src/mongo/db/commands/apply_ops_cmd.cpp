@@ -50,7 +50,6 @@
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
@@ -163,13 +162,6 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
 
             bool opHasUUIDs = operationContainsUUID(opObj);
 
-            if (serverGlobalParams.featureCompatibility.getVersion() ==
-                ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo34) {
-                uassert(ErrorCodes::OplogOperationUnsupported,
-                        "applyOps with UUID requires upgrading to FeatureCompatibilityVersion 3.6",
-                        !opHasUUIDs);
-            }
-
             // If the op uses any UUIDs at all then the user must possess extra privileges.
             if (opHasUUIDs && ret == OplogApplicationValidity::kOk)
                 ret = OplogApplicationValidity::kNeedsUseUUID;
@@ -202,22 +194,22 @@ class ApplyOpsCmd : public BasicCommand {
 public:
     ApplyOpsCmd() : BasicCommand("applyOps") {}
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "internal (sharding)\n{ applyOps : [ ] , preCondition : [ { ns : ... , q : ... , "
-                "res : ... } ] }";
+    std::string help() const override {
+        return "internal (sharding)\n{ applyOps : [ ] , preCondition : [ { ns : ... , q : ... , "
+               "res : ... } ] }";
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const std::string& dbname,
-                                 const BSONObj& cmdObj) override {
+                                 const BSONObj& cmdObj) const override {
         OplogApplicationValidity validity = validateApplyOpsCommand(cmdObj);
         return OplogApplicationChecks::checkAuthForCommand(opCtx, dbname, cmdObj, validity);
     }
@@ -253,7 +245,7 @@ public:
             repl::OplogApplication::Mode::kApplyOpsCmd;  // the default mode.
         std::string oplogApplicationModeString;
         status = bsonExtractStringField(
-            cmdObj, ApplyOps::kOplogApplicationModeFieldName, &oplogApplicationModeString);
+            cmdObj, repl::ApplyOps::kOplogApplicationModeFieldName, &oplogApplicationModeString);
 
         if (status.isOK()) {
             auto modeSW = repl::OplogApplication::parseMode(oplogApplicationModeString);
@@ -261,20 +253,22 @@ public:
                 // Unable to parse the mode argument.
                 return CommandHelpers::appendCommandStatus(
                     result,
-                    modeSW.getStatus().withContext(str::stream() << "Could not parse " +
-                                                       ApplyOps::kOplogApplicationModeFieldName));
+                    modeSW.getStatus().withContext(
+                        str::stream()
+                        << "Could not parse " + repl::ApplyOps::kOplogApplicationModeFieldName));
             }
             oplogApplicationMode = modeSW.getValue();
         } else if (status != ErrorCodes::NoSuchKey) {
             // NoSuchKey means the user did not supply a mode.
             return CommandHelpers::appendCommandStatus(
                 result,
-                status.withContext(str::stream() << "Could not parse out "
-                                                 << ApplyOps::kOplogApplicationModeFieldName));
+                status.withContext(str::stream()
+                                   << "Could not parse out "
+                                   << repl::ApplyOps::kOplogApplicationModeFieldName));
         }
 
         auto applyOpsStatus = CommandHelpers::appendCommandStatus(
-            result, applyOps(opCtx, dbname, cmdObj, oplogApplicationMode, &result));
+            result, repl::applyOps(opCtx, dbname, cmdObj, oplogApplicationMode, &result));
 
         return applyOpsStatus;
     }

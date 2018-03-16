@@ -51,8 +51,8 @@ public:
         return false;
     }
 
-    bool slaveOk() const final {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const final {

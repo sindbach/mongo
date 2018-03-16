@@ -129,21 +129,17 @@ bool IndexFilterCommand::supportsWriteConcern(const BSONObj& cmd) const {
     return false;
 }
 
-bool IndexFilterCommand::slaveOk() const {
-    return false;
+Command::AllowedOnSecondary IndexFilterCommand::secondaryAllowed(ServiceContext*) const {
+    return AllowedOnSecondary::kOptIn;
 }
 
-bool IndexFilterCommand::slaveOverrideOk() const {
-    return true;
-}
-
-void IndexFilterCommand::help(stringstream& ss) const {
-    ss << helpText;
+std::string IndexFilterCommand::help() const {
+    return helpText;
 }
 
 Status IndexFilterCommand::checkAuthForCommand(Client* client,
                                                const std::string& dbname,
-                                               const BSONObj& cmdObj) {
+                                               const BSONObj& cmdObj) const {
     AuthorizationSession* authzSession = AuthorizationSession::get(client);
     ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 

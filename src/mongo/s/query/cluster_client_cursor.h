@@ -90,6 +90,11 @@ public:
     virtual void detachFromOperationContext() = 0;
 
     /**
+     * Return the current context the cursor is attached to, if any.
+     */
+    virtual OperationContext* getCurrentOperationContext() const = 0;
+
+    /**
      * Returns whether or not this cursor is tailable.
      */
     virtual bool isTailable() const = 0;
@@ -100,9 +105,9 @@ public:
     virtual bool isTailableAndAwaitData() const = 0;
 
     /**
-     * Returns the set of authenticated users when this cursor was created.
+     * Returns the original command object which created this cursor.
      */
-    virtual UserNameIterator getAuthenticatedUsers() const = 0;
+    virtual BSONObj getOriginatingCommand() const = 0;
 
     /**
      * Returns the number of result documents returned so far by this cursor via the next() method.

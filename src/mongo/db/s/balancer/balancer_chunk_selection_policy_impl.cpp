@@ -36,7 +36,6 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj_comparator_interface.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_tags.h"
@@ -86,12 +85,11 @@ StatusWith<DistributionStatus> createCollectionDistributionStatus(
         Grid::get(opCtx)->catalogClient()->getTagsForCollection(opCtx, chunkMgr->getns());
     if (!swCollectionTags.isOK()) {
         return swCollectionTags.getStatus().withContext(
-            str::stream() << "Unable to load tags for collection " << chunkMgr->getns());
+            str::stream() << "Unable to load tags for collection " << chunkMgr->getns().ns());
     }
     const auto& collectionTags = swCollectionTags.getValue();
 
-    DistributionStatus distribution(NamespaceString(chunkMgr->getns()),
-                                    std::move(shardToChunksMap));
+    DistributionStatus distribution(chunkMgr->getns(), std::move(shardToChunksMap));
 
     // Cache the collection tags
     const auto& keyPattern = chunkMgr->getShardKeyPattern().getKeyPattern();
@@ -298,8 +296,8 @@ BalancerChunkSelectionPolicyImpl::selectSpecificChunkToMove(OperationContext* op
     const auto& shardStats = shardStatsStatus.getValue();
 
     auto routingInfoStatus =
-        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
-            opCtx, NamespaceString(chunk.getNS()));
+        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx,
+                                                                                     chunk.getNS());
     if (!routingInfoStatus.isOK()) {
         return routingInfoStatus.getStatus();
     }
@@ -327,8 +325,8 @@ Status BalancerChunkSelectionPolicyImpl::checkMoveAllowed(OperationContext* opCt
     auto shardStats = std::move(shardStatsStatus.getValue());
 
     auto routingInfoStatus =
-        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
-            opCtx, NamespaceString(chunk.getNS()));
+        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx,
+                                                                                     chunk.getNS());
     if (!routingInfoStatus.isOK()) {
         return routingInfoStatus.getStatus();
     }

@@ -45,7 +45,7 @@ executor::TaskExecutor* DataReplicatorExternalStateMock::getTaskExecutor() const
     return taskExecutor;
 }
 
-OldThreadPool* DataReplicatorExternalStateMock::getDbWorkThreadPool() const {
+ThreadPool* DataReplicatorExternalStateMock::getDbWorkThreadPool() const {
     return dbWorkThreadPool;
 }
 
@@ -85,11 +85,6 @@ std::unique_ptr<OplogBuffer> DataReplicatorExternalStateMock::makeInitialSyncOpl
     return stdx::make_unique<OplogBufferBlockingQueue>();
 }
 
-std::unique_ptr<OplogBuffer> DataReplicatorExternalStateMock::makeSteadyStateOplogBuffer(
-    OperationContext* opCtx) const {
-    return stdx::make_unique<OplogBufferBlockingQueue>();
-}
-
 StatusWith<ReplSetConfig> DataReplicatorExternalStateMock::getCurrentConfig() const {
     return replSetConfigResult;
 }
@@ -101,15 +96,14 @@ StatusWith<OpTime> DataReplicatorExternalStateMock::_multiApply(
     return multiApplyFn(opCtx, std::move(ops), applyOperation);
 }
 
-Status DataReplicatorExternalStateMock::_multiSyncApply(MultiApplier::OperationPtrs* ops) {
-    return Status::OK();
-}
+Status DataReplicatorExternalStateMock::_multiInitialSyncApply(
+    OperationContext* opCtx,
+    MultiApplier::OperationPtrs* ops,
+    const HostAndPort& source,
+    AtomicUInt32* fetchCount,
+    WorkerMultikeyPathInfo* workerMultikeyPathInfo) {
 
-Status DataReplicatorExternalStateMock::_multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                                               const HostAndPort& source,
-                                                               AtomicUInt32* fetchCount) {
-
-    return multiInitialSyncApplyFn(ops, source, fetchCount);
+    return multiInitialSyncApplyFn(opCtx, ops, source, fetchCount, workerMultikeyPathInfo);
 }
 
 }  // namespace repl

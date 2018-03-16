@@ -1,10 +1,20 @@
 // Tests that the $changeStream stage returns an error when run against a standalone mongod.
+// @tags: [requires_sharding]
+
 (function() {
     "use strict";
     load("jstests/aggregation/extras/utils.js");  // For assertErrorCode.
     // For supportsMajorityReadConcern().
     load("jstests/multiVersion/libs/causal_consistency_helpers.js");
     load("jstests/libs/feature_compatibility_version.js");  // For checkFCV.
+
+    // Skip this test if running with --nojournal and WiredTiger.
+    if (jsTest.options().noJournal &&
+        (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+        print("Skipping test because running WiredTiger without journaling isn't a valid" +
+              " replica set configuration");
+        return;
+    }
 
     if (!supportsMajorityReadConcern()) {
         jsTestLog("Skipping test since storage engine doesn't support majority read concern.");
@@ -27,22 +37,14 @@
     assertChangeStreamNotSupportedOnConnection(conn);
     assert.eq(0, MongoRunner.stopMongod(conn));
 
-    // Test master/slave deployments.
-    const masterSlaveFixture = new ReplTest("change_stream");
-    const master = masterSlaveFixture.start(true, {enableMajorityReadConcern: ""});
-    assert.writeOK(master.getDB("test").ensure_db_exists.insert({}));
-    assertChangeStreamNotSupportedOnConnection(master);
-
-    const slave = masterSlaveFixture.start(false);
-    // Slaves start in FCV 3.4; we need to wait for it to sync the FCV document from the master
-    // before trying a change stream, or the change stream will fail for the wrong reason.
-    assert.soonNoExcept(() => checkFCV(slave.getDB("admin"), "3.6") || true);
-    assert.soonNoExcept(() => slave.getDB("test").ensure_db_exists.exists());
-    assertChangeStreamNotSupportedOnConnection(slave);
-
     // Test a sharded cluster with standalone shards.
-    const clusterWithStandalones = new ShardingTest(
-        {shards: 2, other: {shardOptions: {enableMajorityReadConcern: ""}}, config: 1});
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+    const clusterWithStandalones = new ShardingTest({
+        shards: 2,
+        other: {shardOptions: {enableMajorityReadConcern: ""}},
+        config: 1,
+        shardAsReplicaSet: false
+    });
     // Make sure the database exists before running any commands.
     const mongosDB = clusterWithStandalones.getDB("test");
     // enableSharding will create the db at the cluster level but not on the shards. $changeStream
@@ -55,4 +57,5 @@
         mongosDB.adminCommand({shardCollection: "test.ensure_db_exists", key: {_id: "hashed"}}));
     assertChangeStreamNotSupportedOnConnection(clusterWithStandalones.shard0);
     assertChangeStreamNotSupportedOnConnection(clusterWithStandalones.shard1);
+    clusterWithStandalones.stop();
 }());

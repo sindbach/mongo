@@ -30,7 +30,7 @@
 
 #include "mongo/db/s/session_catalog_migration_source.h"
 
-#include "mongo/db/catalog/catalog_raii.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
@@ -89,6 +89,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                             oField,                           // o
                             o2Field,                          // o2
                             sessionInfo,                      // session info
+                            boost::none,                      // upsert
                             boost::none,                      // wall clock time
                             statementId,                      // statement id
                             boost::none,   // optime of previous write within same transaction
@@ -113,9 +114,7 @@ repl::OplogEntry makeSentinelOplogEntry(OperationSessionInfo sessionInfo) {
 
 SessionCatalogMigrationSource::SessionCatalogMigrationSource(OperationContext* opCtx,
                                                              NamespaceString ns)
-    : _ns(std::move(ns)),
-      _rollbackIdAtInit(
-          uassertStatusOK(repl::ReplicationProcess::get(opCtx)->getRollbackID(opCtx))) {
+    : _ns(std::move(ns)), _rollbackIdAtInit(repl::ReplicationProcess::get(opCtx)->getRollbackID()) {
     // Sort is not needed for correctness. This is just for making it easier to write deterministic
     // tests.
     Query query;
@@ -325,8 +324,7 @@ repl::OplogEntry SessionCatalogMigrationSource::SessionOplogIterator::getNext(
         if (excep.code() == ErrorCodes::IncompleteTransactionHistory) {
             // Note: no need to check if in replicaSet mode because having an iterator implies
             // oplog exists.
-            auto rollbackId =
-                uassertStatusOK(repl::ReplicationProcess::get(opCtx)->getRollbackID(opCtx));
+            auto rollbackId = repl::ReplicationProcess::get(opCtx)->getRollbackID();
 
             uassert(40656,
                     str::stream() << "rollback detected, rollbackId was " << _initialRollbackId
