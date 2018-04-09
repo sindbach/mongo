@@ -3516,7 +3516,7 @@ Value ExpressionReduce::serialize(bool explain) const {
 Value ExpressionRegexFind::evaluate(const Document& root) const {
     const Value expr = vpOperand[0]->evaluate(root);
     vector<Value> output;
-    uassert(100001,
+    uassert(50770,
             str::stream() << "$regexFind only supports an object as its argument, found: "
                           << typeName(expr.getType()),
             (expr.getType() == BSONType::Object));
@@ -3538,15 +3538,15 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
         } else if (p.first == "options") {
             regexOptions = p.second;
         } else {
-            uasserted(100007, str::stream() << "Unrecognized parameter to $regexFind: " << p.first);
+            uasserted(50771, str::stream() << "Unrecognized parameter to $regexFind: " << p.first);
         }
     }
 
-    uassert(100005,
+    uassert(50772,
             str::stream() << "Missing 'input' parameter to $regexFind.",
             (!textInput.missing()));
 
-    uassert(100002,
+    uassert(50773,
             str::stream() << "Missing 'regex' parameter to $regexFind.",
             (!regexPattern.missing()));
 
@@ -3554,7 +3554,7 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
         return Value(output);
     }
 
-    uassert(100006,
+    uassert(50774,
             str::stream() << "$regexFind requires "
                              "'regex' key containing either string or regex object."
                              "Found: "
@@ -3568,7 +3568,7 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
     if (regexPattern.getType() == BSONType::RegEx) {
         pattern = regexPattern.getRegex();
         flags = regexPattern.getRegexFlags();
-        uassert(100004,
+        uassert(50775,
                 str::stream()
                     << "$regexFind object pattern accepts "
                        "either option(s) being specified as part of 'regex' or in 'options' key."
@@ -3609,7 +3609,7 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
 
     pcrecpp::RE regex(pattern, opt);
     int numCaptures = regex.NumberOfCapturingGroups();
-    uassert(99999,
+    uassert(50776,
             str::stream() << "$regexFind has a limit of maximum of 10 captures. Found: "
                           << numCaptures,
             (numCaptures < 11));

@@ -211,29 +211,32 @@
                      [{"_id": 0, "matches":[]}]); 
 
     // Test: incorrect object parameter
-    testRegexFindAggException(0, "incorrect type", 100001);
+    testRegexFindAggException(0, "incorrect type", 50770);
 
     testRegexFindAggException(0, {input:"$text", regex:"(foo)", misc: 1}, 
-                             100007);
+                              50771);
 
     // Test: regex object more than 10 captures
     testRegexFindAggException(0, {input:"$text", 
                                   regex: /(S)(i)(m)(p)(l)(e) ((Ex)(am)(p)(le))/}, 
-                              99999);
-
-    // Test: no regex key
-    testRegexFindAggException(0, {input:"$text"}, 100002);
+                                50776);
  
     // Test: no input key
-    testRegexFindAggException(0, {regex:/(mp)/}, 100005);
+    testRegexFindAggException(0, {regex:/(mp)/}, 50772);
+
+    // Test: no regex key
+    testRegexFindAggException(0, {input:"$text"}, 50773);
+
+    // Test: no regex key
+    testRegexFindAggException(0, {input:"$text", regex:["incorrect"]}, 50774);
 
     // Test: options specified in 'regex' and in 'options'
     testRegexFindAggException(0, {input:"$text", regex: /(m(p))/i, options: "i"}, 
-                              100004);
+                              50775);
 
     // Test: options specified in 'regex' and in 'options'
     testRegexFindAggException(0, {input:"$text", regex: /(m(p))/i, options: "x"}, 
-                              100004);
+                              50775);
 
     coll.drop();
 
