@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <vector>
 #include <pcrecpp.h>
+#include <regex>
 
 #include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/jsobj.h"
@@ -3517,41 +3518,45 @@ Value ExpressionReduce::serialize(bool explain) const {
 }
 /* ----------------------- ExpressionRegexFind ------------------ */
 Value ExpressionRegexFind::evaluate(const Document& root) const {
-    const Value input = vpOperand[0]->evaluate(root);
+    const Value expr = vpOperand[0]->evaluate(root);
     vector<Value> output;
+    uassert(100001,
+            str::stream() << "$regexFind only supports an object as its argument, found: "
+                          << typeName(expr.getType()),
+            (expr.getType() == BSONType::Object));
 
-    log() << "========= DEBUG: RegexFind ========="; 
-
-    if (input.nullish()){
+    if (expr.nullish()){
         return Value(BSONNULL); 
     }
 
-    uassert(100001,
-            str::stream() << "$regexFind requires a document input, found: "
-                          << typeName(input.getType()),
-            (input.getType() == BSONType::Object));
-
-    Value textInput = input.getDocument().getField("input");
-    Value regexPattern = input.getDocument().getField("regex");
-    Value regexOptions = input.getDocument().getField("options");
-    bool regexGlobalOption = input.getDocument().getField("global").coerceToBool(); 
+    Value textInput; 
+    Value regexPattern; 
+    Value regexOptions;
+    FieldIterator iter = expr.getDocument().fieldIterator();
+    while (iter.more()) {
+        Document::FieldPair p = iter.next();
+        if (p.first=="input"){
+            textInput = p.second;
+        } else if (p.first=="regex"){
+            regexPattern = p.second;
+        } else if (p.first=="options"){
+            regexOptions = p.second;
+        } else {
+            uasserted(100007, 
+                     str::stream() << "Unrecognized parameter to $regexFind: " 
+                                   << p.first);
+        }
+    }
 
     uassert(100005,
-            str::stream() << "$regexFind requires "
-                                "'input' key."
-                                "Missing 'input' key. ",
+            str::stream() << "Missing 'input' parameter to $regexFind.",
             (!textInput.missing()));
 
     uassert(100002,
-            str::stream() << "$regexFind requires "
-                                "'regex' key."
-                                "Missing 'regex' key. ",
+            str::stream() << "Missing 'regex' parameter to $regexFind.",
             (!regexPattern.missing()));
 
-    if (textInput.nullish()){
-        return Value(output); 
-    }
-    if (regexPattern.nullish()){
+    if (textInput.nullish() || regexPattern.nullish()){
         return Value(output); 
     }
 
@@ -3566,10 +3571,6 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
     const char* flags;
 
     if (regexPattern.getType() == BSONType::RegEx) {
-        log() << "regex type";
-        log() << "input: " << textInput.toString(); 
-        log() << "regex: " << regexPattern.toString(); 
-        log() << "options: " << regexOptions.toString();
         pattern = regexPattern.getRegex();
         flags   = regexPattern.getRegexFlags();
         uassert(100004,
@@ -3583,312 +3584,112 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
             flags = regexOptions.toString().c_str();
         }
     } else {
-        log() << "string data";
-        log() << "input: " << textInput.toString(); 
-        log() << "regex: " << regexPattern.toString(); 
-        log() << "options: " << regexOptions.toString();
         pattern = std::string(regexPattern.getString()); 
         flags = regexOptions.toString().c_str();
     }
 
+    bool regexGlobalOption = false;
     pcrecpp::RE_Options opt;
     opt.set_utf8(true);    
     while (*flags){
         switch (*(flags++)) {
             case 'i': // case incase sensitive
-                log() << "set i";
                 opt.set_caseless(true);
                 continue;
             case 'm': // newlines match ^ and $
                 opt.set_multiline(true);
-                log() << "set m";
                 continue;
             case 'x': // extended mode 
                 opt.set_extended(true);
-                log() << "set x";
                 continue;
             case 's': // allows dot to include newline chars
                 opt.set_dotall(true); 
-                log() << "set s";
+                continue;
+            case 'g': // allows global mode
+                regexGlobalOption = true; 
                 continue;
         }
     }
 
-    log() << "using pattern: " << pattern; 
     pcrecpp::RE regex(pattern, opt); 
-
     int numCaptures = regex.NumberOfCapturingGroups();
     uassert(99999,
-            str::stream() << "$regexFind has a limit of 10 number of captures. Found: "
+            str::stream() << "$regexFind has a limit of maximum of 10 captures. Found: "
                           << numCaptures,
             (numCaptures < 11 ));
 
-    string matches[10];
+    string matches[11];
+    pcrecpp::Arg targs[11];
+    const pcrecpp::Arg *args[11];
+    int z = 0;
+    for (z=0; z<12; z++){
+        targs[z] = &matches[z]; 
+        args[z] = &targs[z];
+    }
+
     int consumed = 0; 
     int totalConsumed = 0; 
-    const pcrecpp::Arg *args[10];
-    int z = 0;
-
-    pcrecpp::Arg arg0 = &matches[z];
-    args[z++] = &arg0;
-
-    pcrecpp::Arg arg1 = &matches[z];
-    args[z++] = &arg1;
-
-    pcrecpp::Arg arg2 = &matches[z];
-    args[z++] = &arg2;
-
-    pcrecpp::Arg arg3 = &matches[z];
-    args[z++] = &arg3;
-
-    pcrecpp::Arg arg4 = &matches[z];
-    args[z++] = &arg4;
-
-    pcrecpp::Arg arg5 = &matches[z];
-    args[z++] = &arg5;
-
-    pcrecpp::Arg arg6 = &matches[z];
-    args[z++] = &arg6;
-
-    pcrecpp::Arg arg7 = &matches[z];
-    args[z++] = &arg7;
-
-    pcrecpp::Arg arg8 = &matches[z];
-    args[z++] = &arg8;
-
-    pcrecpp::Arg arg9 = &matches[z];
-    args[z++] = &arg9;
-
     int offset = 0;
     int index = 0;
-    int indexReturned = 0;
-    int matchLength = 0; 
+    int indexUnicode = 0;
+    int totalIndexUnicode = 0; 
+    bool storeCapture = true; 
     std::string inputStr = textInput.getString();
     pcrecpp::StringPiece regexInput(inputStr);
-    if (numCaptures==0 && regex.PartialMatch(inputStr)){
-        log() <<  "modification to pattern ";
-        std::string patternStr(pattern); 
-        patternStr.push_back(')'); 
-        patternStr.insert(0, 1, '('); 
-        log() <<  "converting back to regex: " << patternStr;
-        
-        regex = pcrecpp::RE(patternStr, opt); 
-        numCaptures = regex.NumberOfCapturingGroups();
-        log() << "number of captures after modification now is " << numCaptures << "\n"; 
-        log() <<  "completed";
-        
-    }   
-    log() << "let's do matches " << inputStr; 
-    while (regex.DoMatch(regexInput, pcrecpp::RE::UNANCHORED, &consumed, args, numCaptures)) {
-        regexInput.remove_prefix(consumed);
-        totalConsumed += consumed; 
-        log() << "consumed: " << consumed;
-        log() << "total consumed: " << totalConsumed;
-        log() << "number of captures: " << numCaptures;
+    std::string patternStr(pattern); 
 
+    /* Modifying the input regex is not desirable. 
+       Open to suggestion on how to do this better. An alternative is to use 
+       std::regex_search() which would be cleaner, however currently c++11 
+       doesn't support multiline until c++17. 
+    */
+    if (regex.PartialMatch(regexInput)){
+        patternStr.insert(0, 1, '('); 
+        int insertAt = patternStr.find_first_of("#");
+        if (insertAt > 0 && (opt.extended()==true)){ 
+            patternStr.insert(insertAt, ") ");
+        } else {
+            patternStr.push_back(')');
+        }
+        regex = pcrecpp::RE(patternStr, opt); 
+        if (numCaptures == 0) {
+            storeCapture = false;       
+        }
+        numCaptures++;
+    }
+
+    while (regex.DoMatch(regexInput, pcrecpp::RE::UNANCHORED, &consumed, args, numCaptures)) {
+        totalConsumed += consumed;
         MutableDocument match;
         vector<Value> captures;
-        
-        for (int t = 0; t < numCaptures; t++){
-            log() << "captures: " << matches[t];
-
-            /*Only the first capture per match that we need to record the index for */
-            if (indexReturned == 0) {
-                log()<<"index returned are still 0";
-                index = inputStr.find(matches[t], offset);
-                indexReturned = index;
-                size_t currentCodePointIndex = 0;
-                for (size_t byteIx = 0; static_cast<int>(currentCodePointIndex) <= index;
-                    ++currentCodePointIndex) {
-                //for (size_t byteIx = 0; currentCodePointIndex < inputStr.length();
-                //    ++currentCodePointIndex) {
-                    //if (stringHasTokenAtIndex(byteIx, inputStr, matches[t])) {
-                        log()<< "value code point index: " <<Value(static_cast<int>(currentCodePointIndex));   
-                        /* Only if there is a discrepancy in counting bytes */
-                        if (byteIx!=currentCodePointIndex){
-                            indexReturned = static_cast<int>(currentCodePointIndex);
-                        }
-                    //}
-                    byteIx += getCodePointLength(inputStr[byteIx]);
+        indexUnicode = index = inputStr.find(matches[0], offset);
+        size_t codeByteIx = 0;
+        for (size_t byteIx = 0; static_cast<int>(codeByteIx) <= index; ++codeByteIx) {
+            if (stringHasTokenAtIndex(byteIx, inputStr, matches[0])) {
+                /* Only if there is a discrepancy in counting bytes */
+                if (byteIx!=codeByteIx){
+                    indexUnicode = static_cast<int>(codeByteIx);
                 }
-                matchLength = matches[t].length(); 
             }
-            log() << "idx: " << indexReturned; 
-            captures.push_back(Value(matches[t]));
-        }
-        log() << "offset: "<< offset;
-        log() << "index: "<< index; 
-
-        if (consumed != totalConsumed) { 
-            match.addField("match", Value(inputStr.substr(totalConsumed-index, matchLength))); 
-            match.addField("idx", Value(totalConsumed-indexReturned)); 
-        } else {
-            match.addField("match", Value(inputStr.substr(index, totalConsumed-index)));
-            match.addField("idx", Value(indexReturned)); 
+            byteIx += getCodePointLength(inputStr[byteIx]);
+        }        
+        totalIndexUnicode += indexUnicode;
+        if (storeCapture == true) {
+            for (int t = 1; t < numCaptures; t++){
+                captures.push_back(Value(matches[t]));
+            }
         }
         offset += consumed;
+        match.addField("match", Value(inputStr.substr(index, totalConsumed-index))); 
+        match.addField("idx", Value(indexUnicode)); 
         match.addField("captures", Value(captures));
         output.push_back(match.freezeToValue());
+
         if (!regexGlobalOption) {
             break;
         }
+        regexInput.remove_prefix(consumed);
     }
-    /*
-    const char* regexOptions;
-
-
-    log() << "=====1====";
-    Value options = patternArg.getDocument().getField("options");
-    log() << options.missing();  
-
-    if (!options.missing()) {
-        flags = options.toString().c_str();
-        log() << "options: " << options.toString(); 
-    }
-    log() << "=====1b====";
-
-    if (!*regexOptions==NULL) {
-        uassert(100003,
-                str::stream() << "$regexFind object pattern accepts "
-                                    "either option(s) being specified as part of 'regex'  or in an optional 'options' key."
-                                    "Found regex option(s) specified in both.", 
-                ((!options.missing() && strlen(regexOptions)==0) ||  
-                    (options.missing() && strlen(regexOptions)!=0 ) || 
-                    (options.missing() && strlen(regexOptions)==0) ));
-    }
-    log() << "=====1c====";
-
-    bool optFindAll = false;
-    log() << input; 
-    pcrecpp::RE_Options opt;
-    opt.set_utf8(true);    
-    for (auto&& o : options.toString()) {
-        switch (o) {
-            case 'i': // case incase sensitive
-                log() << "set i";
-                opt.set_caseless(true);
-                continue;
-            case 'm': // newlines match ^ and $
-                opt.set_multiline(true);
-                log() << "set m";
-                continue;
-            case 'x': // extended mode 
-                opt.set_extended(true);
-                log() << "set x";
-                continue;
-            case 's': // allows dot to include newline chars
-                opt.set_dotall(true); 
-                log() << "set s";
-                continue;
-            case 'g': // MongoDB custom regex flag to allow find all matches.
-                optFindAll = true; 
-                log() << "set g";                
-                continue;
-        }
-    }
-
-    log() << "=====2====";
-
-    pcrecpp::RE regex(pattern.getString(), opt); 
-    int numCaptures = regex.NumberOfCapturingGroups();
-    log() << "regex: " << pattern.getString(); 
-    log() << "Number of captures: " << numCaptures ;
-
-    log() << "=====3====";
-
-    string matches[10];
-    int consumed = 0; 
-    int totalConsumed = 0; 
-    const pcrecpp::Arg *args[10];
-    int z = 0;
-
-    pcrecpp::Arg arg0 = &matches[z];
-    args[z++] = &arg0;
-
-    pcrecpp::Arg arg1 = &matches[z];
-    args[z++] = &arg1;
-
-    pcrecpp::Arg arg2 = &matches[z];
-    args[z++] = &arg2;
-
-    pcrecpp::Arg arg3 = &matches[z];
-    args[z++] = &arg3;
-
-    pcrecpp::Arg arg4 = &matches[z];
-    args[z++] = &arg4;
-
-    pcrecpp::Arg arg5 = &matches[z];
-    args[z++] = &arg5;
-
-    pcrecpp::Arg arg6 = &matches[z];
-    args[z++] = &arg6;
-
-    pcrecpp::Arg arg7 = &matches[z];
-    args[z++] = &arg7;
-
-    pcrecpp::Arg arg8 = &matches[z];
-    args[z++] = &arg8;
-
-    pcrecpp::Arg arg9 = &matches[z];
-    args[z++] = &arg9;
-
-    int offset = 0;
-    int index = 0;
-    int matchLength = 0; 
-    std::string inputStr = input.getString();
-    pcrecpp::StringPiece reInput(inputStr);
-    log() << "input: " << inputStr;
-
-    if (numCaptures==0 && regex.PartialMatch(inputStr)){
-        log() <<  "modification to pattern ";
-        std::string patternStr(pattern.getString()); 
-        patternStr.push_back(')'); 
-        patternStr.insert(0, 1, '('); 
-        log() <<  "converting back to regex: " << patternStr;
-        
-        regex = pcrecpp::RE(patternStr, opt); 
-        numCaptures = regex.NumberOfCapturingGroups();
-        log() << "number of captures after modification now is " << numCaptures << "\n"; 
-        log() <<  "completed";
-        
-    }
-    log() << "=====4====";
-
-    while (regex.DoMatch(reInput, pcrecpp::RE::UNANCHORED, &consumed, args, numCaptures)) {
-        reInput.remove_prefix(consumed);
-        totalConsumed += consumed; 
-        log() << "consumed: " << consumed;
-        log() << "total consumed: " << totalConsumed;
-        log() << "number of captures: " << numCaptures;
-
-        MutableDocument match;
-        vector<Value> captures;
-        
-        for (int t = 0; t < numCaptures; t++){
-            log() << "captures: " << matches[t];
-            if (index == 0) {
-                index = inputStr.find(matches[t], offset);
-                matchLength = matches[t].length(); 
-            }
-            log() << "idx: " << index; 
-            captures.push_back(Value(matches[t]));
-        }
-        log() << "offset: "<< offset;
-
-        if (consumed != totalConsumed) { 
-            match.addField("match", Value(inputStr.substr(totalConsumed-index, matchLength))); 
-            match.addField("idx", Value(totalConsumed-index)); 
-        } else {
-            match.addField("match", Value(inputStr.substr(index, totalConsumed-index)));
-            match.addField("idx", Value(index)); 
-        }
-        offset += consumed;
-        match.addField("captures", Value(captures));
-        output.push_back(match.freezeToValue());
-        if (!optFindAll) {
-            break;
-        }
-    } */
     return Value(output);
 }
 
