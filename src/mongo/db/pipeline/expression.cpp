@@ -3542,9 +3542,8 @@ Value ExpressionRegexFind::evaluate(const Document& root) const {
         }
     }
 
-    uassert(50772,
-            str::stream() << "Missing 'input' parameter to $regexFind.",
-            (!textInput.missing()));
+    uassert(
+        50772, str::stream() << "Missing 'input' parameter to $regexFind.", (!textInput.missing()));
 
     uassert(50773,
             str::stream() << "Missing 'regex' parameter to $regexFind.",
