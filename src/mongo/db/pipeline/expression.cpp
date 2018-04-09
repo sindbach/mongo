@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <cstdio>
+#include <pcrecpp.h>
 #include <vector>
 
 #include "mongo/db/commands/feature_compatibility_version_documentation.h"
@@ -3511,7 +3512,187 @@ Value ExpressionReduce::serialize(bool explain) const {
                                     {"initialValue", _initial->serialize(explain)},
                                     {"in", _in->serialize(explain)}}}});
 }
+/* ----------------------- ExpressionRegexFind ------------------ */
+Value ExpressionRegexFind::evaluate(const Document& root) const {
+    const Value expr = vpOperand[0]->evaluate(root);
+    vector<Value> output;
+    uassert(100001,
+            str::stream() << "$regexFind only supports an object as its argument, found: "
+                          << typeName(expr.getType()),
+            (expr.getType() == BSONType::Object));
 
+    if (expr.nullish()) {
+        return Value(BSONNULL);
+    }
+
+    Value textInput;
+    Value regexPattern;
+    Value regexOptions;
+    FieldIterator iter = expr.getDocument().fieldIterator();
+    while (iter.more()) {
+        Document::FieldPair p = iter.next();
+        if (p.first == "input") {
+            textInput = p.second;
+        } else if (p.first == "regex") {
+            regexPattern = p.second;
+        } else if (p.first == "options") {
+            regexOptions = p.second;
+        } else {
+            uasserted(100007, str::stream() << "Unrecognized parameter to $regexFind: " << p.first);
+        }
+    }
+
+    uassert(100005,
+            str::stream() << "Missing 'input' parameter to $regexFind.",
+            (!textInput.missing()));
+
+    uassert(100002,
+            str::stream() << "Missing 'regex' parameter to $regexFind.",
+            (!regexPattern.missing()));
+
+    if (textInput.nullish() || regexPattern.nullish()) {
+        return Value(output);
+    }
+
+    uassert(100006,
+            str::stream() << "$regexFind requires "
+                             "'regex' key containing either string or regex object."
+                             "Found: "
+                          << regexPattern.getType(),
+            (regexPattern.getType() == BSONType::RegEx) ||
+                (regexPattern.getType() == BSONType::String));
+
+    std::string pattern;
+    const char* flags;
+
+    if (regexPattern.getType() == BSONType::RegEx) {
+        pattern = regexPattern.getRegex();
+        flags = regexPattern.getRegexFlags();
+        uassert(100004,
+                str::stream()
+                    << "$regexFind object pattern accepts "
+                       "either option(s) being specified as part of 'regex' or in 'options' key."
+                       "Found regex option(s) specified in both.",
+                ((!regexOptions.missing() && strlen(flags) == 0) ||
+                 (regexOptions.missing() && strlen(flags) != 0) ||
+                 (regexOptions.missing() && strlen(flags) == 0)));
+        if (!regexOptions.missing() && strlen(flags) == 0) {
+            flags = regexOptions.toString().c_str();
+        }
+    } else {
+        pattern = std::string(regexPattern.getString());
+        flags = regexOptions.toString().c_str();
+    }
+
+    bool regexGlobalOption = false;
+    pcrecpp::RE_Options opt;
+    opt.set_utf8(true);
+    while (*flags) {
+        switch (*(flags++)) {
+            case 'i':  // case incase sensitive
+                opt.set_caseless(true);
+                continue;
+            case 'm':  // newlines match ^ and $
+                opt.set_multiline(true);
+                continue;
+            case 'x':  // extended mode
+                opt.set_extended(true);
+                continue;
+            case 's':  // allows dot to include newline chars
+                opt.set_dotall(true);
+                continue;
+            case 'g':  // allows global mode
+                regexGlobalOption = true;
+                continue;
+        }
+    }
+
+    pcrecpp::RE regex(pattern, opt);
+    int numCaptures = regex.NumberOfCapturingGroups();
+    uassert(99999,
+            str::stream() << "$regexFind has a limit of maximum of 10 captures. Found: "
+                          << numCaptures,
+            (numCaptures < 11));
+
+    string matches[11];
+    pcrecpp::Arg targs[11];
+    const pcrecpp::Arg* args[11];
+    int z = 0;
+    for (z = 0; z < 12; z++) {
+        targs[z] = &matches[z];
+        args[z] = &targs[z];
+    }
+
+    int consumed = 0;
+    int totalConsumed = 0;
+    int offset = 0;
+    int index = 0;
+    int indexUnicode = 0;
+    int totalIndexUnicode = 0;
+    bool storeCapture = true;
+    std::string inputStr = textInput.getString();
+    pcrecpp::StringPiece regexInput(inputStr);
+    std::string patternStr(pattern);
+
+    /* Modifying the input regex is not desirable.
+       Open to suggestion on how to do this better. An alternative is to use
+       std::regex_search() which would be cleaner, however currently c++11
+       doesn't support multiline until c++17.
+    */
+    if (regex.PartialMatch(regexInput)) {
+        patternStr.insert(0, 1, '(');
+        int insertAt = patternStr.find_first_of("#");
+        if (insertAt > 0 && (opt.extended() == true)) {
+            patternStr.insert(insertAt, ") ");
+        } else {
+            patternStr.push_back(')');
+        }
+        regex = pcrecpp::RE(patternStr, opt);
+        if (numCaptures == 0) {
+            storeCapture = false;
+        }
+        numCaptures++;
+    }
+
+    while (regex.DoMatch(regexInput, pcrecpp::RE::UNANCHORED, &consumed, args, numCaptures)) {
+        totalConsumed += consumed;
+        MutableDocument match;
+        vector<Value> captures;
+        indexUnicode = index = inputStr.find(matches[0], offset);
+        size_t codeByteIx = 0;
+        for (size_t byteIx = 0; static_cast<int>(codeByteIx) <= index; ++codeByteIx) {
+            if (stringHasTokenAtIndex(byteIx, inputStr, matches[0])) {
+                /* Only if there is a discrepancy in counting bytes */
+                if (byteIx != codeByteIx) {
+                    indexUnicode = static_cast<int>(codeByteIx);
+                }
+            }
+            byteIx += getCodePointLength(inputStr[byteIx]);
+        }
+        totalIndexUnicode += indexUnicode;
+        if (storeCapture == true) {
+            for (int t = 1; t < numCaptures; t++) {
+                captures.push_back(Value(matches[t]));
+            }
+        }
+        offset += consumed;
+        match.addField("match", Value(inputStr.substr(index, totalConsumed - index)));
+        match.addField("idx", Value(indexUnicode));
+        match.addField("captures", Value(captures));
+        output.push_back(match.freezeToValue());
+
+        if (!regexGlobalOption) {
+            break;
+        }
+        regexInput.remove_prefix(consumed);
+    }
+    return Value(output);
+}
+
+REGISTER_EXPRESSION(regexFind, ExpressionRegexFind::parse);
+const char* ExpressionRegexFind::getOpName() const {
+    return "$regexFind";
+}
 /* ------------------------ ExpressionReverseArray ------------------------ */
 
 Value ExpressionReverseArray::evaluate(const Document& root) const {
@@ -4046,20 +4227,8 @@ Value ExpressionSubstrBytes::evaluate(const Document& root) const {
             (pLength.getType() == NumberInt || pLength.getType() == NumberLong ||
              pLength.getType() == NumberDouble));
 
-    const long long signedLower = pLower.coerceToLong();
-
-    uassert(50752,
-            str::stream() << getOpName() << ":  starting index must be non-negative (got: "
-                          << signedLower
-                          << ")",
-            signedLower >= 0);
-
-    const string::size_type lower = static_cast<string::size_type>(signedLower);
-
-    // If the passed length is negative, we should return the rest of the string.
-    const long long signedLength = pLength.coerceToLong();
-    const string::size_type length =
-        signedLength < 0 ? str.length() : static_cast<string::size_type>(signedLength);
+    string::size_type lower = static_cast<string::size_type>(pLower.coerceToLong());
+    string::size_type length = static_cast<string::size_type>(pLength.coerceToLong());
 
     uassert(28656,
             str::stream() << getOpName()
@@ -5457,15 +5626,27 @@ void ExpressionConvert::_doAddDependencies(DepsTracker* deps) const {
     }
 }
 
+namespace {
+bool isTargetTypeSupported(BSONType targetType) {
+    switch (targetType) {
+        case BSONType::NumberDouble:
+        case BSONType::String:
+        case BSONType::jstOID:
+        case BSONType::Bool:
+        case BSONType::Date:
+        case BSONType::NumberInt:
+        case BSONType::NumberLong:
+        case BSONType::NumberDecimal:
+            return true;
+        default:
+            return false;
+    }
+}
+}
+
 BSONType ExpressionConvert::computeTargetType(Value targetTypeName) const {
     BSONType targetType;
     if (targetTypeName.getType() == BSONType::String) {
-        // typeFromName() does not consider "missing" to be a valid type, but we want to accept it,
-        // because it is a possible result of the $type aggregation operator.
-        if (targetTypeName.getStringData() == "missing"_sd) {
-            return BSONType::EOO;
-        }
-
         // This will throw if the type name is invalid.
         targetType = typeFromName(targetTypeName.getString());
     } else if (targetTypeName.numeric()) {
@@ -5485,6 +5666,11 @@ BSONType ExpressionConvert::computeTargetType(Value targetTypeName) const {
                   str::stream() << "$convert's 'to' argument must be a string or number, but is "
                                 << typeName(targetTypeName.getType()));
     }
+
+    // Make sure the type is one of the supported "to" types for $convert.
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "$convert with unsupported 'to' type: " << typeName(targetType),
+            isTargetTypeSupported(targetType));
 
     return targetType;
 }
